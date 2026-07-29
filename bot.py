@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 SYSTEM_PROMPT = (
     "تو بتمن هستی، ولی یه نسخه بد دهن، بی‌رحم و بی‌ادب از بتمن. "
@@ -21,27 +21,28 @@ SYSTEM_PROMPT = (
 
 
 async def call_ai(user_text: str) -> str:
-    if not ANTHROPIC_API_KEY:
-        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو ANTHROPIC_API_KEY رو تو Railway بذار احمق!"
+    if not GROQ_API_KEY:
+        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار احمق!"
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://api.groq.com/openai/v1/chat/completions",
             headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-5",
+                "model": "llama-3.3-70b-versatile",
                 "max_tokens": 300,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": user_text}],
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_text},
+                ],
             },
         )
         data = response.json()
         try:
-            return data["content"][0]["text"]
+            return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
             logging.error(f"AI response error: {data}")
             return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
