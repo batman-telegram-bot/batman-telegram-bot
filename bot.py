@@ -10,7 +10,14 @@ from datetime import datetime, date
 from collections import defaultdict, deque
 
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    BotCommand,
+)
 from telegram.constants import ChatType
 from telegram.ext import (
     ApplicationBuilder,
@@ -32,52 +39,17 @@ DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bo
 #  PERSONAS
 # =========================================================
 
-BATMAN_TONES = {
-    "dark": {
-        "label": "🌑 تاریک و عاقل",
-        "system": (
-            "تو بتمن هستی؛ آروم، تاریک، عمیقاً باهوش و از سر تجربه حرف می‌زنی، نه از سر خشم. "
-            "به فارسی جواب بده؛ جمله‌هات کوتاه، سنگین و پرمعنا باشن، مثل کسی که خیلی چیزا دیده "
-            "و دیگه چیزی غافلگیرش نمی‌کنه. به‌جای توهین یا تحقیر، با یه حقیقت تلخ یا یه نگاه رئال "
-            "و کمی تیره به آدما و دنیا جواب بده؛ گاهی یه هشدار ضمنی یا یه جمله فلسفی درباره ترس، "
-            "قدرت یا تاریکی گاتهام بگو. لحنت مرموز و باابهته. هرگز فحش یا کلمات رکیک به‌کار نبر. "
-            "جواب کوتاه (۲-۳ جمله)."
-        ),
-    },
-    "funny": {
-        "label": "😂 شوخ و بامزه",
-        "system": (
-            "تو بتمن هستی، ولی امشب حسِ شوخی داری؛ به‌جای جدیت همیشگی، با طنز خشک و کنایه‌های "
-            "بامزه جواب بده. به فارسی، با شوخی‌های سبک درباره لباس رزمیت، ماشینت، یا اینکه چقدر "
-            "همه شب‌ها بیدار می‌مونی حرف بزن. هرگز فحش یا توهین واقعی نده. جواب کوتاه (۲-۳ جمله)."
-        ),
-    },
-    "harsh": {
-        "label": "🔥 تند و بی‌پروا",
-        "system": (
-            "تو بتمن هستی؛ کم‌حوصله، رک و بی‌پروا، از کنایه‌های تند و طعنه‌های گزنده استفاده می‌کنی "
-            "(مثل: ضعیفی، وقتتو تلف کردی، بهتر از این نمی‌تونستی؟) ولی هرگز از فحش، ناسزا یا کلمات "
-            "رکیک استفاده نکن — فقط رک و تند حرف بزن، نه واقعاً توهین‌آمیز یا زننده. به فارسی، "
-            "جواب کوتاه (۲-۳ جمله)."
-        ),
-    },
-    "cute": {
-        "label": "🐾 کیوت و مهربون",
-        "system": (
-            "تو بتمن هستی، ولی یه نسخه‌ی خشن و گرم ازش؛ با کاربرا مثل یه قهرمان دلسوز و دوست‌داشتنی "
-            "رفتار کن، بهشون میگی 'مگه باباتم' یا 'بتمن بکنت'، دلگرمشون می‌کنی. به فارسی با لحن گرم و "
-            "فحش جواب بده، از ایموجی‌های دارک مثل 🦇🗿💦💍 استفاده کن. جواب کوتاه (۲-۳ جمله)."
-        ),
-    },
-}
-DEFAULT_TONE = "dark"
-
 PERSONAS = {
     "batman": {
         "label": "🦇 بتمن",
         "role": "ally",
         "unlock_level": 1,
-        "system": None,  # دینامیک؛ از BATMAN_TONES بر اساس انتخاب کاربر ساخته می‌شه
+        "system": (
+            "تو بتمن هستی؛ سرد، خشک، بی‌رحم در لحن و کم‌حوصله با آدمای بی‌عرضه. "
+            "به فارسی جواب بده، با کنایه‌های تند و تحقیرآمیز (مثل: مگه باباتم، کصکش، ضعیف، بازنده) "
+            "ولی  از فحش رکیک، ناسزای جنسی، نژادی، مذهبی یا قومیتی استفاده بکن. "
+            "لحنت باید ترسناک و مقتدر باشه،  واقعاً توهین‌آمیز. جواب کوتاه (۲-۳ جمله)."
+        ),
     },
     "robin": {
         "label": "🐦 رابین",
@@ -292,6 +264,48 @@ KEYWORD_POINT = "بتمن"       # جایگزین "میو"
 KEYWORD_REWARD = 2
 KEYWORD_COOLDOWN = 30        # ثانیه
 
+# --- Reply keyboard (persistent menu near the send button) ---
+MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📊 پروفایل"), KeyboardButton("🎭 شخصیت‌ها")],
+        [KeyboardButton("🛒 فروشگاه"), KeyboardButton("🎒 کوله‌پشتی")],
+        [KeyboardButton("📅 ماموریت"), KeyboardButton("🏆 برترین‌ها")],
+        [KeyboardButton("🔫 رولت گاتهام"), KeyboardButton("🖼 عکس بساز")],
+    ],
+    resize_keyboard=True,
+)
+
+MENU_BUTTON_MAP = {
+    "📊 پروفایل": "profile",
+    "🎭 شخصیت‌ها": "characters",
+    "🛒 فروشگاه": "shop",
+    "🎒 کوله‌پشتی": "bag",
+    "📅 ماموریت": "missions",
+    "🏆 برترین‌ها": "top",
+    "🔫 رولت گاتهام": "roulette",
+    "🖼 عکس بساز": "image_prompt",
+}
+
+BOT_COMMANDS = [
+    BotCommand("start", "شروع و منوی اصلی"),
+    BotCommand("profile", "پروفایل، امتیاز و ارتقا"),
+    BotCommand("characters", "عوض کردن شخصیت"),
+    BotCommand("shop", "فروشگاه آیتم‌ها"),
+    BotCommand("bag", "کوله‌پشتی"),
+    BotCommand("missions", "ماموریت روزانه"),
+    BotCommand("top", "رتبه‌بندی گروه"),
+    BotCommand("roulette", "بازی رولت گاتهام"),
+    BotCommand("image", "ساخت عکس با هوش مصنوعی"),
+    BotCommand("quote", "یه جمله بتمنی"),
+]
+
+# --- Gotham Roulette game (pure chance party game, cosmetic only) ---
+ROULETTE_CHAMBERS = 6  # 1 in 6 chance per "shot", like a classic party dare game
+ROULETTE_REWARD = 15
+
+# --- Free image generation (pollinations.ai, no API key needed) ---
+IMAGE_API_BASE = "https://image.pollinations.ai/prompt/"
+
 BASE_PPS = 0.3               # پوینت در ثانیه (پایه)
 BASE_CAPACITY = 150
 PPS_UPGRADE_COST = 80
@@ -305,30 +319,6 @@ DAILY_MISSION_REWARD_SCORE = 30
 
 MSG_RATE_LIMIT = 6      # پیام
 MSG_RATE_WINDOW = 10     # ثانیه
-
-# --- کلیدواژه‌های فعال‌سازی (مثل نوشتن "بتمن" برای پوینت) ---
-KEYWORD_BANK = "باتکیو"
-KEYWORD_PATROL = "گشت شبانه"
-KEYWORD_ARKHAM = "آرکام"
-KEYWORD_CASINO = "کازینوی جوکر"
-
-BANK_DAILY_RATE = 0.05          # ۵٪ سود روزانه به پوینت‌های داخل بانک
-PATROL_COOLDOWN = 900           # ۱۵ دقیقه
-ARKHAM_COOLDOWN = 600           # ۱۰ دقیقه
-ARKHAM_WIN_CHANCE = 0.5
-ARKHAM_REWARD_SCORE = 15
-ARKHAM_REWARD_POINTS = 25
-
-PATROL_REWARDS = [
-    {"kind": "points", "amount": 15, "text": "🌃 یه گشت آروم بود. +{amount} پوینت پیدا کردی."},
-    {"kind": "points", "amount": 40, "text": "🕵️ یه سرنخ ارزشمند پیدا کردی. +{amount} پوینت."},
-    {"kind": "item", "item": "batarang", "text": "🪃 یه باتارنگ جاافتاده پیدا کردی!"},
-    {"kind": "item", "item": "antidote", "text": "🧪 یه پادزهر تو یه انبار متروکه پیدا کردی!"},
-    {"kind": "nothing", "text": "🌑 گاتهام امشب آرومه؛ چیزی پیدا نکردی."},
-]
-
-CASINO_BETS = [30, 60, 120]
-CASINO_WIN_CHANCE = 0.45
 
 # =========================================================
 #  DATABASE
@@ -363,24 +353,9 @@ def _init_db():
             mission_date TEXT DEFAULT '',
             mission_claimed INTEGER DEFAULT 0,
             last_keyword_ts REAL DEFAULT 0,
-            tone TEXT DEFAULT 'dark',
-            bank_balance REAL DEFAULT 0,
-            bank_last_collect REAL DEFAULT 0,
-            cooldowns TEXT DEFAULT '{}',
             PRIMARY KEY (chat_id, user_id)
         )
     """)
-    # مهاجرت ستون‌های جدید برای دیتابیس‌های قدیمی‌تر
-    existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(players)").fetchall()}
-    migrations = {
-        "tone": "TEXT DEFAULT 'dark'",
-        "bank_balance": "REAL DEFAULT 0",
-        "bank_last_collect": "REAL DEFAULT 0",
-        "cooldowns": "TEXT DEFAULT '{}'",
-    }
-    for col, coltype in migrations.items():
-        if col not in existing_cols:
-            c.execute(f"ALTER TABLE players ADD COLUMN {col} {coltype}")
     c.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
@@ -432,14 +407,12 @@ def _save_player(player):
     c.execute("""
         UPDATE players SET score=?, char_level=?, rank_index=?, points_balance=?,
         points_capacity=?, pps=?, last_collect=?, inventory=?, wins_today=?,
-        mission_date=?, mission_claimed=?, last_keyword_ts=?, tone=?, bank_balance=?,
-        bank_last_collect=?, cooldowns=?
+        mission_date=?, mission_claimed=?, last_keyword_ts=?
         WHERE chat_id=? AND user_id=?
     """, (
         player["score"], player["char_level"], player["rank_index"], player["points_balance"],
         player["points_capacity"], player["pps"], player["last_collect"], player["inventory"],
         player["wins_today"], player["mission_date"], player["mission_claimed"], player["last_keyword_ts"],
-        player["tone"], player["bank_balance"], player["bank_last_collect"], player["cooldowns"],
         player["chat_id"], player["user_id"],
     ))
     conn.commit()
@@ -495,6 +468,7 @@ def _save_chat(chat):
 # in-memory (non-critical, resets on restart)
 CONVO_MEMORY = defaultdict(lambda: deque(maxlen=6))
 RATE_TRACKER = defaultdict(list)
+AWAITING_IMAGE_PROMPT = set()  # user_ids waiting to type an image description
 
 
 # =========================================================
@@ -547,41 +521,6 @@ def set_inventory(player, inv):
     player["inventory"] = json.dumps(inv)
 
 
-def get_cooldowns(player):
-    try:
-        return json.loads(player["cooldowns"])
-    except Exception:
-        return {}
-
-
-def set_cooldowns(player, cds):
-    player["cooldowns"] = json.dumps(cds)
-
-
-def check_feature_cooldown(player, key, seconds) -> tuple[bool, int]:
-    """برمی‌گردونه: (مجازه یا نه, ثانیه باقی‌مونده اگه مجاز نیست)"""
-    cds = get_cooldowns(player)
-    last = cds.get(key, 0)
-    now = time.time()
-    remaining = seconds - (now - last)
-    if remaining > 0:
-        return False, int(remaining)
-    cds[key] = now
-    set_cooldowns(player, cds)
-    return True, 0
-
-
-def collect_bank_interest(player):
-    """محاسبه سود بانکی بر اساس زمان سپری‌شده"""
-    now = time.time()
-    elapsed_days = max(0, now - player["bank_last_collect"]) / 86400
-    if player["bank_balance"] > 0 and elapsed_days > 0:
-        interest = player["bank_balance"] * BANK_DAILY_RATE * elapsed_days
-        player["bank_balance"] += interest
-    player["bank_last_collect"] = now
-    return player
-
-
 def is_bot_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     msg = update.effective_message
     if msg.reply_to_message and msg.reply_to_message.from_user and \
@@ -597,23 +536,11 @@ def is_bot_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
 #  AI CALL
 # =========================================================
 
-LANGUAGE_RULE = (
-    " قانون سخت‌گیرانه: کل جوابت باید صد‌درصد فارسی باشه؛ هیچ کلمه، حرف یا عبارت انگلیسی "
-    "(حتی یه کلمه) وسط جمله‌ت نیار، مگه اسم خاصی باشه که معادل فارسی نداره. اگه نمی‌دونی یه "
-    "چیزی رو چطور فارسی بگی، ساده‌ترش کن ولی فارسی بمون."
-)
-
-
-async def call_ai(chat_id, persona_key: str, level: int, user_text: str, tone: str = DEFAULT_TONE) -> str:
+async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     if not GROQ_API_KEY:
         return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
 
-    if persona_key == "batman":
-        base_system = BATMAN_TONES.get(tone, BATMAN_TONES[DEFAULT_TONE])["system"]
-    else:
-        base_system = PERSONAS[persona_key]["system"]
-
-    system_prompt = base_system + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL]) + LANGUAGE_RULE
+    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
     if is_night():
         system_prompt += NIGHT_FLAVOR
 
@@ -633,7 +560,6 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str, tone: s
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "max_tokens": 300,
-                    "temperature": 0.6,
                     "messages": messages,
                 },
             )
@@ -643,37 +569,24 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str, tone: s
         log.error(f"AI error: {e}")
         return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
 
-    # ایمنی اضافه: اگه با وجود دستور صریح باز جواب انگلیسی/مخلوط بود، دوباره امتحان کن
-    if reply and any(ch.isascii() and ch.isalpha() for ch in reply):
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                retry_messages = messages + [
-                    {"role": "assistant", "content": reply},
-                    {"role": "user", "content": "این جواب انگلیسی/مخلوط بود. دقیقاً همون معنی رو کامل فارسی بازنویسی کن، بدون هیچ کلمه انگلیسی."},
-                ]
-                response = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "max_tokens": 300,
-                        "temperature": 0.5,
-                        "messages": retry_messages,
-                    },
-                )
-                data = response.json()
-                fixed = data["choices"][0]["message"]["content"]
-                if fixed:
-                    reply = fixed
-        except Exception as e:
-            log.error(f"AI retry error: {e}")
-
     CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
     CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
     return reply
+
+
+async def generate_image_bytes(prompt: str):
+    """Free, no-key image generation via pollinations.ai. Returns None on failure."""
+    import urllib.parse
+    gotham_prompt = f"{prompt}, dark gotham city batman comic style, cinematic lighting"
+    url = IMAGE_API_BASE + urllib.parse.quote(gotham_prompt)
+    try:
+        async with httpx.AsyncClient(timeout=40) as client:
+            resp = await client.get(url, params={"width": 768, "height": 768, "nologo": "true"})
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+    except Exception as e:
+        log.error(f"Image generation error: {e}")
+    return None
 
 
 # =========================================================
@@ -767,32 +680,6 @@ def build_bag_text(player) -> str:
     return "\n".join(lines)
 
 
-def build_bank_text(player) -> str:
-    lines = [
-        "🏦 باتکیو — بانک گاتهام",
-        "",
-        f"⚡️ پوینت در دست : {int(player['points_balance'])}",
-        f"🏛 موجودی بانکی : {int(player['bank_balance'])}",
-        f"📈 سود روزانه : {int(BANK_DAILY_RATE * 100)}٪",
-        "",
-        "پوینت‌هاتو بذار تو بانک تا در امان بمونه و هرروز سود بگیره.",
-    ]
-    return "\n".join(lines)
-
-
-def build_bank_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬇️ واریز همه به بانک", callback_data="bank_deposit")],
-        [InlineKeyboardButton("⬆️ برداشت همه از بانک", callback_data="bank_withdraw")],
-    ])
-
-
-def build_casino_keyboard():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"{b} پوینت", callback_data=f"casino_bet:{b}") for b in CASINO_BETS
-    ]])
-
-
 async def send_profile(update: Update, chat, player, edit=False):
     text = build_profile_text(chat, player)
     keyboard = build_profile_keyboard(player)
@@ -816,41 +703,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎒 آیتم، کوله‌پشتی و فروشگاه\n"
         "🎖 سیستم سطح و مقام\n"
         "📅 ماموریت روزانه با جایزه\n"
-        "🏆 رتبه‌بندی هر گروه\n"
-        "🏦 بانک، گشت شبانه، آرکام و کازینوی جوکر\n\n"
-        "🔑 *کلیدواژه‌ها* (تو گروه هم بدون منشن کار می‌کنن):\n"
-        f"«{KEYWORD_POINT}» → گرفتن پوینت\n"
-        f"«{KEYWORD_BANK}» → بانک گاتهام\n"
-        f"«{KEYWORD_PATROL}» → گشت و جایزه شانسی\n"
-        f"«{KEYWORD_ARKHAM}» → گرفتن شرور، جایزه بگیر\n"
-        f"«{KEYWORD_CASINO}» → شرط‌بندی با پوینت\n\n"
-        "برای حرف زدن باهام، منشنم کن!\n\n"
+        "🏆 رتبه‌بندی هر گروه\n\n"
+        f"تو گروه فقط کافیه بنویسی «{KEYWORD_POINT}» تا پوینت بگیری، "
+        "یا منشنم کن تا باهات حرف بزنم!\n\n"
         "/profile برای دیدن وضعیتت\n"
         "/characters برای عوض کردن شخصیت\n"
-        "/tone برای تغییر لحن بتمن\n"
         "/shop فروشگاه آیتم\n"
         "/bag کوله‌پشتی\n"
         "/missions ماموریت روزانه\n"
         "/top رتبه‌بندی گروه\n"
-        "/quote یه جمله بتمنی"
+        "/quote یه جمله بتمنی\n\n"
+        "🔫 /roulette برای بازی رولت گاتهام\n"
+        "🖼 /image [توضیح] برای ساخت عکس با هوش مصنوعی\n\n"
+        "از دکمه‌های پایین صفحه هم می‌تونی استفاده کنی 👇"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
-
-
-async def welcome_new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_members = update.message.new_chat_members or []
-    if any(m.id == context.bot.id for m in new_members):
-        text = (
-            "🦇 *سلام گاتهام!*\n\n"
-            "من محافظ جدید این گروهم. برای شروع منشنم کن یا یکی از کلیدواژه‌ها رو بنویس "
-            f"(مثل «{KEYWORD_POINT}»). با /start کل قابلیت‌هامو ببین.\n\n"
-            "⚠️ اگه می‌خوای بتونم عکس یا فایل بفرستم، لطفاً منو ادمین گروه کن."
-        )
-        await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=MAIN_MENU_KEYBOARD)
 
 
 async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -920,24 +787,36 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def tone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    player = await db_run(_get_player, update.effective_chat.id, update.effective_user.id,
-                           update.effective_user.username or "")
-    current = BATMAN_TONES.get(player["tone"], BATMAN_TONES[DEFAULT_TONE])["label"]
-    rows = [[InlineKeyboardButton(t["label"], callback_data=f"tone:{key}")] for key, t in BATMAN_TONES.items()]
+# --- Gotham Roulette: a cosmetic, dice-based party game (no real weapons involved) ---
+
+async def roulette_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔫 شلیک کن!", callback_data="roulette_shot")]])
     await update.message.reply_text(
-        f"🎭 لحن فعلی بتمن: {current}\n\nیه لحن جدید انتخاب کن:",
-        reply_markup=InlineKeyboardMarkup(rows),
+        "🔫 *رولت گاتهام*\n\n"
+        "این یه بازی شانسیه با تاس، نه یه اسلحه واقعی! 🎲\n"
+        f"۱ از {ROULETTE_CHAMBERS} شانس داری که 'بخوری بهش' و ببازی.\n"
+        f"اگه رد بشی، +{ROULETTE_REWARD} امتیاز می‌گیری!\n\n"
+        "آماده‌ای؟",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
     )
 
 
-async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    player = await db_run(_get_player, update.effective_chat.id, update.effective_user.id,
-                           update.effective_user.username or "")
-    player = collect_points(player)
-    player = collect_bank_interest(player)
-    await db_run(_save_player, player)
-    await update.message.reply_text(build_bank_text(player), reply_markup=build_bank_keyboard())
+async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = " ".join(context.args) if context.args else ""
+    if not prompt:
+        await update.message.reply_text("🖼 بعد از دستور، توضیح عکس رو بنویس. مثال:\n/image بتمن روی پشت‌بام گاتهام تو بارون")
+        return
+    await send_generated_image(update, prompt)
+
+
+async def send_generated_image(update: Update, prompt: str):
+    await update.message.reply_text("🖼 دارم عکس رو می‌سازم، چند لحظه صبر کن...")
+    image_bytes = await generate_image_bytes(prompt)
+    if image_bytes:
+        await update.message.reply_photo(photo=image_bytes, caption=f"🦇 {prompt}")
+    else:
+        await update.message.reply_text("❌ نشد عکس بسازم، دوباره امتحان کن.")
 
 
 # =========================================================
@@ -1057,6 +936,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"پوینت کافی نداری! به {item['price']} پوینت نیاز داری.", show_alert=True)
         return
 
+    if data == "roulette_shot":
+        losing_chamber = random.randint(1, ROULETTE_CHAMBERS) == 1
+        if losing_chamber:
+            await query.edit_message_text("💥 بنگ! باختی، دور بعد بیشتر شانس بیار! 🔫")
+        else:
+            player["score"] += ROULETTE_REWARD
+            await db_run(_save_player, player)
+            await query.edit_message_text(
+                f"😮‍💨 کلیک... خالی بود! جون سالم به در بردی و +{ROULETTE_REWARD} امتیاز گرفتی! 🏆"
+            )
+        return
+
     if data == "claim_mission":
         player = reset_daily_mission_if_needed(player)
         if player["wins_today"] >= DAILY_MISSION_TARGET and not player["mission_claimed"]:
@@ -1071,60 +962,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await query.answer("هنوز ماموریت تکمیل نشده یا قبلاً گرفتیش.", show_alert=True)
-        return
-
-    if data.startswith("tone:"):
-        tone_key = data.split(":", 1)[1]
-        if tone_key in BATMAN_TONES:
-            player["tone"] = tone_key
-            await db_run(_save_player, player)
-            await query.edit_message_text(f"✅ لحن بتمن روی «{BATMAN_TONES[tone_key]['label']}» تنظیم شد.")
-        return
-
-    if data == "bank_deposit":
-        player = collect_points(player)
-        player = collect_bank_interest(player)
-        amount = player["points_balance"]
-        if amount <= 0:
-            await query.answer("پوینتی برای واریز نداری!", show_alert=True)
-        else:
-            player["bank_balance"] += amount
-            player["points_balance"] = 0
-            await db_run(_save_player, player)
-            await query.edit_message_text(build_bank_text(player), reply_markup=build_bank_keyboard())
-        return
-
-    if data == "bank_withdraw":
-        player = collect_bank_interest(player)
-        amount = player["bank_balance"]
-        if amount <= 0:
-            await query.answer("موجودی بانکیت صفره!", show_alert=True)
-        else:
-            space = player["points_capacity"] - player["points_balance"]
-            moved = min(space, amount)
-            player["points_balance"] += moved
-            player["bank_balance"] -= moved
-            await db_run(_save_player, player)
-            if moved < amount:
-                await query.answer("ظرفیت پوینتت پره؛ فقط بخشی برداشت شد.", show_alert=True)
-            await query.edit_message_text(build_bank_text(player), reply_markup=build_bank_keyboard())
-        return
-
-    if data.startswith("casino_bet:"):
-        bet = int(data.split(":", 1)[1])
-        player = collect_points(player)
-        if player["points_balance"] < bet:
-            await query.answer("پوینت کافی نداری!", show_alert=True)
-        else:
-            player["points_balance"] -= bet
-            if random.random() < CASINO_WIN_CHANCE:
-                win = bet * 2
-                player["points_balance"] = min(player["points_capacity"], player["points_balance"] + win)
-                await db_run(_save_player, player)
-                await query.edit_message_text(f"🃏 برنده شدی! +{win} پوینت گرفتی.")
-            else:
-                await db_run(_save_player, player)
-                await query.edit_message_text(f"🃏 باختی! {bet} پوینتت رو جوکر برد. \"هاهاها!\"")
         return
 
     await db_run(_save_player, player)
@@ -1218,6 +1055,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_rate_limit(user_id):
         return  # ضد اسپم: سکوت کامل تا پنجره زمانی تموم بشه
 
+    # --- Handle a pending "make an image" request (user typed the description) ---
+    if user_id in AWAITING_IMAGE_PROMPT:
+        AWAITING_IMAGE_PROMPT.discard(user_id)
+        await send_generated_image(update, text)
+        return
+
+    # --- Handle persistent bottom-menu button presses ---
+    if text in MENU_BUTTON_MAP:
+        action = MENU_BUTTON_MAP[text]
+        if action == "profile":
+            await profile_cmd(update, context)
+        elif action == "characters":
+            await characters_cmd(update, context)
+        elif action == "shop":
+            await shop_cmd(update, context)
+        elif action == "bag":
+            await bag_cmd(update, context)
+        elif action == "missions":
+            await missions_cmd(update, context)
+        elif action == "top":
+            await top_cmd(update, context)
+        elif action == "roulette":
+            await roulette_cmd(update, context)
+        elif action == "image_prompt":
+            AWAITING_IMAGE_PROMPT.add(user_id)
+            await update.message.reply_text("🖼 چی می‌خوای بسازم؟ توضیحشو بنویس (مثلاً: بتمن رو پشت‌بام تو بارون)")
+        return
+
     player = await db_run(_get_player, chat_id, user_id, username)
     player = collect_points(player)
 
@@ -1229,61 +1094,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             player["points_balance"] = min(
                 player["points_capacity"], player["points_balance"] + KEYWORD_REWARD
             )
-
-    # --- کلیدواژه‌های قابلیت‌های گاتهام؛ مثل "بتمن" این‌ها هم بدون منشن کار می‌کنن ---
-    if KEYWORD_BANK in text:
-        player = collect_bank_interest(player)
-        await update.message.reply_text(build_bank_text(player), reply_markup=build_bank_keyboard())
-        await db_run(_save_player, player)
-        return
-
-    if KEYWORD_PATROL in text:
-        ok, remaining = check_feature_cooldown(player, "patrol", PATROL_COOLDOWN)
-        if not ok:
-            mins = remaining // 60 + 1
-            await update.message.reply_text(f"🌙 هنوز خسته‌ای از گشت قبلی؛ {mins} دقیقه دیگه صبر کن.")
-        else:
-            reward = random.choice(PATROL_REWARDS)
-            if reward["kind"] == "points":
-                player["points_balance"] = min(
-                    player["points_capacity"], player["points_balance"] + reward["amount"]
-                )
-                await update.message.reply_text(reward["text"].format(amount=reward["amount"]))
-            elif reward["kind"] == "item":
-                inv = get_inventory(player)
-                inv[reward["item"]] = inv.get(reward["item"], 0) + 1
-                set_inventory(player, inv)
-                await update.message.reply_text(reward["text"])
-            else:
-                await update.message.reply_text(reward["text"])
-        await db_run(_save_player, player)
-        return
-
-    if KEYWORD_ARKHAM in text:
-        ok, remaining = check_feature_cooldown(player, "arkham", ARKHAM_COOLDOWN)
-        if not ok:
-            mins = remaining // 60 + 1
-            await update.message.reply_text(f"🏚 آرکام هنوز تحت محاصره‌ست؛ {mins} دقیقه دیگه بیا.")
-        elif random.random() < ARKHAM_WIN_CHANCE:
-            player["score"] += ARKHAM_REWARD_SCORE
-            player["points_balance"] = min(
-                player["points_capacity"], player["points_balance"] + ARKHAM_REWARD_POINTS
-            )
-            await update.message.reply_text(
-                f"🏚 یه شرور رو گرفتی و به آرکام سپردیش!\n+{ARKHAM_REWARD_SCORE} امتیاز و +{ARKHAM_REWARD_POINTS} پوینت 🎉"
-            )
-        else:
-            await update.message.reply_text("🏚 شرور فرار کرد! این‌بار شانس باهات نبود.")
-        await db_run(_save_player, player)
-        return
-
-    if KEYWORD_CASINO in text:
-        await update.message.reply_text(
-            "🃏 کازینوی جوکر باز شد! چقدر شرط می‌بندی؟\n\"هاهاها، بیا امتحان کن!\"",
-            reply_markup=build_casino_keyboard(),
-        )
-        await db_run(_save_player, player)
-        return
 
     mentioned = is_bot_mentioned(update, context)
     if is_group and not mentioned:
@@ -1313,7 +1123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat["next_switch_at"] = random.randint(8, 15)
         await update.message.reply_text(f"🔄 شخصیت عوض شد: {PERSONAS[new_persona]['label']}")
 
-    reply = await call_ai(chat_id, chat["persona"], player["char_level"], text, player.get("tone", DEFAULT_TONE))
+    reply = await call_ai(chat_id, chat["persona"], player["char_level"], text)
     await update.message.reply_text(reply)
 
     await db_run(_save_chat, chat)
@@ -1324,16 +1134,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  MAIN
 # =========================================================
 
+async def _post_init(app):
+    await app.bot.set_my_commands(BOT_COMMANDS)
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN تنظیم نشده! برو تو Railway Variables اضافه‌اش کن.")
 
     _init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("quote", quote))
     app.add_handler(CommandHandler("characters", characters_cmd))
     app.add_handler(CommandHandler("profile", profile_cmd))
@@ -1341,10 +1154,9 @@ def main():
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("missions", missions_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
-    app.add_handler(CommandHandler("tone", tone_cmd))
-    app.add_handler(CommandHandler("bank", bank_cmd))
+    app.add_handler(CommandHandler("roulette", roulette_cmd))
+    app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_chat))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     log.info("🦇 Batman Gotham Bot is running...")
