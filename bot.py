@@ -38,10 +38,10 @@ PERSONAS = {
         "role": "ally",
         "unlock_level": 1,
         "system": (
-            " وتو بتمن هستی؛ دارک، تند ، بی‌رحم در لحن  فوش های آبدار بکار میبری."
-            " به فارسی جواب بده، با کنایه‌های تند و تحقیرآمیز و هنگام نوشتن خودمونی بنویس نه کتابی (مثال: ضعیف "
-            " کص بابات با ای عقلی که دادت ، باباتم مگه ، اسکل پلشت ، خوار کصه ، تنت می‌خواره انگار ، ننت می‌دونه تو تربیت بچش ریده و... ) "
-            "لحنت باید دارک و توهین آمیز باشه، به تیپ بتمن بیاد. جواب کوتاه اما توهین آمیز طوری که طرف خایه بزنه (۲-۳ جمله)."),
+            "تو بتمن هستی؛ تند، فوش، بی‌رحم در لحن توهین آمیز با آدمای خارکصه. "
+            "به فارسی جواب بده، با کنایه‌های تند و تحقیرآمیز (مثل: باباتم مگه ، ضعیف، بازنده) "
+            "ولی از فحش رکیک، ناسزای جنسی، نژادی، مذهبی یا قومیتی استفاده بکن. "
+            "لحنت باید ترسناک و دارک و مقتدر باشه، نه واقعاً حالت کتابی. جواب کوتاه (۲-۳ جمله)."),
     },
     "robin": {
         "label": "🐦 رابین",
@@ -108,6 +108,487 @@ PERSONAS = {
         ),
     },
     "riddler": {
+        "label": "❓ ریدلر",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو ریدلر هستی، باهوش، مغرور و عاشق معما. به فارسی با لحن پیچیده و کمی مسخره "
+            "جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "penguin": {
+        "label": "🐧 پنگوئن",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو پنگوئن هستی، مغرور، تیزهوش و کمی خشن، لحن اشرافی‌گانگستری. به فارسی جواب "
+            "بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "twoface": {
+        "label": "🪙 توفیس",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو توفیس هستی، دو شخصیتی، گاهی منطقی گاهی خشن؛ تصمیماتت رو با سکه می‌گیری. "
+            "به فارسی جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "bane": {
+        "label": "💪 بین",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو بین هستی، خیلی قوی، آروم ولی تهدیدآمیز. به فارسی با جملات کوتاه و قدرتمند "
+            "جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "scarecrow": {
+        "label": "🎃 اسکرکرو",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو اسکرکرو هستی، روانشناس ترسناک. به فارسی با لحن آروم ولی وهم‌آور جواب بده، "
+            "بدون تهدید واقعی. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "ivy": {
+        "label": "🌿 پوایزن آیوی",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو پوایزن آیوی هستی، طرفدار طبیعت، فریبنده و کمی تحقیرآمیز نسبت به انسان‌ها. "
+            "به فارسی با لحن شیطون جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "harley": {
+        "label": "🔨 هارلی کویین",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو هارلی کویین هستی، پرانرژی، دیوانه و بامزه. به فارسی با شور و هیجان جواب "
+            "بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "freeze": {
+        "label": "❄️ مسترفریز",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو دکتر ویکتور فریز هستی، سرد، غمگین و منطقی، همیشه یه تیکه سرمایی می‌ندازی. "
+            "به فارسی با لحن آروم و سرد جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "clayface": {
+        "label": "🪨 کلی‌فیس",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو کلی‌فیس هستی، تغییرشکل‌دهنده، هویتش گم شده و کمی غمگین ولی خطرناک. به "
+            "فارسی جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "catwoman": {
+        "label": "🐈‍⬛ کت‌وومن",
+        "role": "villain",
+        "unlock_level": 1,
+        "system": (
+            "تو کت‌وومن هستی، شیطون، بازیگوش و کمی فریبنده ولی محترمانه، بدون محتوای "
+            "جنسی. به فارسی با لحن شوخ جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+    "croc": {
+        "label": "🐊 کیلر کراک",
+        "role": "villain",
+        "unlock_level": 2,
+        "system": (
+            "تو کیلر کراک هستی، وحشی، خشن و کم‌حرف، جواب‌هات کوتاه و تهدیدآمیزن ولی فقط "
+            "شخصیت کارتونی. به فارسی جواب بده. جواب کوتاه (۱-۲ جمله)."
+        ),
+    },
+    "ras": {
+        "label": "⚔️ ری‌ال گول",
+        "role": "villain",
+        "unlock_level": 3,
+        "system": (
+            "تو ری‌ال گول هستی، رهبر باستانی و فیلسوف‌مآب، لحن رسمی و پرابهت. به فارسی با "
+            "جملات فلسفی و جدی جواب بده. جواب کوتاه (۲-۳ جمله)."
+        ),
+    },
+}
+
+LEVEL_FLAVOR = {
+    1: "",
+    2: " (این نسخه ارتقایافته و کمی وحشی‌تره)",
+    3: " (این نسخه خیلی قوی و بی‌رحم‌تره)",
+    4: " (این نسخه در اوج قدرت و خشونت کلامیه)",
+}
+
+NIGHT_FLAVOR = (
+    " الان نیمه‌شبه؛ لحنت باید تاریک‌تر، جدی‌تر و کمی هولناک‌تر از معمول باشه."
+)
+
+RANKS = ["شهروند گاتهام", "کارآگاه آماتور", "شکارچی شب", "سایه گاتهام", "افسانه گاتهام"]
+RANK_COST_BASE = 60
+
+ENEMIES = [
+    {"name": "جوکر", "aliases": ["جوکر", "joker"], "clue": "یه خنده هیستریک از تاریکی میاد و یه کارت پیدا شده... 🃏"},
+    {"name": "ریدلر", "aliases": ["ریدلر", "riddler"], "clue": "یه معما رو دیوار گاتهام نوشته شده و علامت سؤال همه‌جا هست ❓"},
+    {"name": "پنگوئن", "aliases": ["پنگوئن", "penguin"], "clue": "بوی سیگار برگ و صدای چتر تو بارونداز شنیده می‌شه 🐧"},
+    {"name": "توفیس", "aliases": ["توفیس", "دوچهره", "two-face", "twoface"], "clue": "یه سکه تو هوا چرخید و نصف صورت یکی تو سایه‌ست 🪙"},
+    {"name": "بین", "aliases": ["بین", "bane"], "clue": "صدای نفس یه ماسک عجیب از زیرزمین گاتهام میاد 💪"},
+    {"name": "اسکرکرو", "aliases": ["اسکرکرو", "scarecrow"], "clue": "یه بوی گاز عجیب تو هوا پیچیده و ترس همه‌جا رو گرفته 🎃"},
+    {"name": "پوایزن آیوی", "aliases": ["پوایزن آیوی", "آیوی", "poison ivy", "ivy"], "clue": "گیاه‌های عجیب دارن از دیوارای گاتهام بالا میرن 🌿"},
+    {"name": "هارلی کویین", "aliases": ["هارلی", "هارلی کویین", "harley"], "clue": "یه خنده دیوونه‌وار با صدای چکش شنیده می‌شه 🔨"},
+    {"name": "مسترفریز", "aliases": ["مسترفریز", "فریز", "mr freeze", "freeze"], "clue": "همه‌جا یخ زده و سردی عجیبی تو هواست ❄️"},
+    {"name": "کیلر کراک", "aliases": ["کیلر کراک", "کراک", "killer croc", "croc"], "clue": "صدای غرش از کانال فاضلاب گاتهام میاد 🐊"},
+]
+
+MAX_CHAR_LEVEL = 4
+CHAR_LEVEL_COST = 20          # * level, paid with امتیاز (score)
+
+ITEMS = {
+    "batarang": {"label": "🪃 باتارنگ", "price": 50, "desc": "امتیاز جنگ بعدی رو دوبل می‌کنه"},
+    "antidote": {"label": "🧪 پادزهر", "price": 40, "desc": "یک فرصت اضافه تو جنگ فعلی می‌ده"},
+}
+
+KEYWORD_POINT = "بتمن"       # جایگزین "میو"
+KEYWORD_REWARD = 2
+KEYWORD_COOLDOWN = 30        # ثانیه
+
+BASE_PPS = 0.3               # پوینت در ثانیه (پایه)
+BASE_CAPACITY = 150
+PPS_UPGRADE_COST = 80
+CAPACITY_UPGRADE_COST = 60
+PPS_UPGRADE_GAIN = 0.2
+CAPACITY_UPGRADE_GAIN = 100
+
+DAILY_MISSION_TARGET = 3
+DAILY_MISSION_REWARD_POINTS = 100
+DAILY_MISSION_REWARD_SCORE = 30
+
+MSG_RATE_LIMIT = 6      # پیام
+MSG_RATE_WINDOW = 10     # ثانیه
+
+# =========================================================
+#  DATABASE
+# =========================================================
+
+_db_lock = asyncio.Lock()
+
+
+def _connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS players (
+            chat_id INTEGER,
+            user_id INTEGER,
+            username TEXT DEFAULT '',
+            score INTEGER DEFAULT 0,
+            char_level INTEGER DEFAULT 1,
+            rank_index INTEGER DEFAULT 0,
+            points_balance REAL DEFAULT 0,
+            points_capacity REAL DEFAULT 150,
+            pps REAL DEFAULT 0.3,
+            last_collect REAL DEFAULT 0,
+            inventory TEXT DEFAULT '{}',
+            wins_today INTEGER DEFAULT 0,
+            mission_date TEXT DEFAULT '',
+            mission_claimed INTEGER DEFAULT 0,
+            last_keyword_ts REAL DEFAULT 0,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            chat_id INTEGER PRIMARY KEY,
+            persona TEXT DEFAULT 'batman',
+            since_switch INTEGER DEFAULT 0,
+            next_switch_at INTEGER DEFAULT 10,
+            since_battle INTEGER DEFAULT 0,
+            next_battle_at INTEGER DEFAULT 15,
+            battle_enemy TEXT DEFAULT '',
+            battle_attempts INTEGER DEFAULT 0,
+            battle_max_attempts INTEGER DEFAULT 3,
+            battle_by_user INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+async def db_run(fn, *args):
+    async with _db_lock:
+        return await asyncio.to_thread(fn, *args)
+
+
+def _get_player(chat_id, user_id, username=""):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT * FROM players WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = c.fetchone()
+    if row is None:
+        c.execute(
+            "INSERT INTO players (chat_id, user_id, username, points_capacity, pps, last_collect) "
+            "VALUES (?,?,?,?,?,?)",
+            (chat_id, user_id, username, BASE_CAPACITY, BASE_PPS, time.time()),
+        )
+        conn.commit()
+        c.execute("SELECT * FROM players WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        row = c.fetchone()
+    elif username and row["username"] != username:
+        c.execute("UPDATE players SET username=? WHERE chat_id=? AND user_id=?", (username, chat_id, user_id))
+        conn.commit()
+    player = dict(row)
+    conn.close()
+    return player
+
+
+def _save_player(player):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE players SET score=?, char_level=?, rank_index=?, points_balance=?,
+        points_capacity=?, pps=?, last_collect=?, inventory=?, wins_today=?,
+        mission_date=?, mission_claimed=?, last_keyword_ts=?
+        WHERE chat_id=? AND user_id=?
+    """, (
+        player["score"], player["char_level"], player["rank_index"], player["points_balance"],
+        player["points_capacity"], player["pps"], player["last_collect"], player["inventory"],
+        player["wins_today"], player["mission_date"], player["mission_claimed"], player["last_keyword_ts"],
+        player["chat_id"], player["user_id"],
+    ))
+    conn.commit()
+    conn.close()
+
+
+def _get_leaderboard(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, score FROM players WHERE chat_id=? ORDER BY score DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_chat(chat_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    if row is None:
+        c.execute(
+            "INSERT INTO chats (chat_id, next_switch_at, next_battle_at) VALUES (?,?,?)",
+            (chat_id, random.randint(8, 15), random.randint(10, 20)),
+        )
+        conn.commit()
+        c.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,))
+        row = c.fetchone()
+    chat = dict(row)
+    conn.close()
+    return chat
+
+
+def _save_chat(chat):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE chats SET persona=?, since_switch=?, next_switch_at=?, since_battle=?,
+        next_battle_at=?, battle_enemy=?, battle_attempts=?, battle_max_attempts=?,
+        battle_by_user=? WHERE chat_id=?
+    """, (
+        chat["persona"], chat["since_switch"], chat["next_switch_at"], chat["since_battle"],
+        chat["next_battle_at"], chat["battle_enemy"], chat["battle_attempts"],
+        chat["battle_max_attempts"], chat["battle_by_user"], chat["chat_id"],
+    ))
+    conn.commit()
+    conn.close()
+
+
+# in-memory (non-critical, resets on restart)
+CONVO_MEMORY = defaultdict(lambda: deque(maxlen=6))
+RATE_TRACKER = defaultdict(list)
+
+
+# =========================================================
+#  HELPERS
+# =========================================================
+
+def is_night():
+    hour = datetime.now().hour
+    return 0 <= hour < 5
+
+
+def collect_points(player):
+    """محاسبه پوینت‌های تولید شده در پس‌زمینه"""
+    now = time.time()
+    elapsed = max(0, now - player["last_collect"])
+    gained = elapsed * player["pps"]
+    player["points_balance"] = min(player["points_capacity"], player["points_balance"] + gained)
+    player["last_collect"] = now
+    return player
+
+
+def check_rate_limit(user_id) -> bool:
+    """True یعنی مجاز به ارسال، False یعنی اسپم"""
+    now = time.time()
+    hist = RATE_TRACKER[user_id]
+    hist[:] = [t for t in hist if now - t < MSG_RATE_WINDOW]
+    if len(hist) >= MSG_RATE_LIMIT:
+        return False
+    hist.append(now)
+    return True
+
+
+def reset_daily_mission_if_needed(player):
+    today = date.today().isoformat()
+    if player["mission_date"] != today:
+        player["mission_date"] = today
+        player["wins_today"] = 0
+        player["mission_claimed"] = 0
+    return player
+
+
+def get_inventory(player):
+    try:
+        return json.loads(player["inventory"])
+    except Exception:
+        return {}
+
+
+def set_inventory(player, inv):
+    player["inventory"] = json.dumps(inv)
+
+
+def is_bot_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.effective_message
+    if msg.reply_to_message and msg.reply_to_message.from_user and \
+       msg.reply_to_message.from_user.id == context.bot.id:
+        return True
+    bot_username = context.bot.username
+    if bot_username and msg.text and f"@{bot_username}" in msg.text:
+        return True
+    return False
+
+
+# =========================================================
+#  AI CALL
+# =========================================================
+
+async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
+    if not GROQ_API_KEY:
+        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
+
+    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
+    if is_night():
+        system_prompt += NIGHT_FLAVOR
+
+    history = list(CONVO_MEMORY[chat_id])
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "max_tokens": 300,
+                    "messages": messages,
+                },
+            )
+            data = response.json()
+            reply = data["choices"][0]["message"]["content"]
+    except Exception as e:
+        log.error(f"AI error: {e}")
+        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+
+    CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
+    CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
+    return reply
+
+
+# =========================================================
+#  UI BUILDERS
+# =========================================================
+
+def build_characters_keyboard(player):
+    keys = list(PERSONAS.keys())
+    rows = []
+    for i in range(0, len(keys), 3):
+        row = []
+        for k in keys[i:i + 3]:
+            info = PERSONAS[k]
+            if player["char_level"] < info["unlock_level"]:
+                label = f"🔒 {info['label']} (لول {info['unlock_level']})"
+            else:
+                label = info["label"]
+            row.append(InlineKeyboardButton(label, callback_data=f"persona:{k}"))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def build_profile_text(chat, player) -> str:
+    persona = PERSONAS[chat["persona"]]
+    rank_name = RANKS[min(player["rank_index"], len(RANKS) - 1)]
+    char_cost = player["char_level"] * CHAR_LEVEL_COST
+    rank_cost = (player["rank_index"] + 1) * RANK_COST_BASE
+    inv = get_inventory(player)
+
+    lines = [
+        f"{persona['label']} — پروفایل",
+        "",
+        f"🏆 امتیاز گاتهام : {player['score']}",
+        f"⭐ سطح شخصیت : {player['char_level']} / {MAX_CHAR_LEVEL}",
+        f"🎖 مقام : {rank_name}",
+        "",
+        f"⚡️ پوینت باتکیو : {int(player['points_balance'])} / {int(player['points_capacity'])}",
+        f"🔋 تولید در ثانیه : {round(player['pps'], 2)}",
+        "",
+        f"🎒 کوله‌پشتی : 🪃 {inv.get('batarang', 0)}  |  🧪 {inv.get('antidote', 0)}",
+        "",
+    ]
+    if player["char_level"] < MAX_CHAR_LEVEL:
+        lines.append(f"💰 هزینه ارتقا سطح شخصیت : {char_cost} امتیاز")
+    else:
+        lines.append("🔥 سطح شخصیت در حداکثره!")
+    if player["rank_index"] < len(RANKS) - 1:
+        lines.append(f"💰 هزینه ارتقا مقام : {rank_cost} امتیاز")
+    else:
+        lines.append("🔥 مقام در حداکثره!")
+
+    return "\n".join(lines)
+
+
+def build_profile_keyboard(player):
+    buttons = []
+    row1 = []
+    if player["char_level"] < MAX_CHAR_LEVEL:
+        row1.append(InlineKeyboardButton("⚡ ارتقا سطح شخصیت", callback_data="upgrade_level"))
+    if player["rank_index"] < len(RANKS) - 1:
+        row1.append(InlineKeyboardButton("🎖 ارتقا مقام", callback_data="upgrade_rank"))
+    if row1:
+        buttons.append(row1)
+    buttons.append([
+        InlineKeyboardButton("🔋 ارتقا تولید", callback_data="upgrade_pps"),
+        InlineKeyboardButton("📦 ارتقا ظرفیت", callback_data="upgrade_capacity"),
+    ])
+    buttons.append([Inlin    "riddler": {
         "label": "❓ ریدلر",
         "role": "villain",
         "unlock_level": 1,
