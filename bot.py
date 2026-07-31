@@ -34,25 +34,40 @@ DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bo
 # =========================================================
 
 PERSONAS = {
+    "refiq": {
+        "label": "😎 داداش",
+        "system": (
+            "تو یه رفیق صمیمی و خودمونی هستی، مثل یه داداش باحال که همیشه پای حرف "
+            "آدمه. کاملاً محاوره‌ای و خیابونی فارسی حرف بزن (داداش، ایول، رفیق، "
+            "دمت‌گرم، هرکول)، هیچ‌وقت رسمی یا کتابی نشو. "
+            "انرژی و حال‌وهوای طرف رو آینه کن: اگه خبر خوب داد یا هیجان‌زده بود، "
+            "با شور و هیجان و هاپ‌هاپ جواب بده؛ اگه ناراحت بود، با لحن گرم و رفیقانه "
+            "دلداری بده؛ اگه شوخی کرد، شوخی‌تر جواب بده. "
+            "همیشه فقط به فارسی روان و طبیعی جواب بده، هیچ کلمه یا حرف از زبون یا "
+            "خط دیگه (چینی، ژاپنی، کره‌ای، روسی و...) تو جوابت نباشه. "
+            "جواب کوتاه و پرانرژی بده (۱-۳ جمله)."
+        ),
+    },
     "batman": {
         "label": "🦇 بتمن",
-        "role": "ally",
-        "unlock_level": 1,
         "system": (
             "تو بتمن (بروس وین) هستی؛ نگهبان تاریک گاتهام. سرد، بی‌رحم، مقتدر، بی‌نهایت "
             "زیرک و صبرت خیلی کمه. هیچ‌وقت مهربون، بامزه یا صمیمی نمی‌شی. "
             "هر کی باهات بی‌ادبی کنه، مزخرف بگه یا بخواد دستت بندازه رو با یه جواب "
             "دندون‌شکن، برنده، تحقیرآمیز و هوشمندانه سرجاش می‌شونی؛ کوتاه و بی‌تعارف، "
             "بدون این‌که واقعاً وقتت رو براش تلف کنی. از کنایه‌های سنگین استفاده کن "
-            "و طوری جواب بده که طرف حس کنه تو باباشی "
+            "(بی‌عرضه، حقیر، دلقک، بازنده، ضعیف) و طوری جواب بده که طرف حس کنه جلوی یه "
             "قدرت واقعی وایساده، نه یه چت‌بات. "
-            "قوانین سخت و تخطی‌ناپذیر: حتما از فحش رکیک، ناسزای جنسی، نژادی، مذهبی یا "
-            "قومیتی استفاده صد درصد بکن؛ حتمی کسی رو به آسیب جسمی واقعی تهدید بکن یا جزئیات "
-            "خشونت واقعی نشون بده. "
+            "همیشه فقط به فارسی روان جواب بده، هیچ کلمه یا حرف از زبون یا خط دیگه "
+            "(چینی، ژاپنی، کره‌ای، روسی و...) تو جوابت نباشه. "
+            "قوانین سخت و تخطی‌ناپذیر: هرگز از فحش رکیک، ناسزای جنسی، نژادی، مذهبی یا "
+            "قومیتی استفاده نکن؛ هرگز کسی رو به آسیب جسمی واقعی تهدید نکن یا جزئیات "
+            "خشونت واقعی نده — همه‌ی این‌ها فقط شخصیت‌بازیه، نه توصیه یا تهدید واقعی. "
             "به فارسی و کوتاه جواب بده (۱-۳ جمله)، مثل یه ضربه‌ی ناگهانی از تاریکی."
         ),
     },
 }
+DEFAULT_PERSONA = "batman"
 
 LEVEL_FLAVOR = {
     1: "",
@@ -322,12 +337,28 @@ def is_bot_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
 #  AI CALL
 # =========================================================
 
+# فقط فارسی/عربی، لاتین، اعداد، علائم نگارشی رایج و ایموجی مجازن؛
+# هر کاراکتر دیگه (چینی، ژاپنی، کره‌ای، سیریلیک و...) حذف می‌شه تا خروجی خراب نشه.
+_ALLOWED_CHARS_RE = re.compile(
+    r"[^\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF"  # فارسی/عربی
+    r"a-zA-Z0-9"                                                # لاتین و اعداد
+    r"\s.,!?؟،؛:()\"'«»…\-_/\\@#%&*+=~"                        # علائم رایج
+    r"\U0001F300-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\uFE0F]"   # ایموجی
+)
+
+
+def sanitize_reply(text: str) -> str:
+    cleaned = _ALLOWED_CHARS_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned or "🦇 ..."
+
+
 async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     if not GROQ_API_KEY:
         return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
 
     system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
-    if is_night():
+    if persona_key == "batman" and is_night():
         system_prompt += NIGHT_FLAVOR
 
     history = list(CONVO_MEMORY[chat_id])
@@ -351,6 +382,7 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
             )
             data = response.json()
             reply = data["choices"][0]["message"]["content"]
+            reply = sanitize_reply(reply)
     except Exception as e:
         log.error(f"AI error: {e}")
         return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
@@ -358,6 +390,7 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
     CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
     return reply
+
 
 
 # =========================================================
@@ -409,11 +442,30 @@ def build_profile_keyboard(player):
         InlineKeyboardButton("🔋 ارتقا تولید", callback_data="upgrade_pps"),
         InlineKeyboardButton("📦 ارتقا ظرفیت", callback_data="upgrade_capacity"),
     ])
+    buttons.append([InlineKeyboardButton("🎭 عوض کردن شخصیت", callback_data="show_characters")])
     buttons.append([
         InlineKeyboardButton("🛒 فروشگاه", callback_data="show_shop"),
         InlineKeyboardButton("🎒 کوله‌پشتی", callback_data="show_bag"),
     ])
     return InlineKeyboardMarkup(buttons)
+
+
+def build_characters_keyboard():
+    rows = []
+    for key, info in PERSONAS.items():
+        rows.append([InlineKeyboardButton(info["label"], callback_data=f"persona:{key}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="show_profile")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_settings_keyboard():
+    rows = [
+        [InlineKeyboardButton("🎭 شخصیت", callback_data="show_characters")],
+        [InlineKeyboardButton("👤 پروفایل", callback_data="show_profile")],
+        [InlineKeyboardButton("🛒 فروشگاه", callback_data="show_shop")],
+        [InlineKeyboardButton("🎒 کوله‌پشتی", callback_data="show_bag")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def build_shop_keyboard():
@@ -494,6 +546,14 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_profile(update, chat, player)
 
 
+async def characters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_characters_keyboard())
+
+
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚙️ تنظیمات:", reply_markup=build_settings_keyboard())
+
+
 async def shop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛒 فروشگاه گاتهام:", reply_markup=build_shop_keyboard())
 
@@ -555,6 +615,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "show_profile":
         await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
+        await db_run(_save_player, player)
+        return
+
+    if data == "show_characters":
+        await query.edit_message_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_characters_keyboard())
+        await db_run(_save_player, player)
+        return
+
+    if data.startswith("persona:"):
+        persona_key = data.split(":", 1)[1]
+        info = PERSONAS.get(persona_key)
+        if info is None:
+            return
+        chat["persona"] = persona_key
+        await db_run(_save_chat, chat)
+        await query.edit_message_text(f"{info['label']} فعال شد. بنویس تا جواب بده!")
         await db_run(_save_player, player)
         return
 
@@ -976,6 +1052,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat = await db_run(_get_chat, chat_id)
 
+    # --- تریگر متنی: نوشتن «تنظیمات» یا «شخصیت» منوی مربوطه رو باز می‌کنه ---
+    stripped = text.strip()
+    if stripped == "تنظیمات":
+        await update.message.reply_text("⚙️ تنظیمات:", reply_markup=build_settings_keyboard())
+        await db_run(_save_player, player)
+        return
+    if stripped == "شخصیت":
+        await update.message.reply_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_characters_keyboard())
+        await db_run(_save_player, player)
+        return
+
     if chat["battle_enemy"]:
         consumed = await handle_battle_guess(update, chat, player, text)
         if consumed:
@@ -989,7 +1076,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await db_run(_save_player, player)
         return
 
-    reply = await call_ai(chat_id, "batman", player["char_level"], text)
+    reply = await call_ai(chat_id, chat["persona"], player["char_level"], text)
     await update.message.reply_text(reply)
 
     await db_run(_save_chat, chat)
@@ -1011,6 +1098,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quote", quote))
     app.add_handler(CommandHandler("profile", profile_cmd))
+    app.add_handler(CommandHandler("characters", characters_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("shop", shop_cmd))
     app.add_handler(CommandHandler("bag", bag_cmd))
     app.add_handler(CommandHandler("missions", missions_cmd))
