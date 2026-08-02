@@ -21,6 +21,8 @@ from telegram.ext import (
     filters,
 )
 
+from games import register_games
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
@@ -623,6 +625,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    register_games(app)
 
     log.info("🦇 Batman Gotham Bot is running...")
     app.run_polling()
