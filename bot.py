@@ -22,6 +22,8 @@ from telegram.ext import (
 )
 
 from games import register_games
+from games_pack2 import register_extra_games
+from games_pack3 import register_extra_lists
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
@@ -624,9 +626,12 @@ def main():
     app.add_handler(CommandHandler("delete", delete_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     register_games(app)
+    register_extra_games(app)
+    register_extra_lists(app)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     log.info("🦇 Batman Gotham Bot is running...")
     app.run_polling()
