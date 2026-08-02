@@ -51,6 +51,15 @@ GAMES_LIST_TEXT = (
     "جدول کلمات — جواب رو مستقیم تو چت بنویس\n"
     "مسابقه تایپ — جمله رو دقیق تایپ کن\n"
     "مافیا بازی — عضویت / مافیا شروع / مافیا پایان\n"
+    "بازی شهر — پایان: پایان شهر\n"
+    "آناگرام — حروف بهم‌ریخته رو کلمه کن\n"
+    "تاس دوتایی — (روی پیام حریف ریپلای کن)\n"
+    "کی می‌دونه — سوال از اعضا\n"
+    "تست هوش — یه سوال آی‌کیو\n"
+    "حدس سال — یه رویداد تاریخی حدس بزن\n"
+    "بینگو — عدد بگو تا کارت گروه پر شه\n"
+    "مبارزه — (روی پیام حریف ریپلای کن)\n"
+    "جایزه روزانه — نشون‌دادن فعال‌ترین نفر\n"
     "لیست بازی‌ها — نمایش دوباره‌ی همین پیام\n"
 )
 
@@ -71,6 +80,13 @@ WORDLE_STATE = {}          # chat_id -> {"word": str, "tries": int}
 CROSSWORD_STATE = {}       # chat_id -> {"answer": str}
 TYPERACE_STATE = {}        # chat_id -> {"sentence": str, "start": float, "done": bool}
 MAFIA_STATE = {}           # chat_id -> {"players": {id: name}, "roles": {id: role}, "started": bool}
+CITYGAME_STATE = defaultdict(list)   # chat_id -> [names used]
+ANAGRAM_STATE = {}         # chat_id -> {"answer": str}
+DUEL_DICE_STATE = {}       # chat_id -> {"p1": id, "scores": {id: int}}
+IQ_STATE = {}              # chat_id -> {"answer": str}
+YEAR_STATE = {}            # chat_id -> {"answer": int, "event": str}
+BINGO_STATE = {}           # chat_id -> {"numbers": set, "called": set}
+DAILY_PRIZE = defaultdict(lambda: defaultdict(int))  # chat_id -> {user_id: msg_count} (in-memory only)
 
 TRIVIA_BANK = [
     {
@@ -98,6 +114,25 @@ WYR_BANK = [
 HANGMAN_WORDS = ["گاتهام", "بتمن", "جوکر", "کامپیوتر", "پایتون"]
 
 WORDLE_WORDS = ["گاتهام", "بتمن", "جوکر", "شمشیر", "پنجره"]
+
+ANAGRAM_BANK = [
+    {"scrambled": "ن ه ا ت گ م", "answer": "گاتهام"},
+    {"scrambled": "ن م ت ب", "answer": "بتمن"},
+    {"scrambled": "ر ک و ج", "answer": "جوکر"},
+]
+
+IQ_BANK = [
+    {"q": "کدوم عدد ادامه‌ی این دنباله‌ست؟ 2, 4, 8, 16, ...", "answer": "32"},
+    {"q": "اگه امروز سه‌شنبه باشه، ۱۰۰ روز دیگه چه روزیه؟ (پاسخ: نام روز)", "answer": "چهارشنبه"},
+]
+
+YEAR_BANK = [
+    {"event": "فتح قسطنطنیه توسط عثمانی‌ها", "year": 1453},
+    {"event": "پیاده‌شدن انسان روی ماه (آپولو ۱۱)", "year": 1969},
+    {"event": "فروپاشی اتحاد جماهیر شوروی", "year": 1991},
+]
+
+CITY_CATEGORY = "اسم شهر"  # می‌تونی به «اسم فامیل» یا هرچی دیگه تغییرش بدی
 
 CROSSWORD_BANK = [
     {"clue": "نگهبان تاریک گاتهام (اسم مبدل)", "answer": "بتمن"},
@@ -697,6 +732,259 @@ async def mafia_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+#  شهر بازی — اسم شهر با حرف آخر اسم قبلی
+# =========================================================
+
+async def citygame_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    CITYGAME_STATE[chat_id] = []
+    await update.effective_message.reply_text(
+        f"🏙️ بازی شهر شروع شد! هرکی یه {CITY_CATEGORY} بگه که با حرف آخر قبلی شروع بشه. "
+        "برای پایان بنویس «پایان شهر»."
+    )
+
+
+async def citygame_word(update: Update, context: ContextTypes.DEFAULT_TYPE, word: str):
+    chat_id = update.effective_chat.id
+    used = CITYGAME_STATE[chat_id]
+    if used and word[0] != used[-1][-1]:
+        await update.effective_message.reply_text(f"باید با حرف «{used[-1][-1]}» شروع بشه!")
+        return
+    if word in used:
+        await update.effective_message.reply_text("این یکی قبلاً گفته شده!")
+        return
+    used.append(word)
+    await update.effective_message.reply_text(f"✅ ثبت شد ({len(used)} مورد). حرف بعدی: «{word[-1]}»")
+
+
+async def citygame_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    used = CITYGAME_STATE.pop(chat_id, [])
+    await update.effective_message.reply_text(
+        "بازی شهر تموم شد:\n" + (" ← ".join(used) if used else "هیچی ثبت نشد.")
+    )
+
+
+# =========================================================
+#  آناگرام — حروف بهم‌ریخته رو کلمه کن
+# =========================================================
+
+async def anagram_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    item = random.choice(ANAGRAM_BANK)
+    ANAGRAM_STATE[chat_id] = {"answer": item["answer"]}
+    await update.effective_message.reply_text(f"🔤 این حروف رو مرتب کن: {item['scrambled']}")
+
+
+async def anagram_check(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    chat_id = update.effective_chat.id
+    state = ANAGRAM_STATE.get(chat_id)
+    if not state:
+        return False
+    if text.strip() == state["answer"]:
+        await update.effective_message.reply_text("✅ درست بود!")
+        del ANAGRAM_STATE[chat_id]
+        return True
+    return False
+
+
+# =========================================================
+#  تاس دوتایی رقابتی — با ریپلای شروع می‌شه
+# =========================================================
+
+async def dueldice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("روی پیام حریف ریپلای کن تا تاس بندازین.")
+        return
+    p1 = update.effective_user
+    p2 = msg.reply_to_message.from_user
+    if p2.id == p1.id:
+        await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
+        return
+
+    r1 = random.randint(1, 6)
+    r2 = random.randint(1, 6)
+    if r1 == r2:
+        result = "مساوی شد 🤝"
+    elif r1 > r2:
+        result = f"🏆 {p1.first_name} برد!"
+    else:
+        result = f"🏆 {p2.first_name} برد!"
+
+    await msg.reply_text(
+        f"🎲 {p1.first_name}: {r1}\n🎲 {p2.first_name}: {r2}\n{result}"
+    )
+
+
+# =========================================================
+#  کی می‌دونه؟ — سوال از خود اعضا، اولین جواب درست می‌بره
+# =========================================================
+
+async def whoknows_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item = random.choice(TRIVIA_BANK)
+    correct_text = item["options"][item["answer"]]
+    context.chat_data["whoknows_answer"] = correct_text
+    await update.effective_message.reply_text(f"🙋 کی می‌دونه: {item['q']}\n(جواب رو مستقیم بنویس)")
+
+
+async def whoknows_check(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    answer = context.chat_data.get("whoknows_answer")
+    if not answer:
+        return False
+    if text.strip() == answer:
+        await update.effective_message.reply_text(f"✅ {update.effective_user.first_name} درست گفت!")
+        context.chat_data.pop("whoknows_answer", None)
+        return True
+    return False
+
+
+# =========================================================
+#  تست IQ سریع
+# =========================================================
+
+async def iq_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    item = random.choice(IQ_BANK)
+    IQ_STATE[chat_id] = {"answer": item["answer"]}
+    await update.effective_message.reply_text(f"🧠 {item['q']}")
+
+
+async def iq_check(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    chat_id = update.effective_chat.id
+    state = IQ_STATE.get(chat_id)
+    if not state:
+        return False
+    if text.strip() == state["answer"]:
+        await update.effective_message.reply_text("✅ آفرین، درست بود!")
+        del IQ_STATE[chat_id]
+        return True
+    return False
+
+
+# =========================================================
+#  حدس سال — یه رویداد تاریخی، سالش رو حدس بزن
+# =========================================================
+
+async def yearguess_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    item = random.choice(YEAR_BANK)
+    YEAR_STATE[chat_id] = {"answer": item["year"], "event": item["event"]}
+    await update.effective_message.reply_text(f"📅 چه سالی این اتفاق افتاد؟\n{item['event']}")
+
+
+async def yearguess_check(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    chat_id = update.effective_chat.id
+    state = YEAR_STATE.get(chat_id)
+    if not state or not text.strip().isdigit():
+        return False
+    guess = int(text.strip())
+    target = state["answer"]
+    if guess == target:
+        await update.effective_message.reply_text("🎉 دقیقاً درست بود!")
+        del YEAR_STATE[chat_id]
+    elif abs(guess - target) <= 5:
+        await update.effective_message.reply_text("خیلی نزدیکی! دقیق‌تر بگو.")
+    return False  # اجازه بده بقیه هم امتحان کنن تا دقیق حدس بزنن
+
+
+# =========================================================
+#  بینگو گروهی (نسخه‌ی ساده: بازیکن‌ها عدد میگن، اولین برنده‌ی ۵ عدد میبره)
+# =========================================================
+
+async def bingo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    numbers = set(random.sample(range(1, 76), 25))
+    BINGO_STATE[chat_id] = {"numbers": numbers, "called": set(), "progress": defaultdict(set)}
+    await update.effective_message.reply_text(
+        "🎱 بینگو شروع شد! عدد بین ۱ تا ۷۵ بگو، هرکی ۵ عدد از کارت گروه رو درست بگه برنده‌ست."
+    )
+
+
+async def bingo_call(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    chat_id = update.effective_chat.id
+    state = BINGO_STATE.get(chat_id)
+    if not state or not text.strip().isdigit():
+        return False
+    num = int(text.strip())
+    if num not in state["numbers"] or num in state["called"]:
+        return False
+
+    state["called"].add(num)
+    user_id = update.effective_user.id
+    state["progress"][user_id].add(num)
+
+    if len(state["progress"][user_id]) >= 5:
+        await update.effective_message.reply_text(
+            f"🎉 بینگو! {update.effective_user.first_name} برد!"
+        )
+        del BINGO_STATE[chat_id]
+    else:
+        await update.effective_message.reply_text(
+            f"✅ {num} تو کارت بود! ({len(state['progress'][user_id])}/5 برای {update.effective_user.first_name})"
+        )
+    return True
+
+
+# =========================================================
+#  مبارزه‌ی تن‌به‌تن تصادفی — رولت با چالش/سوال به‌جای اسلحه
+# =========================================================
+
+DUEL_CHALLENGES = [
+    "یه شعر بداهه بگو",
+    "صدای یه حیوون رو تقلید کن (با کلمه توصیفش کن)",
+    "یه حقیقت جالب در مورد خودت بگو",
+    "پنج ثانیه هرچی که تو ذهنته رو بدون فکر بنویس",
+]
+
+
+async def duel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("روی پیام حریف ریپلای کن تا مبارزه شروع بشه.")
+        return
+    p1 = update.effective_user
+    p2 = msg.reply_to_message.from_user
+    if p2.id == p1.id:
+        await msg.reply_text("نمی‌تونی با خودت مبارزه کنی 🙂")
+        return
+
+    loser = random.choice([p1, p2])
+    challenge = random.choice(DUEL_CHALLENGES)
+    await msg.reply_text(
+        f"⚔️ {p1.first_name} در برابر {p2.first_name}!\n"
+        f"بازنده: {loser.first_name} 😅\n"
+        f"چالش: {challenge}"
+    )
+
+
+# =========================================================
+#  جایزه‌ی روزانه — فعال‌ترین نفر روز رو قرعه‌کشی می‌کنه
+# =========================================================
+
+async def dailyprize_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    DAILY_PRIZE[chat_id][user_id] += 1
+
+
+async def dailyprize_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    counts = DAILY_PRIZE.get(chat_id)
+    if not counts:
+        await update.effective_message.reply_text("هنوز کسی امروز پیام نداده.")
+        return
+    winner_id = max(counts, key=counts.get)
+    try:
+        member = await context.bot.get_chat_member(chat_id, winner_id)
+        name = member.user.first_name
+    except TelegramError:
+        name = "یکی از اعضا"
+    await update.effective_message.reply_text(f"🏆 جایزه‌ی امروز به {name} می‌رسه! ({counts[winner_id]} پیام)")
+    DAILY_PRIZE[chat_id] = defaultdict(int)
+
+
+# =========================================================
 #  زنجیره کلمات / داستان گروهی
 # =========================================================
 
@@ -793,6 +1081,15 @@ EXACT_TRIGGERS = {
     "مافیا بازی": mafia_join,
     "مافیا شروع": mafia_start,
     "مافیا پایان": mafia_end,
+    "بازی شهر": citygame_start,
+    "پایان شهر": citygame_end,
+    "آناگرام": anagram_start,
+    "کی میدونه": whoknows_start,
+    "کی می‌دونه": whoknows_start,
+    "تست هوش": iq_start,
+    "حدس سال": yearguess_start,
+    "بینگو": bingo_start,
+    "جایزه روزانه": dailyprize_draw,
 }
 
 
@@ -807,6 +1104,14 @@ async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "چهار در ردیف":
         await connect4_start(update, context)
+        return
+
+    if text == "تاس دوتایی":
+        await dueldice_start(update, context)
+        return
+
+    if text == "مبارزه":
+        await duel_start(update, context)
         return
 
     # 2) تطبیق دقیق روی کلمات ثابت
@@ -839,6 +1144,35 @@ async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if handled:
             return
 
+    # 3e) اگه آناگرام فعاله
+    if chat_id in ANAGRAM_STATE:
+        handled = await anagram_check(update, context, text)
+        if handled:
+            return
+
+    # 3f) اگه «کی می‌دونه» فعاله
+    if context.chat_data.get("whoknows_answer"):
+        handled = await whoknows_check(update, context, text)
+        if handled:
+            return
+
+    # 3g) اگه تست هوش فعاله
+    if chat_id in IQ_STATE:
+        handled = await iq_check(update, context, text)
+        if handled:
+            return
+
+    # 3h) اگه حدس سال فعاله
+    if chat_id in YEAR_STATE:
+        await yearguess_check(update, context, text)
+        # این بازی تا حدس دقیق تموم نمیشه، پس ادامه نده و برنگرد
+
+    # 3i) اگه بینگو فعاله و پیام عدده
+    if chat_id in BINGO_STATE:
+        handled = await bingo_call(update, context, text)
+        if handled:
+            return
+
     # 4) اگه بازی «حدس عدد» فعاله و پیام عدده => چک کن
     if chat_id in GUESS_STATE and text.isdigit():
         guess = int(text)
@@ -868,6 +1202,15 @@ async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in STORY_STATE and text:
         await story_line(update, context, text)
         return
+
+    # 8) اگه «بازی شهر» فعاله و پیام یک کلمه‌ست
+    if chat_id in CITYGAME_STATE and " " not in text and text:
+        await citygame_word(update, context, text)
+        return
+
+    # ردیابی خاموش برای «جایزه‌ی روزانه» (فقط تو گروه)
+    if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await dailyprize_track(update, context)
 
 
 # =========================================================
