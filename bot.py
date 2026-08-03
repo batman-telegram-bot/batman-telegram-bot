@@ -21,6 +21,10 @@ from telegram.ext import (
     filters,
 )
 
+from games import register_games
+from games_pack2 import register_extra_games
+from games_pack3 import register_extra_lists
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
@@ -736,7 +740,7 @@ PANEL_TEXTS = {
     "games": (
         "🎮 *بازی‌ها*\n\n"
         "برای شروع هر بازی کافیه اسمش رو تو چت بنویسی، نیازی به / نیست.\n"
-        "برای لیست کامل بنویس «لیست بازی‌ها»."
+        "برای لیست کامل بنویس «گیم»."
     ),
     "mod": (
         "🛡 *مدیریت گروه* (فقط ادمین، با ریپلای رو پیام هدف)\n\n"
@@ -1815,6 +1819,11 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ANIMATION, handle_gif))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # --- بازی‌ها (کلمه‌محور، بدون /) — باید بعد از handle_message اضافه بشن ---
+    register_games(app)
+    register_extra_games(app)
+    register_extra_lists(app)
 
     log.info("🦇 Batman Gotham Bot is running...")
     app.run_polling()
