@@ -378,6 +378,12 @@ BATTLESHIP_STATE = {}   # game_id -> {...}
 BS_SIZE = 5
 BS_SHIPS = 4
 
+BS_LOBBIES = {}   # token -> {"creator": User}
+
+
+def _bs_lobby_markup(token):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 بپیوند به بازی", callback_data=f"lobby2:{token}")]])
+
 
 def _bs_markup(game_id, cells):
     symbols = {"": "▫️", "H": "🔥", "M": "🌊"}
@@ -391,19 +397,8 @@ def _bs_markup(game_id, cells):
     return InlineKeyboardMarkup(rows)
 
 
-async def battleship_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.reply_text("روی پیام حریف ریپلای کن تا بازی شروع بشه.")
-        return
-
-    p1 = update.effective_user
-    p2 = msg.reply_to_message.from_user
-    if p2.id == p1.id:
-        await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
-        return
-
-    game_id = f"{update.effective_chat.id}:{p1.id}:{p2.id}"
+async def _launch_battleship(target_msg, p1, p2, edit=False):
+    game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
     ships = set(random.sample(range(BS_SIZE * BS_SIZE), BS_SHIPS))
     BATTLESHIP_STATE[game_id] = {
         "cells": [""] * (BS_SIZE * BS_SIZE),
@@ -414,11 +409,52 @@ async def battleship_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
     }
     state = BATTLESHIP_STATE[game_id]
-    await msg.reply_text(
+    text = (
         f"🚢 نبرد دریایی: {p1.first_name} در برابر {p2.first_name}\n"
-        f"{BS_SHIPS} کشتی مخفی روی گرید هست. نوبت: {p1.first_name}",
-        reply_markup=_bs_markup(game_id, state["cells"]),
+        f"{BS_SHIPS} کشتی مخفی روی گرید هست. نوبت: {p1.first_name}"
     )
+    markup = _bs_markup(game_id, state["cells"])
+    if edit:
+        await target_msg.edit_text(text, reply_markup=markup)
+    else:
+        await target_msg.reply_text(text, reply_markup=markup)
+
+
+async def battleship_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    creator = update.effective_user
+
+    if msg.reply_to_message and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+        p2 = msg.reply_to_message.from_user
+        if p2.id == creator.id:
+            await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
+            return
+        await _launch_battleship(msg, creator, p2)
+        return
+
+    token = f"{update.effective_chat.id}_{creator.id}_{random.randint(100000, 999999)}"
+    BS_LOBBIES[token] = {"creator": creator}
+    await msg.reply_text(
+        f"🎮 {creator.first_name} می‌خواد نبرد دریایی بازی کنه!\nحریف، دکمه‌ی زیر رو بزن تا بازی شروع بشه.",
+        reply_markup=_bs_lobby_markup(token),
+    )
+
+
+async def bs_lobby_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    token = query.data.split(":", 1)[1]
+    lobby = BS_LOBBIES.get(token)
+    if not lobby:
+        await query.answer("این دعوت منقضی شده یا یکی دیگه قبلاً پیوسته.", show_alert=True)
+        return
+    creator = lobby["creator"]
+    joiner = query.from_user
+    if joiner.id == creator.id:
+        await query.answer("نمی‌تونی با خودت بازی کنی 🙂", show_alert=True)
+        return
+    del BS_LOBBIES[token]
+    await _launch_battleship(query.message, creator, joiner, edit=True)
+    await query.answer()
 
 
 async def battleship_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -600,6 +636,7 @@ def register_extra_games(app):
     # نبرد دریایی
     app.add_handler(MessageHandler(_kw("نبرد دریایی|نبرد کشتی\u200cها"), battleship_start))
     app.add_handler(CallbackQueryHandler(battleship_callback, pattern=r"^bs:"))
+    app.add_handler(CallbackQueryHandler(bs_lobby_join_callback, pattern=r"^lobby2:"))
 
     # گنج پنهان
     app.add_handler(MessageHandler(_kw("گنج پنهان|گنج مخفی"), treasure_start))
