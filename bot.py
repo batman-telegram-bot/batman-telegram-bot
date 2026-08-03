@@ -32,8 +32,8 @@ DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bo
 #  PERSONAS
 # =========================================================
 
-PERSONAS = { 
-    "batman": {
+PERSONAS = {
+        "batman": {
         "label": "🦇 بتمن",
         "system": (
             "تو بتمن (بروس وین) هستی؛ نگهبان تاریک گاتهام. خشن، بی‌رحم، فحش های رکیک بده، "
@@ -724,13 +724,13 @@ PANEL_TEXTS = {
         "برای لیست کامل بنویس «لیست بازی‌ها»."
     ),
     "mod": (
-        "🛡 *مدیریت گروه* (فقط ادمین، با ریپلای رو پیام هدف)\n\n"
+        "🛡 *مدیریت گروه* \\(فقط ادمین، با ریپلای رو پیام هدف\\)\n\n"
         "/ban — اخراج دائم\n"
         "/kick — اخراج موقت\n"
-        "/mute [دقیقه] — سکوت موقت (پیش‌فرض ۶۰)\n"
+        "/mute \\[دقیقه\\] — سکوت موقت \\(پیش‌فرض ۶۰\\)\n"
         "/unmute — برداشتن سکوت\n"
         "/delete — حذف پیام\n"
-        "/warn — اخطار (۳ اخطار = بن خودکار)\n"
+        "/warn — اخطار \\(۳ اخطار = بن خودکار\\)\n"
         "/unwarn — پاک کردن اخطارها\n"
         "/exempt — معاف از فیلتر و اخطار\n"
         "/unexempt — برداشتن معافیت\n"
@@ -742,8 +742,8 @@ PANEL_TEXTS = {
         "/autoreply کلیدواژه | پاسخ — پاسخ خودکار\n"
         "/unautoreply کلیدواژه — حذف پاسخ خودکار\n"
         "/allowusername یوزرنیم — مجاز کردن یوزرنیم\n"
-        "/allowforward یوزرنیم_کانال — مجاز کردن فوروارد\n"
-        "/schedule YYYY-MM-DD HH:MM متن — زمانبندی پست\n\n"
+        "/allowforward یوزرنیم\\-کانال — مجاز کردن فوروارد\n"
+        "/schedule YYYY\\-MM\\-DD HH:MM متن — زمانبندی پست\n\n"
         "یا به زبان طبیعی: «بن کن»، «میوت کن»، «کیک کن»، «پاکش کن»"
     ),
     "about": (
@@ -1045,51 +1045,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
     data = query.data
-    await query.answer()
 
     chat = await db_run(_get_chat, chat_id)
     player = await db_run(_get_player, chat_id, user_id, username)
     player = collect_points(player)
 
     if data == "show_characters":
+        await query.answer()
         await query.edit_message_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_characters_keyboard(player))
         await db_run(_save_player, player)
         return
 
     if data == "show_profile":
+        await query.answer()
         await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
         await db_run(_save_player, player)
         return
 
     if data == "show_shop":
+        await query.answer()
         await query.edit_message_text("🛒 فروشگاه گاتهام:", reply_markup=build_shop_keyboard())
         await db_run(_save_player, player)
         return
 
     if data == "show_bag":
+        await query.answer()
         await query.edit_message_text(build_bag_text(player))
         await db_run(_save_player, player)
         return
 
     if data == "panel:main":
+        await query.answer()
         await query.edit_message_text(PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(), parse_mode="Markdown")
         return
 
     if data == "panel:persona":
+        await query.answer()
         await query.edit_message_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_persona_panel_keyboard())
         return
 
     if data == "panel:lists":
+        await query.answer()
         text = await build_lists_summary_text(context, chat_id)
         await query.edit_message_text(text, reply_markup=build_lists_keyboard(), parse_mode="Markdown")
         return
 
     if data in ("panel:games", "panel:mod", "panel:about"):
+        await query.answer()
         section = data.split(":", 1)[1]
         await query.edit_message_text(PANEL_TEXTS[section], reply_markup=build_back_keyboard(), parse_mode="Markdown")
         return
 
     if data.startswith("lists:"):
+        await query.answer()
         list_type = data.split(":", 1)[1]
         text = await build_list_detail_text(context, chat_id, list_type)
         await query.edit_message_text(text, reply_markup=build_list_detail_keyboard())
@@ -1099,6 +1107,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         persona_key = data.split(":", 1)[1]
         info = PERSONAS.get(persona_key)
         if info is None:
+            await query.answer()
             return
         if player["char_level"] < info["unlock_level"]:
             await query.answer(
@@ -1110,6 +1119,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat["since_switch"] = 0
         chat["next_switch_at"] = random.randint(8, 15)
         await db_run(_save_chat, chat)
+        await query.answer()
         await query.edit_message_text(f"{info['label']} فعال شد. بنویس تا جواب بده!")
         await db_run(_save_player, player)
         return
@@ -1122,6 +1132,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             player["score"] -= cost
             player["char_level"] += 1
             await db_run(_save_player, player)
+            await query.answer()
             await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
         else:
             await query.answer(f"امتیاز کافی نداری! به {cost} امتیاز نیاز داری.", show_alert=True)
@@ -1135,6 +1146,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             player["score"] -= cost
             player["rank_index"] += 1
             await db_run(_save_player, player)
+            await query.answer()
             await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
         else:
             await query.answer(f"امتیاز کافی نداری! به {cost} امتیاز نیاز داری.", show_alert=True)
@@ -1145,6 +1157,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             player["points_balance"] -= PPS_UPGRADE_COST
             player["pps"] += PPS_UPGRADE_GAIN
             await db_run(_save_player, player)
+            await query.answer()
             await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
         else:
             await query.answer(f"پوینت کافی نداری! به {PPS_UPGRADE_COST} پوینت نیاز داری.", show_alert=True)
@@ -1155,6 +1168,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             player["points_balance"] -= CAPACITY_UPGRADE_COST
             player["points_capacity"] += CAPACITY_UPGRADE_GAIN
             await db_run(_save_player, player)
+            await query.answer()
             await query.edit_message_text(build_profile_text(chat, player), reply_markup=build_profile_keyboard(player))
         else:
             await query.answer(f"پوینت کافی نداری! به {CAPACITY_UPGRADE_COST} پوینت نیاز داری.", show_alert=True)
@@ -1164,6 +1178,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item_key = data.split(":", 1)[1]
         item = ITEMS.get(item_key)
         if item is None:
+            await query.answer()
             return
         if player["points_balance"] >= item["price"]:
             player["points_balance"] -= item["price"]
@@ -1185,6 +1200,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 player["points_capacity"], player["points_balance"] + DAILY_MISSION_REWARD_POINTS
             )
             await db_run(_save_player, player)
+            await query.answer()
             await query.edit_message_text(
                 f"🎁 جایزه گرفتی: +{DAILY_MISSION_REWARD_SCORE} امتیاز و +{DAILY_MISSION_REWARD_POINTS} پوینت!"
             )
@@ -1192,6 +1208,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("هنوز ماموریت تکمیل نشده یا قبلاً گرفتیش.", show_alert=True)
         return
 
+    await query.answer()
     await db_run(_save_player, player)
 
 
