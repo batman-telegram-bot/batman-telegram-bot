@@ -952,10 +952,13 @@ async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def register_games(app):
-    app.add_handler(CallbackQueryHandler(rps_callback, pattern=r"^rps:"))
-    app.add_handler(CallbackQueryHandler(trivia_callback, pattern=r"^trivia:"))
-    app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern=r"^ttt:"))
-    app.add_handler(CallbackQueryHandler(connect4_callback, pattern=r"^c4:"))
-    app.add_handler(CallbackQueryHandler(lobby_join_callback, pattern=r"^lobby:"))
+    # همه‌ی این‌ها باید group=1 بگیرن، وگرنه CallbackQueryHandler(button_handler) تو
+    # bot.py (بدون pattern، تو group=0) جلوی اجراشون رو می‌گیره چون زودتر ثبت شده و
+    # روی همه‌ی callback query ها match می‌شه.
+    app.add_handler(CallbackQueryHandler(rps_callback, pattern=r"^rps:"), group=1)
+    app.add_handler(CallbackQueryHandler(trivia_callback, pattern=r"^trivia:"), group=1)
+    app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern=r"^ttt:"), group=1)
+    app.add_handler(CallbackQueryHandler(connect4_callback, pattern=r"^c4:"), group=1)
+    app.add_handler(CallbackQueryHandler(lobby_join_callback, pattern=r"^lobby:"), group=1)
     # این باید بعد از هندلرهای دیگه‌ی متنیِ ربات اضافه بشه (اولویت پایین‌تر با group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_router), group=1)
