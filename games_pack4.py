@@ -694,20 +694,22 @@ async def bazar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def register_extra_games2(app):
-    app.add_handler(MessageHandler(_kw("مین روب|مین یاب|مین‌روب|مین‌یاب"), minesweeper_start))
-    app.add_handler(CallbackQueryHandler(minesweeper_callback, pattern=r"^ms:"))
+    # group=4: گروه اختصاصی این فایل، وگرنه handle_message / button_handler ربات
+    # (group=0) که catch-all هستن جلوی همه‌ی این‌ها رو می‌گرفتن.
+    app.add_handler(MessageHandler(_kw("مین روب|مین یاب|مین‌روب|مین‌یاب"), minesweeper_start), group=4)
+    app.add_handler(CallbackQueryHandler(minesweeper_callback, pattern=r"^ms:"), group=4)
 
-    app.add_handler(MessageHandler(_kw("نقطه بازی|بازی نقطه"), dots_start))
-    app.add_handler(CallbackQueryHandler(dots_callback, pattern=r"^dots:"))
+    app.add_handler(MessageHandler(_kw("نقطه بازی|بازی نقطه"), dots_start), group=4)
+    app.add_handler(CallbackQueryHandler(dots_callback, pattern=r"^dots:"), group=4)
 
-    app.add_handler(MessageHandler(_kw("تیکو|بازی تیکو"), tiko_start))
-    app.add_handler(CallbackQueryHandler(tiko_callback, pattern=r"^tiko:"))
+    app.add_handler(MessageHandler(_kw("تیکو|بازی تیکو"), tiko_start), group=4)
+    app.add_handler(CallbackQueryHandler(tiko_callback, pattern=r"^tiko:"), group=4)
 
-    app.add_handler(MessageHandler(_kw("جمشید|بازی جمشید"), jamshid_start))
-    app.add_handler(CallbackQueryHandler(jamshid_callback, pattern=r"^jamshid:"))
+    app.add_handler(MessageHandler(_kw("جمشید|بازی جمشید"), jamshid_start), group=4)
+    app.add_handler(CallbackQueryHandler(jamshid_callback, pattern=r"^jamshid:"), group=4)
 
-    app.add_handler(MessageHandler(_kw("گیر بازار|بازی گیر بازار"), bazar_start))
-    app.add_handler(CallbackQueryHandler(bazar_callback, pattern=r"^bazar:"))
+    app.add_handler(MessageHandler(_kw("گیر بازار|بازی گیر بازار"), bazar_start), group=4)
+    app.add_handler(CallbackQueryHandler(bazar_callback, pattern=r"^bazar:"), group=4)
 
-    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=r"^noop$"))
-    app.add_handler(CallbackQueryHandler(lobby4_join_callback, pattern=r"^lobby4:"))
+    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=r"^noop$"), group=4)
+    app.add_handler(CallbackQueryHandler(lobby4_join_callback, pattern=r"^lobby4:"), group=4)
