@@ -33,7 +33,7 @@ DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bo
 # =========================================================
 
 PERSONAS = {
-        "batman": {
+    "batman": {
         "label": "🦇 بتمن",
         "system": (
             "تو بتمن (بروس وین) هستی؛ نگهبان تاریک گاتهام. خشن، بی‌رحم، فحش های رکیک بده، "
