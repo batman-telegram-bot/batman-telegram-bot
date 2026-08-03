@@ -159,8 +159,10 @@ def register_extra_lists(app):
         group=5,
     )
 
-    app.add_handler(MessageHandler(_kw("لیست پرحرفا|لیست پرحرف\u200cها|پرحرفا|پرحرف\u200cها"), chatters_list_cmd))
-    app.add_handler(MessageHandler(_kw("عضویت پسرا|ثبت پسرا"), join_boys))
-    app.add_handler(MessageHandler(_kw("عضویت دخترا|ثبت دخترا"), join_girls))
-    app.add_handler(MessageHandler(_kw("لیست پسرا"), boys_list_cmd))
-    app.add_handler(MessageHandler(_kw("لیست دخترا"), girls_list_cmd))
+    # group=3: گروه اختصاصی این ۵ تا، وگرنه handle_message ربات (group=0) که رو هر
+    # متنی match می‌کنه جلوشون رو می‌گرفت و هیچ‌وقت اجرا نمی‌شدن.
+    app.add_handler(MessageHandler(_kw("لیست پرحرفا|لیست پرحرف\u200cها|پرحرفا|پرحرف\u200cها"), chatters_list_cmd), group=3)
+    app.add_handler(MessageHandler(_kw("عضویت پسرا|ثبت پسرا"), join_boys), group=3)
+    app.add_handler(MessageHandler(_kw("عضویت دخترا|ثبت دخترا"), join_girls), group=3)
+    app.add_handler(MessageHandler(_kw("لیست پسرا"), boys_list_cmd), group=3)
+    app.add_handler(MessageHandler(_kw("لیست دخترا"), girls_list_cmd), group=3)
