@@ -24,6 +24,7 @@ from telegram.ext import (
 from games import register_games
 from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
+from games_pack4 import register_extra_games2
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
@@ -333,6 +334,9 @@ KEYWORD_POINT = "بتمن"       # جایگزین "میو"
 KEYWORD_REWARD = 2
 KEYWORD_COOLDOWN = 30        # ثانیه
 
+# کلمات/لقب‌هایی که تو گروه بدون منشن یا ریپلای هم باعث می‌شن بتمن جواب بده
+NICKNAME_TRIGGERS = ("بتمن", "بتی", "بتمنو")
+
 BASE_PPS = 0.3               # پوینت در ثانیه (پایه)
 BASE_CAPACITY = 150
 PPS_UPGRADE_COST = 80
@@ -625,6 +629,12 @@ def is_bot_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     text_to_check = msg.text or msg.caption
     if bot_username and text_to_check and f"@{bot_username}" in text_to_check:
         return True
+    # لقب‌های بتمن (بتی/بتمن/بتمنو و...) هم منشن حساب می‌شن، حتی اگه پیام
+    # ریپلای به یه آدم دیگه باشه، نه به خود ربات
+    if text_to_check:
+        for nick in NICKNAME_TRIGGERS:
+            if nick in text_to_check:
+                return True
     return False
 
 
@@ -1824,6 +1834,7 @@ def main():
     register_games(app)
     register_extra_games(app)
     register_extra_lists(app)
+    register_extra_games2(app)
 
     log.info("🦇 Batman Gotham Bot is running...")
     app.run_polling()
