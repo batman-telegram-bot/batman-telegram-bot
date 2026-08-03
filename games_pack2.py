@@ -621,26 +621,29 @@ async def _noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def register_extra_games(app):
+    # همه‌ی این‌ها group=2 می‌گیرن (گروه اختصاصیِ این فایل) تا نه با handle_message /
+    # button_handler ربات (group=0) تصادم کنن، نه با keyword_router خود games.py
+    # (group=1، که چون فیلترش کل متن‌ها رو می‌گیره، اگه تو همون گروه بودن هیچ‌وقت اجرا نمی‌شدن).
     # ۲۰۴۸
-    app.add_handler(MessageHandler(_kw("2048|بازی ?2048|بازی ۲۰۴۸|۲۰۴۸"), g2048_start))
-    app.add_handler(CallbackQueryHandler(g2048_callback, pattern=r"^g2048:"))
+    app.add_handler(MessageHandler(_kw("2048|بازی ?2048|بازی ۲۰۴۸|۲۰۴۸"), g2048_start), group=2)
+    app.add_handler(CallbackQueryHandler(g2048_callback, pattern=r"^g2048:"), group=2)
 
     # چراغ‌ها
-    app.add_handler(MessageHandler(_kw("چراغ\u200cها|چراغها|بازی چراغ\u200cها"), lightsout_start))
-    app.add_handler(CallbackQueryHandler(lightsout_callback, pattern=r"^lo:"))
+    app.add_handler(MessageHandler(_kw("چراغ\u200cها|چراغها|بازی چراغ\u200cها"), lightsout_start), group=2)
+    app.add_handler(CallbackQueryHandler(lightsout_callback, pattern=r"^lo:"), group=2)
 
     # حافظه
-    app.add_handler(MessageHandler(_kw("حافظه|بازی حافظه"), memory_start))
-    app.add_handler(CallbackQueryHandler(memory_callback, pattern=r"^mm:"))
+    app.add_handler(MessageHandler(_kw("حافظه|بازی حافظه"), memory_start), group=2)
+    app.add_handler(CallbackQueryHandler(memory_callback, pattern=r"^mm:"), group=2)
 
     # نبرد دریایی
-    app.add_handler(MessageHandler(_kw("نبرد دریایی|نبرد کشتی\u200cها"), battleship_start))
-    app.add_handler(CallbackQueryHandler(battleship_callback, pattern=r"^bs:"))
-    app.add_handler(CallbackQueryHandler(bs_lobby_join_callback, pattern=r"^lobby2:"))
+    app.add_handler(MessageHandler(_kw("نبرد دریایی|نبرد کشتی\u200cها"), battleship_start), group=2)
+    app.add_handler(CallbackQueryHandler(battleship_callback, pattern=r"^bs:"), group=2)
+    app.add_handler(CallbackQueryHandler(bs_lobby_join_callback, pattern=r"^lobby2:"), group=2)
 
     # گنج پنهان
-    app.add_handler(MessageHandler(_kw("گنج پنهان|گنج مخفی"), treasure_start))
-    app.add_handler(CallbackQueryHandler(treasure_callback, pattern=r"^tg:"))
+    app.add_handler(MessageHandler(_kw("گنج پنهان|گنج مخفی"), treasure_start), group=2)
+    app.add_handler(CallbackQueryHandler(treasure_callback, pattern=r"^tg:"), group=2)
 
     # دکمه‌های خالی/تزئینی
-    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=r"^noop$"), group=2)
