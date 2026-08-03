@@ -35,8 +35,8 @@ from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, fil
 GAMES_LIST_TEXT = (
     "🎮 *لیست بازی‌ها* (کافیه کلمه رو بنویسی، نیازی به / نیست)\n\n"
     "سنگ کاغذ قیچی\n"
-    "دوز — (روی پیام حریف ریپلای کن)\n"
-    "چهار در ردیف — (روی پیام حریف ریپلای کن)\n"
+    "دوز — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
+    "چهار در ردیف — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
     "دار — حدس کلمه حرف به حرف\n"
     "تاس\n"
     "شیر یا خط\n"
@@ -56,6 +56,11 @@ GAMES_LIST_TEXT = (
     "حافظه — جفت‌های مخفی رو پیدا کن\n"
     "نبرد دریایی — (روی پیام حریف ریپلای کن)\n"
     "گنج پنهان — رو خونه‌ها کلیک کن، بمب نزن!\n"
+    "مین روب — رو خونه‌ها بزن، ۴ بمب مخفیه\n"
+    "نقطه بازی — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
+    "تیکو — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
+    "جمشید — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
+    "گیر بازار — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
     "گیم / لیست بازی‌ها — نمایش دوباره‌ی همین پیام\n"
 )
 
@@ -338,7 +343,48 @@ async def roulette_shoot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-#  دوز (Tic-Tac-Toe) — روی پیام حریف ریپلای کن
+# =========================================================
+#  لابی مشترک برای بازی‌های دو نفره: به‌جای اجباری‌بودن ریپلای،
+#  یه پیام با دکمه‌ی «بپیوند» می‌فرسته و هرکی زد می‌شه حریف.
+#  (اگه پیام ریپلای به یه نفر باشه، طبق قبل مستقیم باهاش شروع می‌شه)
+# =========================================================
+
+LOBBIES = {}   # token -> {"game": "ttt"/"c4", "creator": User}
+
+
+def _new_lobby_token(chat_id, creator_id):
+    return f"{chat_id}_{creator_id}_{random.randint(100000, 999999)}"
+
+
+def _lobby_markup(token):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 بپیوند به بازی", callback_data=f"lobby:{token}")]])
+
+
+async def lobby_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    token = query.data.split(":", 1)[1]
+    lobby = LOBBIES.get(token)
+    if not lobby:
+        await query.answer("این دعوت منقضی شده یا یکی دیگه قبلاً پیوسته.", show_alert=True)
+        return
+
+    creator = lobby["creator"]
+    joiner = query.from_user
+    if joiner.id == creator.id:
+        await query.answer("نمی‌تونی با خودت بازی کنی 🙂", show_alert=True)
+        return
+
+    del LOBBIES[token]
+    game = lobby["game"]
+    if game == "ttt":
+        await _launch_tictactoe(query.message, creator, joiner, edit=True)
+    elif game == "c4":
+        await _launch_connect4(query.message, creator, joiner, edit=True)
+    await query.answer()
+
+
+# =========================================================
+#  دوز (Tic-Tac-Toe) — یا روی پیام حریف ریپلای کن، یا با دکمه‌ی «بپیوند»
 # =========================================================
 
 def new_board():
@@ -367,28 +413,39 @@ def check_winner(board):
     return None
 
 
-async def tictactoe_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.reply_text("روی پیام حریف ریپلای کن تا بازی شروع بشه.")
-        return
-
-    p1 = update.effective_user
-    p2 = msg.reply_to_message.from_user
-    if p2.id == p1.id:
-        await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
-        return
-
-    game_id = f"{update.effective_chat.id}:{p1.id}:{p2.id}"
+async def _launch_tictactoe(target_msg, p1, p2, edit=False):
+    game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
     TICTACTOE_STATE[game_id] = {
         "board": new_board(),
         "players": {p1.id: "X", p2.id: "O"},
         "turn": p1.id,
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
     }
+    text = f"دوز شروع شد: {p1.first_name} (❌) در برابر {p2.first_name} (⭕)\nنوبت: {p1.first_name}"
+    markup = board_markup(TICTACTOE_STATE[game_id]["board"], game_id)
+    if edit:
+        await target_msg.edit_text(text, reply_markup=markup)
+    else:
+        await target_msg.reply_text(text, reply_markup=markup)
+
+
+async def tictactoe_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    creator = update.effective_user
+
+    if msg.reply_to_message and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+        p2 = msg.reply_to_message.from_user
+        if p2.id == creator.id:
+            await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
+            return
+        await _launch_tictactoe(msg, creator, p2)
+        return
+
+    token = _new_lobby_token(update.effective_chat.id, creator.id)
+    LOBBIES[token] = {"game": "ttt", "creator": creator}
     await msg.reply_text(
-        f"دوز شروع شد: {p1.first_name} (❌) در برابر {p2.first_name} (⭕)\nنوبت: {p1.first_name}",
-        reply_markup=board_markup(TICTACTOE_STATE[game_id]["board"], game_id),
+        f"🎮 {creator.first_name} می‌خواد دوز بازی کنه!\nحریف، دکمه‌ی زیر رو بزن تا بازی شروع بشه.",
+        reply_markup=_lobby_markup(token),
     )
 
 
@@ -477,28 +534,42 @@ def c4_check_winner(board):
     return None
 
 
-async def connect4_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg.reply_to_message or not msg.reply_to_message.from_user:
-        await msg.reply_text("روی پیام حریف ریپلای کن تا بازی شروع بشه.")
-        return
-    p1 = update.effective_user
-    p2 = msg.reply_to_message.from_user
-    if p2.id == p1.id:
-        await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
-        return
-
-    game_id = f"{update.effective_chat.id}:{p1.id}:{p2.id}"
+async def _launch_connect4(target_msg, p1, p2, edit=False):
+    game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
     CONNECT4_STATE[game_id] = {
         "board": c4_new_board(),
         "players": {p1.id: "R", p2.id: "Y"},
         "turn": p1.id,
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
     }
-    await msg.reply_text(
+    text = (
         f"چهار در ردیف شروع شد: {p1.first_name} (🔴) در برابر {p2.first_name} (🟡)\n"
-        f"نوبت: {p1.first_name}\n\n{c4_render(CONNECT4_STATE[game_id]['board'])}",
-        reply_markup=c4_markup(game_id),
+        f"نوبت: {p1.first_name}\n\n{c4_render(CONNECT4_STATE[game_id]['board'])}"
+    )
+    markup = c4_markup(game_id)
+    if edit:
+        await target_msg.edit_text(text, reply_markup=markup)
+    else:
+        await target_msg.reply_text(text, reply_markup=markup)
+
+
+async def connect4_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    creator = update.effective_user
+
+    if msg.reply_to_message and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+        p2 = msg.reply_to_message.from_user
+        if p2.id == creator.id:
+            await msg.reply_text("نمی‌تونی با خودت بازی کنی 🙂")
+            return
+        await _launch_connect4(msg, creator, p2)
+        return
+
+    token = _new_lobby_token(update.effective_chat.id, creator.id)
+    LOBBIES[token] = {"game": "c4", "creator": creator}
+    await msg.reply_text(
+        f"🎮 {creator.first_name} می‌خواد چهار در ردیف بازی کنه!\nحریف، دکمه‌ی زیر رو بزن تا بازی شروع بشه.",
+        reply_markup=_lobby_markup(token),
     )
 
 
@@ -885,5 +956,6 @@ def register_games(app):
     app.add_handler(CallbackQueryHandler(trivia_callback, pattern=r"^trivia:"))
     app.add_handler(CallbackQueryHandler(tictactoe_callback, pattern=r"^ttt:"))
     app.add_handler(CallbackQueryHandler(connect4_callback, pattern=r"^c4:"))
+    app.add_handler(CallbackQueryHandler(lobby_join_callback, pattern=r"^lobby:"))
     # این باید بعد از هندلرهای دیگه‌ی متنیِ ربات اضافه بشه (اولویت پایین‌تر با group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_router), group=1)
