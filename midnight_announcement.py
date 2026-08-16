@@ -26,12 +26,22 @@ try:
 except ImportError:
     HAS_JDATETIME = False
 
+try:
+    from hijri_converter import Gregorian as _Gregorian
+    HAS_HIJRI = True
+except ImportError:
+    HAS_HIJRI = False
+
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 WEEKDAYS_FA = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنج‌شنبه", "جمعه", "شنبه", "یک‌شنبه"]
 MONTHS_FA = [
     "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
     "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+]
+HIJRI_MONTHS_FA = [
+    "محرم", "صفر", "ربیع‌الاول", "ربیع‌الثانی", "جمادی‌الاول", "جمادی‌الثانی",
+    "رجب", "شعبان", "رمضان", "شوال", "ذی‌القعده", "ذی‌الحجه",
 ]
 
 
@@ -46,6 +56,89 @@ def _format_persian_date(now: datetime) -> str:
 
 def _format_english_date(now: datetime) -> str:
     return now.strftime("%A, %B %d, %Y - %H:%M")
+
+
+def _format_hijri_date(now: datetime) -> str:
+    if not HAS_HIJRI:
+        return None
+    h = _Gregorian(now.year, now.month, now.day).to_hijri()
+    weekday = WEEKDAYS_FA[now.weekday()]  # همون روز هفته‌ی میلادی/شمسی
+    month = HIJRI_MONTHS_FA[h.month - 1]
+    return f"{weekday} - {h.year}/{h.month:02d}/{h.day:02d} ({month})"
+
+
+def _bar(fraction: float, length: int = 5) -> str:
+    filled = max(0, min(length, round(fraction * length)))
+    return "▰" * filled + "▱" * (length - filled)
+
+
+def _jalali_year_progress(now: datetime):
+    if not HAS_JDATETIME:
+        return None
+    jnow = jdatetime.datetime.fromgregorian(datetime=now)
+    start = jdatetime.date(jnow.year, 1, 1)
+    next_start = jdatetime.date(jnow.year + 1, 1, 1)
+    total = (next_start - start).days
+    passed = (jnow.date() - start).days + 1
+    remaining = total - passed
+    pct = passed / total
+    return passed, remaining, pct
+
+
+def _gregorian_year_progress(now: datetime):
+    passed = now.timetuple().tm_yday
+    year = now.year
+    is_leap = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+    total = 366 if is_leap else 365
+    remaining = total - passed
+    pct = passed / total
+    return passed, remaining, pct
+
+
+def build_full_datetime_text() -> str:
+    """گزارش کامل و خفن تاریخ/ساعت به سبک گاتهام — برای دستور «تاریخ»/«ساعت»."""
+    from gotham_content import gotham_signature_line
+
+    now = datetime.now(TEHRAN_TZ)
+    fa_str = _format_persian_date(now)
+    en_str = _format_english_date(now)
+    hijri_str = _format_hijri_date(now)
+
+    lines = [
+        "🦇 *تاریخ و ساعت گاتهام* 🦇",
+        "〰️〰️〰️〰️〰️〰️〰️",
+        f"⏰ ساعت : {now.strftime('%H:%M:%S')}",
+        f"📅 تاریخ شمسی : {fa_str}",
+    ]
+    if hijri_str:
+        lines.append(f"🌙 تاریخ قمری : {hijri_str}")
+    else:
+        lines.append("🌙 تاریخ قمری : (برای فعال شدن: pip install hijri-converter)")
+    lines.append(f"☀️ تاریخ میلادی : {en_str}")
+    lines.append("〰️〰️〰️〰️〰️〰️〰️")
+
+    jp = _jalali_year_progress(now)
+    if jp:
+        passed, remaining, pct = jp
+        lines += [
+            "🦇 تا پایان سال شمسی",
+            f"┘─ 📅 روزهای سپری‌شده : {passed} روز",
+            f"┘─ ⌛️ روزهای باقی‌مانده : {remaining} روز",
+            f"┘─ 🦇 {_bar(pct)} {pct * 100:.0f}%",
+            "",
+        ]
+
+    gp = _gregorian_year_progress(now)
+    passed, remaining, pct = gp
+    lines += [
+        "🌃 تا پایان سال میلادی",
+        f"┘─ 📅 روزهای سپری‌شده : {passed} روز",
+        f"┘─ ⌛️ روزهای باقی‌مانده : {remaining} روز",
+        f"┘─ 🌃 {_bar(pct)} {pct * 100:.0f}%",
+        "〰️〰️〰️〰️〰️〰️〰️",
+        f"«{gotham_signature_line()}»",
+    ]
+    return "\n".join(lines)
 
 
 def _get_all_chat_ids():
