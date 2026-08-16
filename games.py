@@ -17,6 +17,7 @@ games.py
 هر کسی بفرسته پیام رو می‌سازه، و اگه ادمین باشه خودکار پینش می‌کنه.
 """
 
+import asyncio
 import random
 import string
 from collections import defaultdict
@@ -134,6 +135,16 @@ MAFIA_ROLES_BY_COUNT = {
 
 def norm(text: str) -> str:
     return (text or "").strip()
+
+
+def _save_game_record(chat_id, winner_id, loser_id):
+    """رکورد برد/باخت رو تو دیتابیس اصلی (bot.py) ثبت می‌کنه. ایمپورت رو داخل تابع
+    نگه داشتیم تا با ایمپورت bot.py از games.py توی بالای فایل، سیکل ایجاد نشه."""
+    try:
+        import bot as _bot
+        _bot._record_game_result(chat_id, winner_id, loser_id)
+    except Exception:
+        pass  # اگه ثبت رکورد شکست بخوره، نباید جلوی خود بازی رو بگیره
 
 
 async def is_admin(context: ContextTypes.DEFAULT_TYPE, chat_id, user_id) -> bool:
@@ -413,6 +424,27 @@ def check_winner(board):
     return None
 
 
+TURN_TIMEOUT_SECONDS = 90  # اگه تو این مدت حرکت نکنی، خودکار می‌بازی
+
+
+async def _tictactoe_timeout_watch(game_id, move_no, chat_id, message_id, bot):
+    await asyncio.sleep(TURN_TIMEOUT_SECONDS)
+    state = TICTACTOE_STATE.get(game_id)
+    if not state or state.get("move_no") != move_no:
+        return  # یا بازی تموم شده، یا یه حرکت دیگه زده شده
+    loser_id = state["turn"]
+    winner_id = [pid for pid in state["players"] if pid != loser_id][0]
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=f"⏰ وقت {state['names'][loser_id]} تموم شد! {state['names'][winner_id]} با نبود حریف برنده شد.",
+        )
+    except Exception:
+        pass
+    _save_game_record(chat_id, winner_id, loser_id)
+    TICTACTOE_STATE.pop(game_id, None)
+
+
 async def _launch_tictactoe(target_msg, p1, p2, edit=False):
     game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
     TICTACTOE_STATE[game_id] = {
@@ -420,13 +452,22 @@ async def _launch_tictactoe(target_msg, p1, p2, edit=False):
         "players": {p1.id: "X", p2.id: "O"},
         "turn": p1.id,
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
+        "move_no": 0,
     }
-    text = f"دوز شروع شد: {p1.first_name} (❌) در برابر {p2.first_name} (⭕)\nنوبت: {p1.first_name}"
+    text = (
+        f"دوز شروع شد: {p1.first_name} (❌) در برابر {p2.first_name} (⭕)\nنوبت: {p1.first_name}\n"
+        f"⏰ {TURN_TIMEOUT_SECONDS} ثانیه وقت داری حرکت کنی، وگرنه می‌بازی."
+    )
     markup = board_markup(TICTACTOE_STATE[game_id]["board"], game_id)
     if edit:
         await target_msg.edit_text(text, reply_markup=markup)
+        message_id = target_msg.message_id
     else:
-        await target_msg.reply_text(text, reply_markup=markup)
+        sent = await target_msg.reply_text(text, reply_markup=markup)
+        message_id = sent.message_id
+    asyncio.create_task(_tictactoe_timeout_watch(
+        game_id, 0, target_msg.chat.id, message_id, target_msg.get_bot()
+    ))
 
 
 async def tictactoe_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,6 +514,7 @@ async def tictactoe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     winner = check_winner(state["board"])
 
     other_id = [pid for pid in state["players"] if pid != user_id][0]
+    state["move_no"] += 1
     if winner == "draw":
         await query.edit_message_text("مساوی شد! 🤝", reply_markup=board_markup(state["board"], game_id))
         del TICTACTOE_STATE[game_id]
@@ -480,12 +522,17 @@ async def tictactoe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             f"🏆 {state['names'][user_id]} برد!", reply_markup=board_markup(state["board"], game_id)
         )
+        _save_game_record(query.message.chat.id, user_id, other_id)
         del TICTACTOE_STATE[game_id]
     else:
         state["turn"] = other_id
         await query.edit_message_text(
-            f"نوبت: {state['names'][other_id]}", reply_markup=board_markup(state["board"], game_id)
+            f"نوبت: {state['names'][other_id]}\n⏰ {TURN_TIMEOUT_SECONDS} ثانیه وقت داری.",
+            reply_markup=board_markup(state["board"], game_id),
         )
+        asyncio.create_task(_tictactoe_timeout_watch(
+            game_id, state["move_no"], query.message.chat.id, query.message.message_id, context.bot
+        ))
     await query.answer()
 
 
@@ -534,6 +581,24 @@ def c4_check_winner(board):
     return None
 
 
+async def _connect4_timeout_watch(game_id, move_no, chat_id, message_id, bot):
+    await asyncio.sleep(TURN_TIMEOUT_SECONDS)
+    state = CONNECT4_STATE.get(game_id)
+    if not state or state.get("move_no") != move_no:
+        return
+    loser_id = state["turn"]
+    winner_id = [pid for pid in state["players"] if pid != loser_id][0]
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=f"⏰ وقت {state['names'][loser_id]} تموم شد! {state['names'][winner_id]} با نبود حریف برنده شد.",
+        )
+    except Exception:
+        pass
+    _save_game_record(chat_id, winner_id, loser_id)
+    CONNECT4_STATE.pop(game_id, None)
+
+
 async def _launch_connect4(target_msg, p1, p2, edit=False):
     game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
     CONNECT4_STATE[game_id] = {
@@ -541,16 +606,23 @@ async def _launch_connect4(target_msg, p1, p2, edit=False):
         "players": {p1.id: "R", p2.id: "Y"},
         "turn": p1.id,
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
+        "move_no": 0,
     }
     text = (
         f"چهار در ردیف شروع شد: {p1.first_name} (🔴) در برابر {p2.first_name} (🟡)\n"
-        f"نوبت: {p1.first_name}\n\n{c4_render(CONNECT4_STATE[game_id]['board'])}"
+        f"نوبت: {p1.first_name}\n\n{c4_render(CONNECT4_STATE[game_id]['board'])}\n"
+        f"⏰ {TURN_TIMEOUT_SECONDS} ثانیه وقت داری حرکت کنی، وگرنه می‌بازی."
     )
     markup = c4_markup(game_id)
     if edit:
         await target_msg.edit_text(text, reply_markup=markup)
+        message_id = target_msg.message_id
     else:
-        await target_msg.reply_text(text, reply_markup=markup)
+        sent = await target_msg.reply_text(text, reply_markup=markup)
+        message_id = sent.message_id
+    asyncio.create_task(_connect4_timeout_watch(
+        game_id, 0, target_msg.chat.id, message_id, target_msg.get_bot()
+    ))
 
 
 async def connect4_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -597,6 +669,7 @@ async def connect4_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     winner_symbol = c4_check_winner(state["board"])
     board_text = c4_render(state["board"])
     other_id = [pid for pid in state["players"] if pid != user_id][0]
+    state["move_no"] += 1
 
     if winner_symbol == "draw":
         await query.edit_message_text(f"مساوی شد! 🤝\n\n{board_text}", reply_markup=c4_markup(game_id))
@@ -605,12 +678,17 @@ async def connect4_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"🏆 {state['names'][user_id]} برد!\n\n{board_text}", reply_markup=c4_markup(game_id)
         )
+        _save_game_record(query.message.chat.id, user_id, other_id)
         del CONNECT4_STATE[game_id]
     else:
         state["turn"] = other_id
         await query.edit_message_text(
-            f"نوبت: {state['names'][other_id]}\n\n{board_text}", reply_markup=c4_markup(game_id)
+            f"نوبت: {state['names'][other_id]}\n\n{board_text}\n⏰ {TURN_TIMEOUT_SECONDS} ثانیه وقت داری.",
+            reply_markup=c4_markup(game_id),
         )
+        asyncio.create_task(_connect4_timeout_watch(
+            game_id, state["move_no"], query.message.chat.id, query.message.message_id, context.bot
+        ))
     await query.answer()
 
 
@@ -871,6 +949,36 @@ EXACT_TRIGGERS = {
     "مافیا شروع": mafia_start,
     "مافیا پایان": mafia_end,
 }
+
+
+GAME_TRIGGER_WORDS = set(EXACT_TRIGGERS.keys()) | {"دوز", "چهار در ردیف"}
+
+
+def is_game_text(chat_id, text: str) -> bool:
+    """برمی‌گردونه True اگه این پیام قراره توسط سیستم بازی‌ها (کلمه‌ی شروع بازی یا
+    حرکت داخل یه بازیِ فعال) مصرف بشه. bot.py قبل از فرستادن پاسخ هوش مصنوعی این رو
+    چک می‌کنه تا رو کلمات/حرکت‌های بازی، یه پیام اضافه‌ی ناخواسته نفرسته -
+    حتی وقتی پیام ریپلای به خود ربات باشه."""
+    t = norm(text)
+    if not t:
+        return False
+    if t in GAME_TRIGGER_WORDS:
+        return True
+    if chat_id in HANGMAN_STATE and len(t) == 1:
+        return True
+    if chat_id in WORDLE_STATE:
+        return True
+    if chat_id in CROSSWORD_STATE:
+        return True
+    if chat_id in TYPERACE_STATE:
+        return True
+    if chat_id in GUESS_STATE and t.isdigit():
+        return True
+    if chat_id in WORDCHAIN_STATE and " " not in t:
+        return True
+    if chat_id in STORY_STATE:
+        return True
+    return False
 
 
 async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):

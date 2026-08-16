@@ -6,7 +6,7 @@ import random
 import logging
 import sqlite3
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import defaultdict, deque
 
 import httpx
@@ -21,10 +21,49 @@ from telegram.ext import (
     filters,
 )
 
-from games import register_games
+CAPTCHA_TIMEOUT_SECONDS = 180  # ۳ دقیقه فرصت برای تایید عضو جدید
+
+from games import register_games, is_game_text, GAME_TRIGGER_WORDS
+from gotham_content import gotham_signature_line
 from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
+
+# کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
+# (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
+_EXTRA_GAME_TRIGGERS_RE = re.compile(
+    r"(?i)^\s*("
+    r"2048|بازی ?2048|بازی ۲۰۴۸|۲۰۴۸|"
+    r"چراغ\u200cها|چراغها|بازی چراغ\u200cها|"
+    r"حافظه|بازی حافظه|"
+    r"نبرد دریایی|نبرد کشتی\u200cها|"
+    r"گنج پنهان|گنج مخفی|"
+    r"مین روب|مین یاب|مین\u200cروب|مین\u200cیاب|"
+    r"نقطه بازی|بازی نقطه|"
+    r"تیکو|بازی تیکو|"
+    r"جمشید|بازی جمشید|"
+    r"گیر بازار|بازی گیر بازار|"
+    r"لیست پرحرفا|لیست پرحرف\u200cها|پرحرفا|پرحرف\u200cها|"
+    r"عضویت پسرا|ثبت پسرا|عضویت دخترا|ثبت دخترا|"
+    r"لیست پسرا|لیست دخترا"
+    r")\s*$"
+)
+
+
+def is_any_game_text(chat_id, text: str) -> bool:
+    """ترکیب چک بازی‌های games.py با کلمات بازی‌های pack2/pack4."""
+    if is_game_text(chat_id, text):
+        return True
+    return bool(text and _EXTRA_GAME_TRIGGERS_RE.match(text))
+
+
+# کلیدواژه‌های ویژگی‌های اجتماعی (ازدواج، هدیه، نظرسنجی، ریپورت)
+GIFT_RE = re.compile(r"^هدیه\s+(\d+)$")
+POLL_RE = re.compile(r"^نظرسنجی\s+(.+)$", re.DOTALL)
+MARRY_TRIGGERS = ("ازدواج با", "ازدواج")
+DIVORCE_TRIGGERS = ("طلاق",)
+COUPLE_TRIGGERS = ("همسرم", "رابطه من", "پارتنرم")
+REPORT_TRIGGERS = ("ریپورت", "گزارش تخلف")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
@@ -335,7 +374,7 @@ KEYWORD_REWARD = 2
 KEYWORD_COOLDOWN = 30        # ثانیه
 
 # کلمات/لقب‌هایی که تو گروه بدون منشن یا ریپلای هم باعث می‌شن بتمن جواب بده
-NICKNAME_TRIGGERS = ("بتمن", "بتی", "بتمنو")
+NICKNAME_TRIGGERS = ("بتمن", "بتی", "بتمنو", "بتن")
 
 BASE_PPS = 0.3               # پوینت در ثانیه (پایه)
 BASE_CAPACITY = 150
@@ -384,6 +423,8 @@ def _init_db():
             mission_date TEXT DEFAULT '',
             mission_claimed INTEGER DEFAULT 0,
             last_keyword_ts REAL DEFAULT 0,
+            game_wins INTEGER DEFAULT 0,
+            game_losses INTEGER DEFAULT 0,
             PRIMARY KEY (chat_id, user_id)
         )
     """)
@@ -411,8 +452,83 @@ def _init_db():
             PRIMARY KEY (chat_id, list_type, item_key)
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS mod_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            admin_name TEXT,
+            action TEXT,
+            target_name TEXT,
+            ts REAL
+        )
+    """)
+    # مهاجرت برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو ندارن
+    for col, ddl in (
+        ("game_wins", "ALTER TABLE players ADD COLUMN game_wins INTEGER DEFAULT 0"),
+        ("game_losses", "ALTER TABLE players ADD COLUMN game_losses INTEGER DEFAULT 0"),
+        ("message_count", "ALTER TABLE players ADD COLUMN message_count INTEGER DEFAULT 0"),
+        ("streak_days", "ALTER TABLE players ADD COLUMN streak_days INTEGER DEFAULT 0"),
+        ("last_active_date", "ALTER TABLE players ADD COLUMN last_active_date TEXT DEFAULT ''"),
+        ("week_message_count", "ALTER TABLE players ADD COLUMN week_message_count INTEGER DEFAULT 0"),
+        ("week_start_date", "ALTER TABLE players ADD COLUMN week_start_date TEXT DEFAULT ''"),
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # ستون از قبل هست
     conn.commit()
     conn.close()
+
+
+def _log_mod_action(chat_id, admin_name, action, target_name):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO mod_log (chat_id, admin_name, action, target_name, ts) VALUES (?,?,?,?,?)",
+        (chat_id, admin_name, action, target_name, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_mod_log(chat_id, limit=15):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT admin_name, action, target_name, ts FROM mod_log WHERE chat_id=? "
+        "ORDER BY ts DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _record_game_result(chat_id, winner_id, loser_id):
+    """امتیاز برد/باخت رو برای هر دو بازیکن ثبت می‌کنه (برای رکورد شخصی و رکورد رودررو)."""
+    _get_player(chat_id, winner_id)  # مطمئن شو ردیف بازیکن وجود داره
+    _get_player(chat_id, loser_id)
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE players SET game_wins = game_wins + 1 WHERE chat_id=? AND user_id=?",
+        (chat_id, winner_id),
+    )
+    c.execute(
+        "UPDATE players SET game_losses = game_losses + 1 WHERE chat_id=? AND user_id=?",
+        (chat_id, loser_id),
+    )
+    conn.commit()
+    conn.close()
+    # رکورد رودررو (کی‌ها روی هم بردن) رو با کلید مرتب‌شده تو group_lists نگه می‌داریم
+    key = f"{min(winner_id, loser_id)}_{max(winner_id, loser_id)}"
+    raw = _list_get_one(chat_id, "h2h", key) or "{}"
+    try:
+        h2h = json.loads(raw)
+    except Exception:
+        h2h = {}
+    h2h[str(winner_id)] = h2h.get(str(winner_id), 0) + 1
+    _list_add(chat_id, "h2h", key, json.dumps(h2h))
 
 
 async def db_run(fn, *args):
@@ -448,12 +564,16 @@ def _save_player(player):
     c.execute("""
         UPDATE players SET score=?, char_level=?, rank_index=?, points_balance=?,
         points_capacity=?, pps=?, last_collect=?, inventory=?, wins_today=?,
-        mission_date=?, mission_claimed=?, last_keyword_ts=?
+        mission_date=?, mission_claimed=?, last_keyword_ts=?,
+        message_count=?, streak_days=?, last_active_date=?,
+        week_message_count=?, week_start_date=?
         WHERE chat_id=? AND user_id=?
     """, (
         player["score"], player["char_level"], player["rank_index"], player["points_balance"],
         player["points_capacity"], player["pps"], player["last_collect"], player["inventory"],
         player["wins_today"], player["mission_date"], player["mission_claimed"], player["last_keyword_ts"],
+        player.get("message_count", 0), player.get("streak_days", 0), player.get("last_active_date", ""),
+        player.get("week_message_count", 0), player.get("week_start_date", ""),
         player["chat_id"], player["user_id"],
     ))
     conn.commit()
@@ -466,6 +586,20 @@ def _get_leaderboard(chat_id, limit=10):
     c.execute(
         "SELECT username, score FROM players WHERE chat_id=? ORDER BY score DESC LIMIT ?",
         (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_weekly_activity(chat_id, limit=10):
+    week_start = _week_start_iso()
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, week_message_count FROM players "
+        "WHERE chat_id=? AND week_start_date=? ORDER BY week_message_count DESC LIMIT ?",
+        (chat_id, week_start, limit),
     )
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
@@ -541,6 +675,23 @@ def _list_get(chat_id, list_type):
     return rows
 
 
+WARN_EXPIRY_SECONDS = 30 * 24 * 3600  # اخطارها بعد از ۳۰ روز بدون تکرار، خودکار پاک می‌شن
+
+
+def _list_get_one_added_at(chat_id, list_type, item_key):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT item_value, added_at FROM group_lists WHERE chat_id=? AND list_type=? AND item_key=?",
+        (chat_id, list_type, str(item_key)),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None, None
+    return row["item_value"], row["added_at"]
+
+
 def _list_get_one(chat_id, list_type, item_key):
     conn = _connect()
     c = conn.cursor()
@@ -587,6 +738,45 @@ def collect_points(player):
     player["points_balance"] = min(player["points_capacity"], player["points_balance"] + gained)
     player["last_collect"] = now
     return player
+
+
+def _week_start_iso():
+    today = date.today()
+    return (today - timedelta(days=today.weekday())).isoformat()  # شنبه/دوشنبه فرقی نداره، فقط ثابت باشه کافیه
+
+
+def update_activity(player):
+    """شمارنده‌ی پیام، استریک روزانه و شمارنده‌ی هفتگی رو آپدیت می‌کنه."""
+    today = date.today().isoformat()
+    player["message_count"] = player.get("message_count", 0) + 1
+
+    last = player.get("last_active_date") or ""
+    if last != today:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        player["streak_days"] = (player.get("streak_days") or 0) + 1 if last == yesterday else 1
+        player["last_active_date"] = today
+
+    week_start = _week_start_iso()
+    if player.get("week_start_date") != week_start:
+        player["week_start_date"] = week_start
+        player["week_message_count"] = 0
+    player["week_message_count"] = (player.get("week_message_count") or 0) + 1
+    return player
+
+
+BADGES = [
+    ("🥇 اولین برد", lambda p: p["game_wins"] >= 1),
+    ("🎯 ۱۰ برد", lambda p: p["game_wins"] >= 10),
+    ("🏆 ۵۰ برد", lambda p: p["game_wins"] >= 50),
+    ("💯 ۱۰۰ بازی", lambda p: (p["game_wins"] + p["game_losses"]) >= 100),
+    ("🔥 استریک ۷ روزه", lambda p: (p.get("streak_days") or 0) >= 7),
+    ("🔥🔥 استریک ۳۰ روزه", lambda p: (p.get("streak_days") or 0) >= 30),
+    ("🗣 پرحرف (۵۰۰ پیام)", lambda p: (p.get("message_count") or 0) >= 500),
+]
+
+
+def get_earned_badges(player):
+    return [label for label, cond in BADGES if cond(player)]
 
 
 def check_rate_limit(user_id) -> bool:
@@ -723,13 +913,53 @@ def build_characters_keyboard(player):
     return InlineKeyboardMarkup(rows)
 
 
+PACK2_WORDS = ["2048", "چراغ‌ها", "حافظه", "نبرد دریایی", "گنج پنهان"]
+PACK4_WORDS = ["مین یاب", "نقطه بازی", "تیکو", "جمشید", "گیر بازار"]
+PACK3_WORDS = ["لیست پرحرفا", "عضویت پسرا", "عضویت دخترا", "لیست پسرا", "لیست دخترا"]
+
+
+def build_words_panel_text() -> str:
+    game_words = sorted(GAME_TRIGGER_WORDS) + PACK2_WORDS + PACK4_WORDS
+    lines = [
+        "📜 *همه‌ی کلمات و دستورهای ربات*",
+        "",
+        "🦇 *صدا زدن ربات (بدون ریپلای هم کار می‌کنه):*",
+        " / ".join(NICKNAME_TRIGGERS),
+        "",
+        "🎮 *بازی‌ها (کافیه اسمشو تو چت بنویسی):*",
+        "، ".join(game_words),
+        "",
+        "👥 *لیست‌های اجتماعی:*",
+        "، ".join(PACK3_WORDS),
+        "",
+        "💞 *فیچرهای اجتماعی:*",
+        f"«{MARRY_TRIGGERS[0]}» (ریپلای) — ازدواج",
+        f"«{DIVORCE_TRIGGERS[0]}» — طلاق",
+        f"«{COUPLE_TRIGGERS[0]}» — نمایش رابطه",
+        f"«{REPORT_TRIGGERS[0]}» (ریپلای) — گزارش به ادمین‌ها",
+        "«هدیه <عدد>» (ریپلای) — هدیه‌ی پوینت",
+        "«نظرسنجی سوال | گزینه۱ | گزینه۲» — نظرسنجی سریع",
+        "",
+        "📊 *پروفایل و رکورد:*",
+        "«رکورد من» / «بج های من» — رکورد و بج‌ها",
+        "«گزارش گروه» (فقط ادمین) — فعال‌ترین‌های هفته",
+        "«تنظیمات» / «پنل» — همین پنل",
+        "",
+        "🛡 *مدیریت گروه (فقط ادمین، جزئیات کامل تو بخش «مدیریت گروه»):*",
+        "/ban /kick /mute /unmute /warn /unwarn /log /filter /autoreply",
+        "یا زبان طبیعی: «بن کن»، «میوت کن»، «کیک کن»، «پاکش کن»",
+    ]
+    return "\n".join(lines)
+
+
 def build_panel_main_keyboard():
     rows = [
         [InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona"),
          InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games")],
         [InlineKeyboardButton("📋 لیست‌ها", callback_data="panel:lists"),
          InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod")],
-        [InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
+        [InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"),
+         InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -781,6 +1011,7 @@ PANEL_TEXTS = {
         "برای چت، تو گروه منشنم کن."
     ),
 }
+PANEL_TEXTS["words"] = build_words_panel_text()
 
 LIST_TYPES = {
     "special": "اعضای ویژه",
@@ -914,6 +1145,13 @@ def build_profile_text(chat, player) -> str:
     else:
         lines.append("🔥 مقام در حداکثره!")
 
+    lines.append("")
+    lines.append(f"🔥 استریک فعالیت : {player.get('streak_days', 0) or 0} روز")
+    lines.append(f"⚔️ برد/باخت بازی‌ها : {player.get('game_wins', 0) or 0} / {player.get('game_losses', 0) or 0}")
+    badges = get_earned_badges(player)
+    if badges:
+        lines.append(f"🎖 بج‌ها : {' '.join(badges)}")
+
     return "\n".join(lines)
 
 
@@ -1021,6 +1259,176 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_profile(update, chat, player)
 
 
+async def grouptreport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("⛔️ این دستور فقط برای ادمین‌هاست.")
+        return
+    rows = await db_run(_get_weekly_activity, update.effective_chat.id, 10)
+    if not rows:
+        await update.message.reply_text("📊 هنوز فعالیتی تو این هفته ثبت نشده.")
+        return
+    lines = ["📊 *گزارش GCPD این هفته — پرفعالیت‌ترین اعضا:*\n"]
+    for i, r in enumerate(rows, 1):
+        name = f"@{r['username']}" if r["username"] else "بدون‌یوزرنیم"
+        lines.append(f"{i}. {name} — {r['week_message_count']} پیام")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def marry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("💍 باید رو پیام کسی که می‌خوای باهاش ازدواج کنی ریپلای بزنی.")
+        return
+    target = msg.reply_to_message.from_user
+    if target.id == user.id or target.is_bot:
+        await msg.reply_text("🙂 این‌جوری نمی‌شه.")
+        return
+    chat_id = update.effective_chat.id
+    rows = _list_get(chat_id, "married")
+    for key, _ in rows:
+        if str(user.id) in key.split("_") or str(target.id) in key.split("_"):
+            await msg.reply_text("💔 یکی از شما دو نفر از قبل تو یه رابطه‌ست. اول طلاق بگیر.")
+            return
+    key = f"{min(user.id, target.id)}_{max(user.id, target.id)}"
+    _list_add(chat_id, "married", key, json.dumps({
+        "a": user.id, "a_name": user.first_name, "b": target.id, "b_name": target.first_name,
+    }))
+    await msg.reply_text(f"💍 مبارکه! {user.first_name} و {target.first_name} از این به بعد باهمن 🎉")
+
+
+async def divorce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    rows = _list_get(chat_id, "married")
+    for key, value in rows:
+        if str(user.id) in key.split("_"):
+            _list_remove(chat_id, "married", key)
+            try:
+                data = json.loads(value)
+                partner = data["b_name"] if data["a"] == user.id else data["a_name"]
+            except Exception:
+                partner = "شریکت"
+            await update.effective_message.reply_text(f"💔 طلاق از {partner} ثبت شد.")
+            return
+    await update.effective_message.reply_text("😐 تو الان تو هیچ رابطه‌ای نیستی.")
+
+
+async def couple_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    rows = _list_get(chat_id, "married")
+    for key, value in rows:
+        if str(user.id) in key.split("_"):
+            try:
+                data = json.loads(value)
+                partner = data["b_name"] if data["a"] == user.id else data["a_name"]
+            except Exception:
+                partner = "نامشخص"
+            await update.effective_message.reply_text(f"💞 {user.first_name} با {partner} توی یه رابطه‌ست.")
+            return
+    await update.effective_message.reply_text("😔 تو الان تو هیچ رابطه‌ای نیستی. رو پیام یکی ریپلای بزن و بنویس «ازدواج».")
+
+
+async def gift_points_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("🎁 باید رو پیام کسی که می‌خوای بهش هدیه بدی ریپلای بزنی.")
+        return
+    target = msg.reply_to_message.from_user
+    if target.id == user.id or target.is_bot:
+        await msg.reply_text("🙂 نمی‌تونی به خودت هدیه بدی.")
+        return
+    if amount <= 0:
+        await msg.reply_text("⚠️ مقدار باید بیشتر از صفر باشه.")
+        return
+    chat_id = update.effective_chat.id
+    sender = await db_run(_get_player, chat_id, user.id, user.username or "")
+    sender = collect_points(sender)
+    if sender["points_balance"] < amount:
+        await msg.reply_text(f"⚠️ پوینت کافی نداری (موجودی: {int(sender['points_balance'])}).")
+        return
+    receiver = await db_run(_get_player, chat_id, target.id, target.username or "")
+    receiver = collect_points(receiver)
+    sender["points_balance"] -= amount
+    receiver["points_balance"] = min(receiver["points_capacity"], receiver["points_balance"] + amount)
+    await db_run(_save_player, sender)
+    await db_run(_save_player, receiver)
+    await msg.reply_text(f"🎁 {user.first_name}، {amount} پوینت به {target.first_name} هدیه دادی!")
+
+
+async def send_quick_poll(update: Update, context: ContextTypes.DEFAULT_TYPE, payload: str):
+    parts = [p.strip() for p in payload.split("|")]
+    question = parts[0] if parts else ""
+    options = [p for p in parts[1:] if p]
+    if not question or len(options) < 2:
+        await update.effective_message.reply_text(
+            "📊 فرمت درست: نظرسنجی سوال | گزینه۱ | گزینه۲ | گزینه۳..."
+        )
+        return
+    await context.bot.send_poll(
+        chat_id=update.effective_chat.id, question=question[:300],
+        options=[o[:100] for o in options[:10]], is_anonymous=False,
+    )
+
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg.reply_to_message:
+        await msg.reply_text("🚨 باید رو پیام مشکل‌دار ریپلای بزنی و بنویسی «ریپورت».")
+        return
+    chat_id = update.effective_chat.id
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+    except Exception:
+        await msg.reply_text("⚠️ نتونستم لیست ادمین‌ها رو بگیرم.")
+        return
+    mentions = " ".join(
+        f"[{a.user.first_name}](tg://user?id={a.user.id})" for a in admins if not a.user.is_bot
+    )
+    reported = msg.reply_to_message.from_user
+    await msg.reply_text(
+        f"🚨 گزارش تخلف از {reported.first_name if reported else 'کاربر'} توسط {update.effective_user.first_name}\n"
+        f"{mentions}",
+        parse_mode="Markdown",
+    )
+
+
+async def record_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """رکورد شخصی برد/باخت بازی‌ها؛ اگه ریپلای به یه نفر باشه، رکورد رودررو رو نشون می‌ده."""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    player = await db_run(_get_player, chat_id, user.id, user.username or "")
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        rival = update.message.reply_to_message.from_user
+        if rival.id != user.id and not rival.is_bot:
+            key = f"{min(user.id, rival.id)}_{max(user.id, rival.id)}"
+            raw = _list_get_one(chat_id, "h2h", key) or "{}"
+            try:
+                h2h = json.loads(raw)
+            except Exception:
+                h2h = {}
+            my_wins = h2h.get(str(user.id), 0)
+            their_wins = h2h.get(str(rival.id), 0)
+            await update.message.reply_text(
+                f"⚔️ رکورد رودررو {user.first_name} در برابر {rival.first_name}:\n"
+                f"{user.first_name}: {my_wins} برد\n"
+                f"{rival.first_name}: {their_wins} برد"
+            )
+            return
+
+    total = player["game_wins"] + player["game_losses"]
+    rate = (player["game_wins"] / total * 100) if total else 0
+    await update.message.reply_text(
+        f"🏆 رکورد بازی‌های {user.first_name}:\n"
+        f"برد: {player['game_wins']} | باخت: {player['game_losses']}\n"
+        f"درصد برد: {rate:.0f}٪\n\n"
+        f"«{gotham_signature_line()}»"
+    )
+
+
 async def shop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛒 فروشگاه گاتهام:", reply_markup=build_shop_keyboard())
 
@@ -1113,7 +1521,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=build_lists_keyboard(), parse_mode="Markdown")
         return
 
-    if data in ("panel:games", "panel:mod", "panel:about"):
+    if data in ("panel:games", "panel:mod", "panel:about", "panel:words"):
         section = data.split(":", 1)[1]
         await query.edit_message_text(PANEL_TEXTS[section], reply_markup=build_back_keyboard(), parse_mode="Markdown")
         return
@@ -1311,7 +1719,8 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _list_add(chat_id, "banned", target.id, target.username or target.first_name or "")
     _list_remove(chat_id, "muted", target.id)
-    await update.message.reply_text(f"🔨 {target.first_name} برای همیشه از گروه اخراج شد.")
+    _log_mod_action(chat_id, update.effective_user.first_name, "بن", target.first_name)
+    await update.message.reply_text(f"🔨 {target.first_name} فرستاده شد به آرکهام، برای همیشه.")
 
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1325,7 +1734,8 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ نشد: {e}")
         return
-    await update.message.reply_text(f"👢 {target.first_name} موقتاً اخراج شد (می‌تونه دوباره بیاد).")
+    _log_mod_action(chat_id, update.effective_user.first_name, "کیک", target.first_name)
+    await update.message.reply_text(f"👢 {target.first_name} از گاتهام بیرون انداخته شد (موقت، می‌تونه برگرده).")
 
 
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1350,7 +1760,8 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ نشد: {e}")
         return
     _list_add(chat_id, "muted", target.id, target.username or target.first_name or "")
-    await update.message.reply_text(f"🔇 {target.first_name} به مدت {minutes} دقیقه ساکت شد.")
+    _log_mod_action(chat_id, update.effective_user.first_name, f"میوت {minutes} دقیقه", target.first_name)
+    await update.message.reply_text(f"🔇 {target.first_name} به مدت {minutes} دقیقه تو سلول سکوت آرکهام موند.")
 
 
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1372,7 +1783,8 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ نشد: {e}")
         return
     _list_remove(chat_id, "muted", target.id)
-    await update.message.reply_text(f"🔊 سکوت {target.first_name} برداشته شد.")
+    _log_mod_action(chat_id, update.effective_user.first_name, "آنمیوت", target.first_name)
+    await update.message.reply_text(f"🔊 {target.first_name} از سلول سکوت آزاد شد.")
 
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1394,19 +1806,26 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target:
         return
     chat_id = update.effective_chat.id
-    current = _list_get_one(chat_id, "warn", target.id)
+    current, added_at = _list_get_one_added_at(chat_id, "warn", target.id)
+    # اگه آخرین اخطار بیش از ۳۰ روز پیش بوده، از صفر شروع کن
+    if current and added_at and (time.time() - added_at) > WARN_EXPIRY_SECONDS:
+        current = None
     count = int(current) + 1 if current else 1
     if count >= 3:
         try:
             await context.bot.ban_chat_member(chat_id, target.id)
             _list_add(chat_id, "banned", target.id, target.username or target.first_name or "")
             _list_remove(chat_id, "warn", target.id)
+            _log_mod_action(chat_id, update.effective_user.first_name, "بن (۳ اخطار)", target.first_name)
             await update.message.reply_text(f"🚨 {target.first_name} به ۳ اخطار رسید و بن شد.")
         except Exception as e:
             await update.message.reply_text(f"⚠️ نشد بن کنم: {e}")
         return
     _list_add(chat_id, "warn", target.id, count)
-    await update.message.reply_text(f"⚠️ {target.first_name} اخطار گرفت ({count}/۳).")
+    _log_mod_action(chat_id, update.effective_user.first_name, f"اخطار ({count}/۳)", target.first_name)
+    await update.message.reply_text(
+        f"⚠️ {target.first_name} اخطار گرفت ({count}/۳). اخطارها بعد ۳۰ روز بدون تکرار پاک می‌شن."
+    )
 
 
 async def unwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1415,7 +1834,23 @@ async def unwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     _list_remove(chat_id, "warn", target.id)
+    _log_mod_action(chat_id, update.effective_user.first_name, "پاک‌کردن اخطار", target.first_name)
     await update.message.reply_text(f"✅ اخطارهای {target.first_name} پاک شد.")
+
+
+async def modlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("⛔️ این دستور فقط برای ادمین‌هاست.")
+        return
+    rows = _get_mod_log(update.effective_chat.id, limit=15)
+    if not rows:
+        await update.message.reply_text("📋 GCPD هنوز هیچ پرونده‌ای ثبت نکرده.")
+        return
+    lines = ["📋 *پرونده‌های GCPD — آخرین اکشن‌های مدیریتی:*\n"]
+    for r in rows:
+        dt = datetime.fromtimestamp(r["ts"]).strftime("%m/%d %H:%M")
+        lines.append(f"`{dt}` — {r['admin_name']} ⬅️ {r['action']} ⬅️ {r['target_name']}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def exempt_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1693,11 +2128,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_autoreply_check(update, context, chat_id, text):
             return
 
-    if not check_rate_limit(user_id):
-        return  # ضد اسپم: سکوت کامل تا پنجره زمانی تموم بشه
-
     player = await db_run(_get_player, chat_id, user_id, username)
     player = collect_points(player)
+    player = update_activity(player)
 
     # --- کلیدواژه "تنظیمات"/"پنل" برای باز کردن پنل تنظیمات، حتی بدون منشن ---
     if stripped in ("تنظیمات", "پنل"):
@@ -1706,6 +2139,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await db_run(_save_player, player)
         return
+
+    # --- کلیدواژه "کلمات ربات"/"لیست کلمات" برای دسترسی مستقیم به بخش کلمات پنل ---
+    if stripped in ("کلمات ربات", "لیست کلمات", "همه کلمات"):
+        await update.message.reply_text(
+            PANEL_TEXTS["words"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
+        )
+        await db_run(_save_player, player)
+        return
+
+    # --- کلیدواژه "گزارش گروه" برای گزارش فعالیت هفتگی (فقط ادمین) ---
+    if is_group and stripped in ("گزارش گروه", "گزارش فعالیت"):
+        await grouptreport_cmd(update, context)
+        await db_run(_save_player, player)
+        return
+
+    # --- کلیدواژه "رکورد من"/"بج های من" برای رکورد و بج‌ها، حتی بدون منشن ---
+    if stripped in ("رکورد من", "رکورد", "بج های من", "بج‌های من"):
+        await record_cmd(update, context)
+        await db_run(_save_player, player)
+        return
+
+    # --- ازدواج/طلاق/رابطه، هدیه، نظرسنجی، ریپورت — همیشه فعالن، حتی بدون منشن ---
+    if is_group:
+        if stripped in MARRY_TRIGGERS:
+            await marry_cmd(update, context)
+            await db_run(_save_player, player)
+            return
+        if stripped in DIVORCE_TRIGGERS:
+            await divorce_cmd(update, context)
+            await db_run(_save_player, player)
+            return
+        if stripped in COUPLE_TRIGGERS:
+            await couple_cmd(update, context)
+            await db_run(_save_player, player)
+            return
+        if stripped in REPORT_TRIGGERS:
+            await report_cmd(update, context)
+            await db_run(_save_player, player)
+            return
+        gift_match = GIFT_RE.match(stripped)
+        if gift_match:
+            await gift_points_cmd(update, context, int(gift_match.group(1)))
+            await db_run(_save_player, player)
+            return
+        poll_match = POLL_RE.match(stripped)
+        if poll_match:
+            await send_quick_poll(update, context, poll_match.group(1))
+            await db_run(_save_player, player)
+            return
 
     # --- کلیدواژه "بتمن" برای گرفتن پوینت، حتی بدون منشن، تو گروه‌ها ---
     if KEYWORD_POINT in text:
@@ -1716,10 +2198,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 player["points_capacity"], player["points_balance"] + KEYWORD_REWARD
             )
 
+    # --- اگه این پیام مال بازی‌هاست (کلمه‌ی شروع بازی یا حرکت داخل یه بازیِ فعال)،
+    # بی‌خیال پاسخ هوش مصنوعی شو - حتی اگه کاربر رو پیام خود بتمن ریپلای زده باشه یا
+    # قبل/بعد کلمه‌ی بازی، اسم/لقب بتمن رو هم نوشته باشه (مثلاً "بتمن دوز").
+    # (خود سیستم بازی‌ها تو گروه‌های جدا هندلرش رو داره و همینجوری اجرا می‌شه.)
+    game_text_candidate = stripped
+    if context.bot.username:
+        game_text_candidate = game_text_candidate.replace(f"@{context.bot.username}", "").strip()
+    for nick in NICKNAME_TRIGGERS:
+        game_text_candidate = game_text_candidate.replace(nick, "").strip()
+    if is_any_game_text(chat_id, stripped) or is_any_game_text(chat_id, game_text_candidate):
+        await db_run(_save_player, player)
+        return
+
     mentioned = is_bot_mentioned(update, context)
     if is_group and not mentioned:
         await db_run(_save_player, player)
         return  # تو گروه فقط با منشن ادامه بده
+
+    # محدودیت نرخ فقط رو مسیری که واقعاً قراره هوش مصنوعی صدا زده بشه اعمال می‌شه؛
+    # اینجوری چت عادی گروه بدون منشن، بودجه‌ی محدودیت رو مصرف نمی‌کنه و منشن واقعی
+    # هیچ‌وقت به‌خاطر شلوغی گروه بی‌صدا حذف نمی‌شه.
+    if not check_rate_limit(user_id):
+        await db_run(_save_player, player)
+        return  # ضد اسپم: سکوت کامل تا پنجره زمانی تموم بشه
 
     chat = await db_run(_get_chat, chat_id)
 
@@ -1783,6 +2285,75 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+#  کپچای اعضای جدید (ضد ربات/اسپم‌بات)
+# =========================================================
+
+async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id, member.id,
+                permissions=ChatPermissions(can_send_messages=False),
+            )
+        except Exception:
+            pass  # اگه ربات ادمین نباشه یا دسترسی نداشته باشه، بی‌خیال کپچا شو
+            continue
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ من دلقک جوکر نیستم", callback_data=f"captcha:{member.id}")
+        ]])
+        sent = await update.message.reply_text(
+            f"🦇 {member.first_name}، به گاتهام خوش اومدی. مراقب سایه‌ها باش.\n"
+            f"برای فعال شدن، تا {CAPTCHA_TIMEOUT_SECONDS // 60} دقیقه دیگه دکمه‌ی زیر رو بزن،"
+            f" ثابت کن یکی از دلقک‌های جوکر نیستی.",
+            reply_markup=keyboard,
+        )
+        asyncio.create_task(_captcha_timeout_watch(chat_id, member.id, sent.message_id, context.bot))
+
+
+async def _captcha_timeout_watch(chat_id, user_id, message_id, bot):
+    await asyncio.sleep(CAPTCHA_TIMEOUT_SECONDS)
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        if member.status not in ("left", "kicked") and member.permissions and not member.permissions.can_send_messages:
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)  # کیک، نه بن دائم
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text="⏰ وقت تایید تموم شد و عضو اخراج شد.",
+            )
+    except Exception:
+        pass
+
+
+async def captcha_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, target_id = query.data.split(":")
+    target_id = int(target_id)
+    if query.from_user.id != target_id:
+        await query.answer("این دکمه‌ی تو نیست 🙂", show_alert=True)
+        return
+    chat_id = query.message.chat.id
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id, target_id,
+            permissions=ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            ),
+        )
+    except Exception as e:
+        await query.answer(f"مشکلی پیش اومد: {e}", show_alert=True)
+        return
+    await query.edit_message_text(f"✅ {query.from_user.first_name} تایید شد، خوش اومدی!")
+    await query.answer()
+
+
+# =========================================================
 #  MAIN
 # =========================================================
 
@@ -1825,8 +2396,15 @@ def main():
     app.add_handler(CommandHandler("allowforward", allowforward_cmd))
     app.add_handler(CommandHandler("unallowforward", unallowforward_cmd))
     app.add_handler(CommandHandler("schedule", schedule_cmd))
+    app.add_handler(CommandHandler("log", modlog_cmd))
+    app.add_handler(CommandHandler("record", record_cmd))
+    app.add_handler(CommandHandler("groupreport", grouptreport_cmd))
 
+    # captcha باید قبل از button_handلر بدون‌الگو ثبت بشه، وگرنه چون button_handler
+    # هر callback query‌ای رو (بدون pattern) قاپ می‌زنه، captcha هیچ‌وقت اجرا نمی‌شه.
+    app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(MessageHandler(filters.ANIMATION, handle_gif))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -1835,6 +2413,13 @@ def main():
     register_extra_games(app)
     register_extra_lists(app)
     register_extra_games2(app)
+
+    # --- پیام نیمه‌شب گاتهام (رویداد + دیالوگ)، خودکار برای همه‌ی گروه‌ها ---
+    try:
+        from midnight_announcement import register_midnight_job
+        register_midnight_job(app)
+    except Exception as e:
+        log.warning(f"⚠️ پیام نیمه‌شب فعال نشد: {e}")
 
     log.info("🦇 Batman Gotham Bot is running...")
     app.run_polling()
