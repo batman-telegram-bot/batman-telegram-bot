@@ -60,12 +60,27 @@ def _get_all_chat_ids():
     return ids
 
 
+def _special_event_for_date(now: datetime):
+    """اگه امروز یه مناسبت خاصه، یه رویداد/دیالوگ ویژه برمی‌گردونه؛ وگرنه None."""
+    if now.month == 10 and now.day == 31:
+        return ("🎃 Arkham's Halloween — هالووین آرکهام", "امشب حتی مجرم‌ها هم نقاب می‌زنن؛ من فرقی نمی‌کنم.")
+    if now.month == 12 and now.day == 21:
+        return ("🕯️ The Longest Night — طولانی‌ترین شب سال", "امشب طولانی‌ترین شبیه؛ برای من هر شب طولانیه.")
+    if now.weekday() == 4 and now.day == 13:  # جمعه‌ی سیزدهم
+        return ("🩸 Friday the 13th in Gotham — جمعه‌ی سیزدهم گاتهام", "امشب حتی شانس هم از گاتهام فرار کرده.")
+    return None
+
+
 async def midnight_announcement(context):
     now = datetime.now(TEHRAN_TZ)
     fa_str = _format_persian_date(now)
     en_str = _format_english_date(now)
-    event = pick_event_name()
-    line = pick_dialogue_line()
+    special = _special_event_for_date(now)
+    if special:
+        event, line = special
+    else:
+        event = pick_event_name()
+        line = pick_dialogue_line()
 
     text = (
         "🌑 نیمه‌شب فرا رسید\n"
@@ -85,6 +100,38 @@ async def midnight_announcement(context):
             await context.bot.send_message(chat_id=chat_id, text=text)
         except Exception:
             pass  # اگه ربات از یه گروه حذف شده باشه یا خطای دیگه‌ای بخوره، بی‌خیال اون یکی شو
+
+    try:
+        import bot as _bot
+        _bot._log_gotham_event(event, line)
+    except Exception:
+        pass
+
+    # 🏆 اول هر ماه (میلادی)، شوالیه‌ی ماه رو برای هر گروه اعلام کن
+    if now.day == 1:
+        await _announce_knight_of_month(context, chat_ids)
+
+
+async def _announce_knight_of_month(context, chat_ids):
+    import bot as _bot
+    for chat_id in chat_ids:
+        try:
+            rows = _bot._get_leaderboard(chat_id, limit=1)
+            if not rows:
+                continue
+            top = rows[0]
+            name = f"@{top['username']}" if top["username"] else "شهروند ناشناس"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "🏆 *شوالیه‌ی این ماه گاتهام*\n\n"
+                    f"{name} با بیشترین امتیاز، لقب شوالیه‌ی ماه رو گرفت!\n"
+                    "🦇 گاتهام بهت افتخار می‌کنه."
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
 
 def register_midnight_job(application):
