@@ -170,6 +170,36 @@ def get_date_info(now):
 
 
 # =========================================================
+# FULL DATE / TIME
+# =========================================================
+
+def build_full_datetime_text():
+    now = datetime.now(TEHRAN_TZ)
+
+    date = get_date_info(now)
+
+    return (
+        f"🦇 تایم گاتهام : "
+        f"{fa_num(now.strftime('%H:%M:%S'))}\n"
+
+        f"🌃 روز گاتهام : "
+        f"{date['weekday_fa']} - "
+        f"{fa_num(date['jalali'])} "
+        f"({date['jalali_month']})\n"
+
+        f"🌙 تقویم قمری : "
+        f"{date['weekday_fa']} - "
+        f"{fa_num(date['hijri'])} "
+        f"({date['hijri_month']})\n"
+
+        f"☀️ تقویم میلادی : "
+        f"{date['english_weekday']} - "
+        f"{now.strftime('%Y/%m/%d')} "
+        f"({date['english_month']})"
+    )
+
+
+# =========================================================
 # YEAR PROGRESS
 # =========================================================
 
