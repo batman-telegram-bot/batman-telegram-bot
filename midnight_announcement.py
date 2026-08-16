@@ -15,6 +15,7 @@ Midnight Gotham Announcement
     register_midnight_job(app)
 """
 
+import time as time_module
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -227,6 +228,48 @@ async def _announce_knight_of_month(context, chat_ids):
             pass
 
 
+async def morning_quote(context):
+    """هر روز صبح ساعت ۸، یه دیالوگ کوتاه گاتهامی می‌فرسته - جدا از پیام نیمه‌شب."""
+    from gotham_content import gotham_signature_line
+    try:
+        chat_ids = _get_all_chat_ids()
+    except Exception:
+        chat_ids = []
+    text = f"☀️ صبح گاتهام\n«{gotham_signature_line()}»"
+    for chat_id in chat_ids:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        except Exception:
+            pass
+
+
+async def check_quiet_groups(context):
+    """هر ۲ ساعت چک می‌کنه گروه‌هایی که بیش از ۱۲ ساعته کاملاً ساکتن رو، و یه پیام
+    می‌فرسته - فقط یه‌بار به ازای هر دوره‌ی سکوت (تا اسپم نشه)."""
+    import bot as _bot
+    from gotham_content import gotham_signature_line
+    now = time_module.time()
+    try:
+        chat_ids = _get_all_chat_ids()
+    except Exception:
+        chat_ids = []
+    for chat_id in chat_ids:
+        try:
+            last = _bot._list_get_one(chat_id, "meta", "last_msg_ts")
+            already_notified = _bot._list_get_one(chat_id, "meta", "quiet_notified")
+            if not last:
+                continue
+            gap = now - float(last)
+            if gap > 12 * 3600 and already_notified != last:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🌑 گاتهام مدتیه ساکته... کسی نیست؟\n«{gotham_signature_line()}»",
+                )
+                _bot._list_add(chat_id, "meta", "quiet_notified", last)
+        except Exception:
+            pass
+
+
 def register_midnight_job(application):
     """application: شیء Application ساخته‌شده تو bot.py. نیازی به chat_ids نیست،
     خودکار همه‌ی گروه‌های فعال رو از دیتابیس ربات پیدا می‌کنه."""
@@ -243,4 +286,15 @@ def register_midnight_job(application):
         midnight_announcement,
         time=dtime(hour=0, minute=0, second=0, tzinfo=TEHRAN_TZ),
         name="midnight_gotham_announcement",
+    )
+    application.job_queue.run_daily(
+        morning_quote,
+        time=dtime(hour=8, minute=0, second=0, tzinfo=TEHRAN_TZ),
+        name="gotham_morning_quote",
+    )
+    application.job_queue.run_repeating(
+        check_quiet_groups,
+        interval=2 * 3600,
+        first=2 * 3600,
+        name="gotham_quiet_group_check",
     )
