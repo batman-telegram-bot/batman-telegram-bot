@@ -1001,7 +1001,7 @@ PANEL_TEXTS = {
         "/autoreply کلیدواژه | پاسخ — پاسخ خودکار\n"
         "/unautoreply کلیدواژه — حذف پاسخ خودکار\n"
         "/allowusername یوزرنیم — مجاز کردن یوزرنیم\n"
-        "/allowforward یوزرنیم_کانال — مجاز کردن فوروارد\n"
+        "/allowforward یوزرنیم کانال — مجاز کردن فوروارد\n"
         "/schedule YYYY-MM-DD HH:MM متن — زمانبندی پست\n\n"
         "یا به زبان طبیعی: «بن کن»، «میوت کن»، «کیک کن»، «پاکش کن»"
     ),
@@ -1523,7 +1523,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data in ("panel:games", "panel:mod", "panel:about", "panel:words"):
         section = data.split(":", 1)[1]
-        await query.edit_message_text(PANEL_TEXTS[section], reply_markup=build_back_keyboard(), parse_mode="Markdown")
+        try:
+            await query.edit_message_text(
+                PANEL_TEXTS[section], reply_markup=build_back_keyboard(), parse_mode="Markdown"
+            )
+        except Exception:
+            # اگه به هر دلیلی (مثلاً یه کاراکتر خاص تو متن) پارس مارک‌داون خطا بده،
+            # به‌جای اینکه دکمه بی‌صدا هیچ‌کاری نکنه، حداقل متن ساده رو نشون بده.
+            await query.edit_message_text(
+                PANEL_TEXTS[section].replace("*", ""), reply_markup=build_back_keyboard()
+            )
         return
 
     if data.startswith("lists:"):
@@ -1977,7 +1986,7 @@ async def allowforward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔️ این دستور فقط برای ادمین‌هاست.")
         return
     if not context.args:
-        await update.message.reply_text("✏️ استفاده: /allowforward یوزرنیم_کانال")
+        await update.message.reply_text("✏️ استفاده: /allowforward یوزرنیم کانال")
         return
     uname = context.args[0].lstrip("@")
     chat_id = update.effective_chat.id
@@ -1990,7 +1999,7 @@ async def unallowforward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⛔️ این دستور فقط برای ادمین‌هاست.")
         return
     if not context.args:
-        await update.message.reply_text("✏️ استفاده: /unallowforward یوزرنیم_کانال")
+        await update.message.reply_text("✏️ استفاده: /unallowforward یوزرنیم کانال")
         return
     uname = context.args[0].lstrip("@")
     chat_id = update.effective_chat.id
@@ -2142,9 +2151,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- کلیدواژه "کلمات ربات"/"لیست کلمات" برای دسترسی مستقیم به بخش کلمات پنل ---
     if stripped in ("کلمات ربات", "لیست کلمات", "همه کلمات"):
-        await update.message.reply_text(
-            PANEL_TEXTS["words"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
-        )
+        try:
+            await update.message.reply_text(
+                PANEL_TEXTS["words"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
+            )
+        except Exception:
+            await update.message.reply_text(
+                PANEL_TEXTS["words"].replace("*", ""), reply_markup=build_back_keyboard()
+            )
         await db_run(_save_player, player)
         return
 
