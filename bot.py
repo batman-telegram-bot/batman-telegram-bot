@@ -964,14 +964,31 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     if not GROQ_API_KEY:
         return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
 
-    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
+    system_prompt = (
+        PERSONAS[persona_key]["system"]
+        + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
+    )
+
     if is_night():
         system_prompt += NIGHT_FLAVOR
 
     history = list(CONVO_MEMORY[chat_id])
-    messages = [{"role": "system", "content": system_prompt}]
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        }
+    ]
+
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+
+    messages.append(
+        {
+            "role": "user",
+            "content": user_text
+        }
+    )
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -987,14 +1004,69 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                     "messages": messages,
                 },
             )
-            data = response.json()
-            reply = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        log.error(f"AI error: {e}")
-        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
 
-    CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
-    CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
+            # اگر Groq خطای HTTP بده، همین‌جا مشخص می‌شود
+            response.raise_for_status()
+
+            data = response.json()
+
+            # بررسی اینکه پاسخ واقعاً ساختار مورد انتظار را دارد
+            if "choices" not in data or not data["choices"]:
+                log.error(f"Groq response بدون choices: {data}")
+                return "🦇 گاتهام جواب درستی از هوش مصنوعی نگرفت."
+
+            reply = data["choices"][0]["message"]["content"]
+
+            if not reply:
+                log.error(f"Groq پاسخ خالی داد: {data}")
+                return "🦇 هوش مصنوعی چیزی برای گفتن نداشت."
+
+    except httpx.HTTPStatusError as e:
+        try:
+            error_data = e.response.json()
+        except Exception:
+            error_data = e.response.text
+
+        log.error(
+            f"Groq HTTP Error: "
+            f"status={e.response.status_code}, "
+            f"response={error_data}"
+        )
+
+        return (
+            f"🦇 خطای Groq: {e.response.status_code}\n"
+            f"{error_data}"
+        )
+
+    except httpx.TimeoutException:
+        log.error("Groq request timeout")
+        return "🦇 پاسخ گاتهام خیلی طول کشید؛ دوباره امتحان کن."
+
+    except httpx.RequestError as e:
+        log.error(f"Groq connection error: {e}")
+        return f"🦇 اتصال به هوش مصنوعی مشکل داشت:\n{e}"
+
+    except Exception as e:
+        log.exception("Unexpected AI error")
+        return (
+            f"🦇 خطای غیرمنتظره:\n"
+            f"{type(e).__name__}: {e}"
+        )
+
+    CONVO_MEMORY[chat_id].append(
+        {
+            "role": "user",
+            "content": user_text
+        }
+    )
+
+    CONVO_MEMORY[chat_id].append(
+        {
+            "role": "assistant",
+            "content": reply
+        }
+    )
+
     return reply
 
 
