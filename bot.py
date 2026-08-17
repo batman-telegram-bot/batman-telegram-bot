@@ -1005,7 +1005,54 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                 },
             )
 
+            # بررسی خطای HTTP
             response.raise_for_status()
+
+            # ==============================
+            # نمایش سهمیه باقی‌مانده در Railway
+            # ==============================
+
+            remaining_requests = response.headers.get(
+                "x-ratelimit-remaining-requests",
+                "نامشخص"
+            )
+
+            remaining_tokens = response.headers.get(
+                "x-ratelimit-remaining-tokens",
+                "نامشخص"
+            )
+
+            limit_requests = response.headers.get(
+                "x-ratelimit-limit-requests",
+                "نامشخص"
+            )
+
+            limit_tokens = response.headers.get(
+                "x-ratelimit-limit-tokens",
+                "نامشخص"
+            )
+
+            reset_requests = response.headers.get(
+                "x-ratelimit-reset-requests",
+                "نامشخص"
+            )
+
+            reset_tokens = response.headers.get(
+                "x-ratelimit-reset-tokens",
+                "نامشخص"
+            )
+
+            log.info(
+                "🦇 GROQ QUOTA | "
+                f"Requests: {remaining_requests}/{limit_requests} | "
+                f"Tokens: {remaining_tokens}/{limit_tokens} | "
+                f"Reset Requests: {reset_requests} | "
+                f"Reset Tokens: {reset_tokens}"
+            )
+
+            # ==============================
+            # دریافت پاسخ Groq
+            # ==============================
 
             data = response.json()
 
@@ -1025,10 +1072,35 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
         except Exception:
             error_data = e.response.text
 
+        # حتی در خطا هم سهمیه موجود در Header را ثبت کن
+        remaining_requests = e.response.headers.get(
+            "x-ratelimit-remaining-requests",
+            "نامشخص"
+        )
+
+        remaining_tokens = e.response.headers.get(
+            "x-ratelimit-remaining-tokens",
+            "نامشخص"
+        )
+
+        reset_requests = e.response.headers.get(
+            "x-ratelimit-reset-requests",
+            "نامشخص"
+        )
+
+        reset_tokens = e.response.headers.get(
+            "x-ratelimit-reset-tokens",
+            "نامشخص"
+        )
+
         log.error(
-            f"Groq HTTP Error: "
-            f"status={e.response.status_code}, "
-            f"response={error_data}"
+            "🦇 GROQ ERROR | "
+            f"Status: {e.response.status_code} | "
+            f"Remaining Requests: {remaining_requests} | "
+            f"Remaining Tokens: {remaining_tokens} | "
+            f"Reset Requests: {reset_requests} | "
+            f"Reset Tokens: {reset_tokens} | "
+            f"Response: {error_data}"
         )
 
         return (
@@ -1037,20 +1109,21 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
         )
 
     except httpx.TimeoutException:
-        log.error("Groq request timeout")
+        log.error("🦇 Groq request timeout")
         return "🦇 پاسخ گاتهام خیلی طول کشید؛ دوباره امتحان کن."
 
     except httpx.RequestError as e:
-        log.error(f"Groq connection error: {e}")
+        log.error(f"🦇 Groq connection error: {e}")
         return f"🦇 اتصال به هوش مصنوعی مشکل داشت:\n{e}"
 
     except Exception as e:
-        log.exception("Unexpected AI error")
+        log.exception("🦇 Unexpected AI error")
         return (
             f"🦇 خطای غیرمنتظره:\n"
             f"{type(e).__name__}: {e}"
         )
 
+    # ذخیره تاریخچه مکالمه
     CONVO_MEMORY[chat_id].append(
         {
             "role": "user",
