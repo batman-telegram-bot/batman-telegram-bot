@@ -999,18 +999,16 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "openai/gpt-oss-120b",
                     "max_tokens": 300,
                     "messages": messages,
                 },
             )
 
-            # اگر Groq خطای HTTP بده، همین‌جا مشخص می‌شود
             response.raise_for_status()
 
             data = response.json()
 
-            # بررسی اینکه پاسخ واقعاً ساختار مورد انتظار را دارد
             if "choices" not in data or not data["choices"]:
                 log.error(f"Groq response بدون choices: {data}")
                 return "🦇 گاتهام جواب درستی از هوش مصنوعی نگرفت."
