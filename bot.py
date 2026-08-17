@@ -988,9 +988,6 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                 },
             )
             data = response.json()
-            if "choices" not in data:
-                log.error(f"AI error: Groq returned no 'choices'. Status={response.status_code} Body={data}")
-                return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
             reply = data["choices"][0]["message"]["content"]
     except Exception as e:
         log.error(f"AI error: {e}")
