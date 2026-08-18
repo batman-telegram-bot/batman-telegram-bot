@@ -1,4 +1,3 @@
-python-telegram-bot==21.6
-httpx==0.27.2
-jdatetime
-hijri-converter
+python-telegram-bot>=20.0,<23.0
+httpx>=0.24,<1.0
+python-chess>=1.999,<2.0
