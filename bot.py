@@ -30,6 +30,7 @@ from gotham_content import gotham_signature_line, RIDDLES
 from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
+from board_games import register_board_games
 from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
 
@@ -47,6 +48,9 @@ _EXTRA_GAME_TRIGGERS_RE = re.compile(
     r"تیکو|بازی تیکو|"
     r"جمشید|بازی جمشید|"
     r"گیر بازار|بازی گیر بازار|"
+    r"شطرنج|بازی شطرنج|"
+    r"منچ|بازی منچ|"
+    r"مار و پله|ماروپله|بازی مار و پله|"
     r"لیست پرحرفا|لیست پرحرف\u200cها|پرحرفا|پرحرف\u200cها|"
     r"عضویت پسرا|ثبت پسرا|عضویت دخترا|ثبت دخترا|"
     r"لیست پسرا|لیست دخترا"
@@ -1022,11 +1026,12 @@ def build_characters_keyboard(player):
 
 PACK2_WORDS = ["2048", "چراغ‌ها", "حافظه", "نبرد دریایی", "گنج پنهان"]
 PACK4_WORDS = ["مین یاب", "نقطه بازی", "تیکو", "جمشید", "گیر بازار"]
+BOARD_WORDS = ["شطرنج", "منچ", "مار و پله"]
 PACK3_WORDS = ["لیست پرحرفا", "عضویت پسرا", "عضویت دخترا", "لیست پسرا", "لیست دخترا"]
 
 
 def build_words_panel_text() -> str:
-    game_words = sorted(GAME_TRIGGER_WORDS) + PACK2_WORDS + PACK4_WORDS
+    game_words = sorted(GAME_TRIGGER_WORDS) + PACK2_WORDS + PACK4_WORDS + BOARD_WORDS
     lines = [
         "📜 *همه‌ی کلمات و دستورهای ربات*",
         "",
@@ -3145,6 +3150,7 @@ def main():
     register_extra_games(app)
     register_extra_lists(app)
     register_extra_games2(app)
+    register_board_games(app)  # شطرنج / منچ / مار و پله — فقط با نوشتن اسم بازی
     register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
     register_ttt_gotham(app)  # دوز گاتهام — با نوشتن کلمه تو چت، بدون نیاز به inline mode
 
