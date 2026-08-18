@@ -28,6 +28,8 @@ from telegram.constants import ChatType, ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
+from ttt_gotham import gotham_ttt_start, TRIGGER_TEXT as GOTHAM_TTT_TRIGGER
+
 
 # =========================================================
 #  متن لیست بازی‌ها (به‌جای دستورات اسلش، حالا با کلمه کار می‌کنن)
@@ -64,6 +66,7 @@ GAMES_LIST_TEXT = (
     "گیر بازار — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن\n"
     "گیم / لیست بازی‌ها — نمایش دوباره‌ی همین پیام\n"
     "دوز آنلاین (inline) — تو هر چتی بنویس @نام_ربات و دوز ۳×۳ تا ۸×۸ رو با دوست یا با ربات شروع کن\n"
+    "دوز گاتهام — تو همین چت بنویس «دوز گاتهام»، سایز برد (۳×۳ تا ۸×۸) و حریف (با دوست/با ربات) رو با دکمه انتخاب کن\n"
 )
 
 
@@ -952,7 +955,7 @@ EXACT_TRIGGERS = {
 }
 
 
-GAME_TRIGGER_WORDS = set(EXACT_TRIGGERS.keys()) | {"دوز", "چهار در ردیف"}
+GAME_TRIGGER_WORDS = set(EXACT_TRIGGERS.keys()) | {"دوز", "چهار در ردیف", GOTHAM_TTT_TRIGGER}
 
 
 def is_game_text(chat_id, text: str) -> bool:
@@ -989,6 +992,11 @@ async def keyword_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1) دوز - به کلمه‌ی "دوز" با ریپلای نیاز داره
     if text == "دوز":
         await tictactoe_start(update, context)
+        return
+
+    # 1b) دوز گاتهام - منوی انتخاب سایز برد (۳×۳ تا ۸×۸) و حریف (با دوست/با ربات)
+    if text == GOTHAM_TTT_TRIGGER:
+        await gotham_ttt_start(update, context)
         return
 
     if text == "چهار در ردیف":

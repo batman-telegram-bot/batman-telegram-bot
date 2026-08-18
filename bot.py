@@ -31,6 +31,7 @@ from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
 from ttt_inline import register_ttt_inline
+from ttt_gotham import register_ttt_gotham
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -983,7 +984,7 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "openai/gpt-oss-120b",
                     "max_tokens": 300,
                     "messages": messages,
                 },
@@ -3145,6 +3146,7 @@ def main():
     register_extra_lists(app)
     register_extra_games2(app)
     register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
+    register_ttt_gotham(app)  # دوز گاتهام — با نوشتن کلمه تو چت، بدون نیاز به inline mode
 
     # --- پیام نیمه‌شب گاتهام (رویداد + دیالوگ)، خودکار برای همه‌ی گروه‌ها ---
     try:
