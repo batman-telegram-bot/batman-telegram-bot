@@ -38,7 +38,7 @@ EXTRA_GAMES_LIST_TEXT = (
     "2048 — گرید ۴×۴، دکمه‌های جهت‌دار\n"
     "چراغ‌ها — همه‌ی چراغ‌ها رو خاموش کن\n"
     "حافظه — جفت‌های مخفی رو پیدا کن\n"
-    "نبرد دریایی — (روی پیام حریف ریپلای کن)\n"
+    "نبرد دریایی — (روی پیام حریف ریپلای کن) ناوگان واقعی ۶×۶، با اصابت نوبت ادامه داری\n"
     "گنج پنهان — رو خونه‌ها کلیک کن، بمب نزن!\n"
 )
 
@@ -371,12 +371,14 @@ async def memory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-#  ۴. نبرد دریایی (ساده‌شده) — گرید ۵×۵، ۴ کشتی مخفی، دو نفره
+#  ۴. نبرد دریایی حرفه‌ای — هر بازیکن ناوگان واقعی خودش رو داره
+#     گرید ۶×۶، ناوگان [۳،۲،۲،۱،۱] (۹ خونه)، شلیک به تخته‌ی حریف،
+#     با اصابت نوبت ادامه پیدا می‌کنه، با خطا نوبت عوض می‌شه، غرق‌شدن هر کشتی اعلام می‌شه.
 # =========================================================
 
 BATTLESHIP_STATE = {}   # game_id -> {...}
-BS_SIZE = 5
-BS_SHIPS = 4
+BS_SIZE = 6
+BS_FLEET = [3, 2, 2, 1, 1]
 
 BS_LOBBIES = {}   # token -> {"creator": User}
 
@@ -385,35 +387,72 @@ def _bs_lobby_markup(token):
     return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 بپیوند به بازی", callback_data=f"lobby2:{token}")]])
 
 
-def _bs_markup(game_id, cells):
-    symbols = {"": "▫️", "H": "🔥", "M": "🌊"}
+def _bs_place_fleet():
+    """ناوگان رو بدون هم‌پوشانی، افقی یا عمودی، تصادفی رو گرید می‌چینه."""
+    occupied = set()
+    ships = []
+    for length in BS_FLEET:
+        placed = False
+        for _ in range(300):
+            horizontal = random.choice([True, False])
+            if horizontal:
+                r = random.randint(0, BS_SIZE - 1)
+                c = random.randint(0, BS_SIZE - length)
+                cells = {r * BS_SIZE + c + i for i in range(length)}
+            else:
+                r = random.randint(0, BS_SIZE - length)
+                c = random.randint(0, BS_SIZE - 1)
+                cells = {(r + i) * BS_SIZE + c for i in range(length)}
+            if cells & occupied:
+                continue
+            occupied |= cells
+            ships.append(cells)
+            placed = True
+            break
+        if not placed:  # به‌ندرت پیش میاد؛ فال‌بک بدون چک هم‌پوشانی
+            cells = set(random.sample(range(BS_SIZE * BS_SIZE), length))
+            occupied |= cells
+            ships.append(cells)
+    return ships, occupied
+
+
+def _bs_markup(game_id, board):
     rows = []
     for r in range(BS_SIZE):
         row = []
         for c in range(BS_SIZE):
             idx = r * BS_SIZE + c
-            row.append(InlineKeyboardButton(symbols[cells[idx]], callback_data=f"bs:{game_id}:{idx}"))
+            if idx in board["hits"]:
+                label = "🔥"
+            elif idx in board["misses"]:
+                label = "🌊"
+            else:
+                label = "▫️"
+            row.append(InlineKeyboardButton(label, callback_data=f"bs:{game_id}:{idx}"))
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
 
+def _bs_new_board():
+    ships, cells = _bs_place_fleet()
+    return {"ships": ships, "cells": cells, "hits": set(), "misses": set()}
+
+
 async def _launch_battleship(target_msg, p1, p2, edit=False):
-    game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}"
-    ships = set(random.sample(range(BS_SIZE * BS_SIZE), BS_SHIPS))
+    game_id = f"{target_msg.chat.id}_{p1.id}_{p2.id}_{random.randint(1000,9999)}"
     BATTLESHIP_STATE[game_id] = {
-        "cells": [""] * (BS_SIZE * BS_SIZE),
-        "ships": ships,
-        "found": set(),
-        "players": {p1.id: 0, p2.id: 0},
+        "boards": {p1.id: _bs_new_board(), p2.id: _bs_new_board()},
         "turn": p1.id,
         "names": {p1.id: p1.first_name, p2.id: p2.first_name},
     }
     state = BATTLESHIP_STATE[game_id]
+    fleet_desc = "، ".join(f"{n} خونه‌ای" for n in BS_FLEET)
     text = (
         f"🚢 نبرد دریایی: {p1.first_name} در برابر {p2.first_name}\n"
-        f"{BS_SHIPS} کشتی مخفی روی گرید هست. نوبت: {p1.first_name}"
+        f"ناوگان هرکس: {fleet_desc} (جمعاً {sum(BS_FLEET)} خونه، مخفی)\n\n"
+        f"🎯 نوبت: {p1.first_name} — رو تخته‌ی زیر (تخته‌ی حریف) بزن!"
     )
-    markup = _bs_markup(game_id, state["cells"])
+    markup = _bs_markup(game_id, state["boards"][p2.id])
     if edit:
         await target_msg.edit_text(text, reply_markup=markup)
     else:
@@ -468,52 +507,53 @@ async def battleship_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     user_id = query.from_user.id
-    if user_id not in state["players"]:
+    if user_id not in state["boards"]:
         await query.answer("تو تو این بازی نیستی.", show_alert=True)
         return
     if state["turn"] != user_id:
         await query.answer("نوبت تو نیست.", show_alert=True)
         return
-    if state["cells"][idx] != "":
+
+    opponent_id = [pid for pid in state["boards"] if pid != user_id][0]
+    board = state["boards"][opponent_id]  # تخته‌ای که داریم بهش شلیک می‌کنیم
+
+    if idx in board["hits"] or idx in board["misses"]:
         await query.answer("این خونه رو قبلاً زدی.", show_alert=True)
         return
 
-    other_id = [pid for pid in state["players"] if pid != user_id][0]
-
-    if idx in state["ships"]:
-        state["cells"][idx] = "H"
-        state["found"].add(idx)
-        state["players"][user_id] += 1
-        result_line = f"🔥 {state['names'][user_id]} یه کشتی زد!"
+    hit = idx in board["cells"]
+    sunk_ship = None
+    if hit:
+        board["hits"].add(idx)
+        for ship in board["ships"]:
+            if idx in ship and ship <= board["hits"]:
+                sunk_ship = ship
+                break
+        result_line = f"💥 {state['names'][user_id]} یه کشتی رو غرق کرد!" if sunk_ship else f"🔥 {state['names'][user_id]} زد!"
     else:
-        state["cells"][idx] = "M"
+        board["misses"].add(idx)
         result_line = f"🌊 {state['names'][user_id]} آب زد."
 
-    board_text = f"{result_line}\n"
-
-    if len(state["found"]) == BS_SHIPS:
-        for s in state["ships"]:
-            if state["cells"][s] == "":
-                state["cells"][s] = "H"
-        p1_id, p2_id = list(state["players"].keys())
-        s1, s2 = state["players"][p1_id], state["players"][p2_id]
-        if s1 == s2:
-            winner_line = "🤝 مساوی شدن!"
-        else:
-            winner_id = p1_id if s1 > s2 else p2_id
-            winner_line = f"🏆 {state['names'][winner_id]} برد!"
+    remaining = len(board["cells"]) - len(board["hits"])
+    if remaining == 0:
         await query.edit_message_text(
-            board_text + f"همه‌ی کشتی‌ها پیدا شدن!\n{winner_line}",
-            reply_markup=_bs_markup(game_id, state["cells"]),
+            f"{result_line}\n\n🏆 {state['names'][user_id]} کل ناوگان {state['names'][opponent_id]} رو غرق کرد و برد!",
+            reply_markup=_bs_markup(game_id, board),
         )
         del BATTLESHIP_STATE[game_id]
         await query.answer()
         return
 
-    state["turn"] = other_id
+    if not hit:
+        state["turn"] = opponent_id
+        next_target = state["boards"][user_id]
+    else:
+        next_target = board  # همون بازیکن ادامه می‌ده، همون تخته‌ی حریف
+
+    next_shooter = state["turn"]
     await query.edit_message_text(
-        board_text + f"نوبت: {state['names'][other_id]}",
-        reply_markup=_bs_markup(game_id, state["cells"]),
+        f"{result_line}\n\n🎯 نوبت: {state['names'][next_shooter]}",
+        reply_markup=_bs_markup(game_id, next_target),
     )
     await query.answer()
 
