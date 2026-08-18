@@ -986,7 +986,7 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "openai/gpt-oss-120b",
+                    "model": "llama-3.3-70b-versatile",
                     "max_tokens": 300,
                     "messages": messages,
                 },
@@ -1008,7 +1008,7 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                         body = response.text[:700]
                     except Exception:
                         body = ""
-                await _ai_error_reporter("هوش مصنوعی / Groq", e, chat_id=chat_id, extra=f"model=openai/gpt-oss-120b | http_status={status} | response={body}")
+                await _ai_error_reporter("هوش مصنوعی / Groq", e, chat_id=chat_id, extra=f"model=llama-3.3-70b-versatile | http_status={status} | response={body}")
             except Exception:
                 pass
         return "🦇 مغزم قاطی کرد، بعداً امتحان کن.\n\n⚠️ خطا ثبت شد و برای بررسی ارسال می‌شه."
