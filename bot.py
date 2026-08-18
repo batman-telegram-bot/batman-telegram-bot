@@ -966,42 +966,35 @@ async def require_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 #  AI CALL
 # =========================================================
 
-async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
-    if not GROQ_API_KEY:
-        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
+try:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "openai/gpt-oss-120b",
+                "max_tokens": 300,
+                "messages": messages,
+            },
+        )
 
-    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
-    if is_night():
-        system_prompt += NIGHT_FLAVOR
+        response.raise_for_status()
 
-    history = list(CONVO_MEMORY[chat_id])
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+        data = response.json()
+        reply = data["choices"][0]["message"]["content"]
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "openai/gpt-oss-120b",
-                    "max_tokens": 300,
-                    "messages": messages,
-                },
-            )
-            data = response.json()
-            reply = data["choices"][0]["message"]["content"]
-    except Exception as e:
-        log.error(f"AI error: {e}")
-        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+except httpx.HTTPStatusError as e:
+    log.error(
+        f"Groq HTTP error: {e.response.status_code} - {e.response.text}"
+    )
+    return f"🦇 خطای Groq: HTTP {e.response.status_code}"
 
-    CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
-    CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
-    return reply
+except Exception as e:
+    log.error(f"AI error: {e}")
+    return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
 
 
 # =========================================================
