@@ -23,7 +23,6 @@ from telegram.ext import (
 )
 
 OWNER_ID = 5527941204  # آیدی عددی سازنده‌ی ربات — برای دستورهای ویژه و اطلاع‌رسانی
-os.environ.setdefault("OWNER_ID", str(OWNER_ID))
 CAPTCHA_TIMEOUT_SECONDS = 180  # ۳ دقیقه فرصت برای تایید عضو جدید
 
 from games import register_games, is_game_text, GAME_TRIGGER_WORDS
@@ -31,8 +30,7 @@ from gotham_content import gotham_signature_line, RIDDLES
 from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
-from board_games import register_board_games
-from bug_reporter import report_error, recent_errors_text
+from ttt_inline import register_ttt_inline
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -976,7 +974,6 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
-    response = None
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
@@ -991,27 +988,12 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                     "messages": messages,
                 },
             )
-            response.raise_for_status()
             data = response.json()
             reply = data["choices"][0]["message"]["content"]
-            if not reply or not isinstance(reply, str):
-                raise ValueError("Groq returned an empty/invalid reply")
     except Exception as e:
-        log.exception("AI error")
-        _ai_error_reporter = globals().get('_AI_ERROR_REPORTER')
-        if _ai_error_reporter:
-            try:
-                status = getattr(response, "status_code", None)
-                body = ""
-                if response is not None:
-                    try:
-                        body = response.text[:700]
-                    except Exception:
-                        body = ""
-                await _ai_error_reporter("هوش مصنوعی / Groq", e, chat_id=chat_id, extra=f"model=llama-3.3-70b-versatile | http_status={status} | response={body}")
-            except Exception:
-                pass
-        return "🦇 مغزم قاطی کرد، بعداً امتحان کن.\n\n⚠️ خطا ثبت شد و برای بررسی ارسال می‌شه."
+        log.error(f"AI error: {e}")
+        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+
     CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
     CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
     return reply
@@ -1099,7 +1081,6 @@ def build_panel_main_keyboard():
          InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod")],
         [InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
-        [InlineKeyboardButton("🛠 رفع باگ ربات", callback_data="panel:bugs")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -1119,16 +1100,8 @@ PANEL_MAIN_TEXT = "🦇 *پنل تنظیمات گاتهام*\n\nیه بخش رو
 PANEL_TEXTS = {
     "games": (
         "🎮 *بازی‌ها*\n\n"
-        "برای شروع هر بازی کافیه اسمش رو تو چت بنویسی، نیازی به / نیست.\n\n"
-        "⚡️ سریع: سنگ کاغذ قیچی • دوز • چهار در ردیف • تاس • کوییز • وردل • 2048\n\n"
-        "🏆 حرفه‌ای: ♟️ شطرنج • 🎲 منچ • 🐍 مار و پله • 🃏 UNO • 🚢 نبرد دریایی حرفه‌ای • 🏰 قلمرو • 🎱 بیلیارد • 🏎️ مسابقه ماشین\n\n"
+        "برای شروع هر بازی کافیه اسمش رو تو چت بنویسی، نیازی به / نیست.\n"
         "برای لیست کامل بنویس «گیم»."
-    ),
-    "bugs": (
-        "🛠 *رفع باگ ربات*\n\n"
-        "🚨 خطاهای هوش مصنوعی و خطاهای سراسری ربات ثبت می‌شن.\n"
-        "⚡️ خطای جدید برای مالک ربات ارسال می‌شه.\n\n"
-        "📊 برای دیدن آخرین خطاهای همین اجرای ربات، همین بخش رو باز کن."
     ),
     "mod": (
         "🛡 *مدیریت گروه* (فقط ادمین، با ریپلای رو پیام هدف)\n\n"
@@ -2108,13 +2081,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "panel:lists":
         text = await build_lists_summary_text(context, chat_id)
         await query.edit_message_text(text, reply_markup=build_lists_keyboard(), parse_mode="Markdown")
-        return
-
-    if data == "panel:bugs":
-        if user_id != OWNER_ID:
-            await query.edit_message_text("🛠 سیستم رفع باگ فعاله. خطاهای جدید مستقیم برای مالک ربات ارسال می‌شن.", reply_markup=build_back_keyboard())
-            return
-        await query.edit_message_text(recent_errors_text(), reply_markup=build_back_keyboard(), parse_mode="Markdown")
         return
 
     if data in ("panel:games", "panel:mod", "panel:about", "panel:words"):
@@ -3114,20 +3080,6 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # سیستم گزارش خطا: خطاهای AI و خطاهای سراسری برای مالک ارسال می‌شوند.
-    async def _ai_error_reporter(kind, exc, *, chat_id=None, user_id=None, extra=None):
-        return await report_error(app.bot, kind, exc, chat_id=chat_id, user_id=user_id, extra=extra)
-
-    globals()['_AI_ERROR_REPORTER'] = _ai_error_reporter
-
-    async def _global_error_handler(update, context):
-        exc = context.error
-        chat_id = getattr(getattr(update, 'effective_chat', None), 'id', None) if update else None
-        user_id = getattr(getattr(update, 'effective_user', None), 'id', None) if update else None
-        await report_error(app.bot, 'خطای سراسری ربات', exc, chat_id=chat_id, user_id=user_id, extra='Unhandled exception in Telegram update')
-
-    app.add_error_handler(_global_error_handler)
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quote", quote))
     app.add_handler(CommandHandler("characters", characters_cmd))
@@ -3192,7 +3144,7 @@ def main():
     register_extra_games(app)
     register_extra_lists(app)
     register_extra_games2(app)
-    register_board_games(app)
+    register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
 
     # --- پیام نیمه‌شب گاتهام (رویداد + دیالوگ)، خودکار برای همه‌ی گروه‌ها ---
     try:
