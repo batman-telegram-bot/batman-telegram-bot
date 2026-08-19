@@ -61,10 +61,30 @@ PLATFORM_DOMAINS = {
 # و بدون کوکیِ یه اکانت لاگین‌شده اصلاً قابل دانلود نیستن؛ این یه محدودیت سمت
 # خود پلتفرمه، نه باگ کد. اگه این env varها ست بشن (مسیر یه فایل cookies.txt به
 # فرمت Netscape که از مرورگر export شده)، ازشون استفاده می‌کنیم.
+# اگه env var ست نشده بود، دنبال یه فایل کوکیِ پیش‌فرض کنار خودِ bot.py می‌گردیم؛
+# این‌جوری کافیه فایل cookies.txt خروجی مرورگر (فرمت Netscape) رو با همین اسم‌ها
+# تو ریشه‌ی پروژه بذاری، بدون نیاز به تنظیم متغیر محیطی رو هاست.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _default_cookie_path(*names):
+    for name in names:
+        path = os.path.join(_BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 COOKIES_FILES = {
-    "instagram": os.getenv("IG_COOKIES_FILE"),
-    "youtube": os.getenv("YT_COOKIES_FILE"),
-    "pinterest": os.getenv("PIN_COOKIES_FILE"),
+    "instagram": os.getenv("IG_COOKIES_FILE") or _default_cookie_path(
+        "instagram_cookies.txt", "ig_cookies.txt"
+    ),
+    "youtube": os.getenv("YT_COOKIES_FILE") or _default_cookie_path(
+        "youtube_cookies.txt", "yt_cookies.txt"
+    ),
+    "pinterest": os.getenv("PIN_COOKIES_FILE") or _default_cookie_path(
+        "pinterest_cookies.txt", "pin_cookies.txt"
+    ),
 }
 
 USER_AGENT = (
@@ -86,6 +106,11 @@ def _dl_menu_markup():
         [InlineKeyboardButton(PLATFORM_LABELS["youtube"], callback_data="dl:pick:youtube")],
         [InlineKeyboardButton(PLATFORM_LABELS["pinterest"], callback_data="dl:pick:pinterest")],
     ])
+
+
+# نام عمومی (بدون آندرلاین) که ماژول‌های دیگه (مثلاً bot.py برای پنل اصلی) می‌تونن
+# مستقیم importش کنن، بدون اینکه به جزئیات داخلی این ماژول وابسته باشن.
+dl_menu_markup = _dl_menu_markup
 
 
 def _human_size(num_bytes):
