@@ -77,7 +77,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = "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"
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
 
 # =========================================================
@@ -968,7 +968,7 @@ async def require_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     if not GROQ_API_KEY:
-        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
+        return "🦇 کلید هوش مصنوعی تنظیم نشده!"
 
     system_prompt = (
         PERSONAS[persona_key]["system"]
@@ -982,7 +982,10 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({
+        "role": "user",
+        "content": user_text
+    })
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1006,7 +1009,6 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                 return f"🦇 خطای Groq: {response.status_code}"
 
             data = response.json()
-
             reply = data["choices"][0]["message"]["content"]
 
     except Exception as e:
