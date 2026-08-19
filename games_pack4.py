@@ -35,7 +35,7 @@ from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, fil
 
 
 EXTRA_GAMES_LIST_TEXT4 = (
-    "مین روب — رو خونه‌ها بزن، ۴ بمب مخفیه\n"
+    "مین روب — رو خونه‌ها بزن، ۶ بمب مخفی روی گرید ۶×۶\n"
     "نقطه بازی — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن، خط بکش، جعبه ببند\n"
     "تیکو — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن، ۴ تا پشت‌سرهم روی گرید ۵×۵\n"
     "جمشید — ریپلای کن یا دکمه‌ی «بپیوند» رو بزن، تاس بنداز، دور مسیر بچرخ\n"
@@ -120,8 +120,8 @@ async def lobby4_join_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 #  ۱. مین روب — گرید ۵×۵، ۴ بمب، گروهی
 # =========================================================
 
-MS_SIZE = 5
-MS_MINES = 4
+MS_SIZE = 6
+MS_MINES = 6
 MINESWEEPER_STATE = {}   # chat_id -> {"mines": set, "revealed": set, "over": bool}
 
 

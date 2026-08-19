@@ -1,0 +1,652 @@
+# -*- coding: utf-8 -*-
+"""
+games_pack5.py
+================
+۴ بازی جدید، هم‌خانواده با بقیه‌ی فایل‌های games*.py (کلمه‌محرک، بدون /،
+دکمه‌های شیشه‌ای).
+
+بازی‌ها:
+    ۱. یونو (UNO)      -> کلمه: "یونو"           (۲ تا ۴ نفره، دکمه‌ی پیوستن)
+    ۲. قلمرو           -> کلمه: "قلمرو"           (۲ تا ۴ نفره، دکمه‌ی پیوستن)
+    ۳. بیلیارد          -> کلمه: "بیلیارد"          (دو نفره، ریپلای یا دکمه‌ی پیوستن)
+    ۴. مسابقه ماشین    -> کلمه: "مسابقه ماشین"    (۲ تا ۴ نفره، دکمه‌ی پیوستن)
+
+نکته: چون تلگرام گرافیک/فیزیک بلادرنگ نداره، بیلیارد و مسابقه ماشین نسخه‌ی
+نوبتی و ساده‌شده‌ان (نه فیزیک واقعی)، ولی کاملاً قابل‌بازی و بدون باگ‌ان.
+یونو هم چون پیام‌ها تو گروه عمومیه، دست بازیکن‌ها (مثل بقیه‌ی بازی‌های این
+ربات) فقط موقع نوبتشون رو دکمه‌ها دیده می‌شه - نه کاملاً مخفیِ خصوصی.
+
+نحوه‌ی اتصال (کنار بقیه‌ی register_ها تو bot.py):
+
+    from games_pack5 import register_extra_games3
+
+    register_extra_games3(app)     # <-- این خط رو اضافه کن
+"""
+
+import random
+import uuid
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
+
+
+EXTRA_GAMES_LIST_TEXT5 = (
+    "یونو — ۲ تا ۴ نفره، دکمه‌ی «پیوستن» رو بزن\n"
+    "قلمرو — ۲ تا ۴ نفره، هر خونه رو یکی بگیره، آخرش هرکی بیشتر داره برنده‌ست\n"
+    "بیلیارد — دو نفره، ریپلای کن یا «پیوستن» رو بزن، توپ‌ها رو بزن و آخرش ۸ سیاه\n"
+    "مسابقه ماشین — ۲ تا ۴ نفره، تاس بنداز، بوست و لکه‌روغن رو مدیریت کن\n"
+)
+
+
+def _kw5(text: str):
+    return filters.Regex(rf"(?i)^\s*{text}\s*$")
+
+
+def _gid5(prefix: str) -> str:
+    return prefix + uuid.uuid4().hex[:8]
+
+
+def _name5(user) -> str:
+    return user.first_name or user.username or "بازیکن"
+
+
+def _join_markup5(prefix: str, gid: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ پیوستن", callback_data=f"{prefix}:join:{gid}")],
+        [InlineKeyboardButton("🚀 شروع بازی", callback_data=f"{prefix}:beg:{gid}"),
+         InlineKeyboardButton("❌ لغو", callback_data=f"{prefix}:cancel:{gid}")],
+    ])
+
+
+async def _noop5(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+# =========================================================
+#  ۱. یونو (UNO) — ۲ تا ۴ نفره
+# =========================================================
+
+UNO_GAMES = {}
+UNO_COLORS = {"R": "🔴", "G": "🟢", "B": "🔵", "Y": "🟡"}
+UNO_LABELS = {"skip": "⏭", "reverse": "🔄", "+2": "+2"}
+
+
+def _uno_build_deck():
+    deck = []
+    for c in "RGBY":
+        deck.append((c, "0"))
+        for v in list("123456789") + ["skip", "reverse", "+2"]:
+            deck.append((c, v))
+            deck.append((c, v))
+    for _ in range(4):
+        deck.append(("W", "wild"))
+        deck.append(("W", "+4"))
+    random.shuffle(deck)
+    return deck
+
+
+def _uno_card_label(card):
+    c, v = card
+    if c == "W":
+        return "🃏W" if v == "wild" else "🃏+4"
+    return f"{UNO_COLORS[c]}{UNO_LABELS.get(v, v)}"
+
+
+def _uno_draw(game, n=1):
+    cards = []
+    for _ in range(n):
+        if not game["deck"]:
+            top = game["discard"][-1]
+            rest = game["discard"][:-1]
+            if not rest:
+                break
+            random.shuffle(rest)
+            game["deck"] = rest
+            game["discard"] = [top]
+        if game["deck"]:
+            cards.append(game["deck"].pop())
+    return cards
+
+
+def _uno_advance(game, effect):
+    n = len(game["players"])
+    if effect == "reverse":
+        if n == 2:
+            return  # تو دونفره، ریورس مثل اسکیپه: نوبت همون بازیکنه
+        game["direction"] *= -1
+        game["turn"] = (game["turn"] + game["direction"]) % n
+        return
+    next_idx = (game["turn"] + game["direction"]) % n
+    if effect == "skip":
+        game["turn"] = (next_idx + game["direction"]) % n
+    elif effect == "draw2":
+        game["hands"][game["players"][next_idx]].extend(_uno_draw(game, 2))
+        game["turn"] = (next_idx + game["direction"]) % n
+    elif effect == "draw4":
+        game["hands"][game["players"][next_idx]].extend(_uno_draw(game, 4))
+        game["turn"] = (next_idx + game["direction"]) % n
+    else:
+        game["turn"] = next_idx
+
+
+def _uno_text(game):
+    lines = ["🃏 یونو گاتهام", ""]
+    top = game["discard"][-1]
+    lines.append(f"روی زمین: {_uno_card_label(top)}   (رنگ جاری: {UNO_COLORS.get(game['color'], '🃏')})")
+    lines.append("")
+    for uid in game["players"]:
+        marker = "👉 " if game["players"][game["turn"]] == uid else "   "
+        lines.append(f"{marker}{game['names'][uid]}: {len(game['hands'][uid])} کارت")
+    if game.get("awaiting"):
+        lines.append(f"\n🎨 {game['names'][game['awaiting']['uid']]} باید رنگ انتخاب کنه...")
+    else:
+        lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+    return "\n".join(lines)
+
+
+def _uno_markup(gid, game):
+    if not game["started"]:
+        return _join_markup5("uno", gid)
+    if game.get("awaiting"):
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(UNO_COLORS[c], callback_data=f"uno:color:{gid}:{c}") for c in "RGBY"
+        ]])
+    uid = game["players"][game["turn"]]
+    hand = game["hands"][uid]
+    rows, row = [], []
+    for i, card in enumerate(hand):
+        row.append(InlineKeyboardButton(_uno_card_label(card), callback_data=f"uno:play:{gid}:{i}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🃏 کشیدن کارت", callback_data=f"uno:draw:{gid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def uno_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    gid = _gid5("un")
+    UNO_GAMES[gid] = {
+        "chat_id": update.effective_chat.id, "players": [uid],
+        "names": {uid: _name5(update.effective_user)}, "started": False,
+    }
+    await update.effective_message.reply_text(
+        f"🃏 یونو گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
+        reply_markup=_join_markup5("uno", gid),
+    )
+
+
+async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    action, gid = parts[1], parts[2]
+    game = UNO_GAMES.get(gid)
+    if not game:
+        await q.answer("این بازی تمام شده.", show_alert=True)
+        return
+    uid = update.effective_user.id
+
+    if action == "join":
+        if uid in game["players"]:
+            await q.answer("قبلاً وارد شدی.", show_alert=True); return
+        if game["started"] or len(game["players"]) >= 4:
+            await q.answer("ورود ممکن نیست.", show_alert=True); return
+        game["players"].append(uid); game["names"][uid] = _name5(update.effective_user)
+        names_txt = "\n".join(f"👤 {game['names'][p]}" for p in game["players"])
+        await q.edit_message_text(f"🃏 یونو گاتهام\n\n{names_txt}\n\n۲ تا ۴ نفر.", reply_markup=_join_markup5("uno", gid))
+        await q.answer(); return
+
+    if action == "beg":
+        if uid != game["players"][0] or len(game["players"]) < 2:
+            await q.answer("حداقل ۲ نفر لازمه و فقط سازنده شروع می‌کنه.", show_alert=True); return
+        deck = _uno_build_deck()
+        hands = {p: [deck.pop() for _ in range(7)] for p in game["players"]}
+        first = deck.pop()
+        color = first[0] if first[0] != "W" else random.choice("RGBY")
+        game.update({
+            "started": True, "deck": deck, "discard": [first], "hands": hands,
+            "color": color, "value": first[1], "turn": 0, "direction": 1, "awaiting": None,
+        })
+        await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        await q.answer(); return
+
+    if action == "cancel":
+        if uid == game["players"][0]:
+            del UNO_GAMES[gid]
+            await q.edit_message_text("🃏 یونو لغو شد.")
+        await q.answer(); return
+
+    if not game["started"]:
+        await q.answer(); return
+
+    if game.get("awaiting"):
+        if action == "color":
+            if uid != game["awaiting"]["uid"]:
+                await q.answer("نوبت انتخاب رنگ تو نیست.", show_alert=True); return
+            color = parts[3]
+            card = game["awaiting"]["card"]
+            game["color"] = color; game["value"] = card[1]
+            effect = "draw4" if card[1] == "+4" else "normal"
+            game["awaiting"] = None
+            _uno_advance(game, effect)
+            await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        await q.answer(); return
+
+    if uid != game["players"][game["turn"]]:
+        await q.answer("نوبت تو نیست.", show_alert=True); return
+
+    if action == "play":
+        idx = int(parts[3])
+        hand = game["hands"][uid]
+        if idx < 0 or idx >= len(hand):
+            await q.answer("این کارت وجود نداره.", show_alert=True); return
+        card = hand[idx]
+        valid = card[0] == "W" or card[0] == game["color"] or card[1] == game["value"]
+        if not valid:
+            await q.answer("این کارت با رنگ/عدد روی زمین جور نیست.", show_alert=True); return
+        hand.pop(idx)
+        game["discard"].append(card)
+        if not hand:
+            await q.edit_message_text(f"🃏 یونو تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🎉 کارت‌هاش تموم شد!")
+            del UNO_GAMES[gid]; await q.answer(); return
+        if card[0] == "W":
+            game["awaiting"] = {"uid": uid, "card": card}
+            await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+            await q.answer(); return
+        game["color"] = card[0]; game["value"] = card[1]
+        effect = {"skip": "skip", "reverse": "reverse", "+2": "draw2"}.get(card[1], "normal")
+        _uno_advance(game, effect)
+        await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        await q.answer(); return
+
+    if action == "draw":
+        game["hands"][uid].extend(_uno_draw(game, 1))
+        _uno_advance(game, "normal")
+        await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        await q.answer(); return
+
+
+# =========================================================
+#  ۲. قلمرو (Territory) — گرید ۶×۶، ۲ تا ۴ نفره
+# =========================================================
+
+TER_GAMES = {}
+TER_SIZE = 6
+TER_COLORS = ["🔴", "🟢", "🟡", "🔵"]
+
+
+def _ter_text(game):
+    lines = ["🏰 قلمرو گاتهام", "", f"گرید {TER_SIZE}×{TER_SIZE} — هر نوبت یه خونه بگیر، آخرش هرکی بیشتر داره می‌بره.", ""]
+    counts = {uid: 0 for uid in game["players"]}
+    for owner in game["owner"].values():
+        counts[owner] += 1
+    for i, uid in enumerate(game["players"]):
+        marker = "👉 " if game["started"] and game["players"][game["turn"]] == uid else "   "
+        lines.append(f"{marker}{TER_COLORS[i % 4]} {game['names'][uid]}: {counts[uid]} خونه")
+    if game["started"]:
+        lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+    return "\n".join(lines)
+
+
+def _ter_markup(gid, game):
+    if not game["started"]:
+        return _join_markup5("ter", gid)
+    rows = []
+    for r in range(TER_SIZE):
+        row = []
+        for c in range(TER_SIZE):
+            idx = r * TER_SIZE + c
+            owner = game["owner"].get(idx)
+            label = TER_COLORS[game["players"].index(owner) % 4] if owner is not None else "⬜"
+            row.append(InlineKeyboardButton(label, callback_data=f"ter:cell:{gid}:{idx}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🏳️ خروج", callback_data=f"ter:leave:{gid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def territory_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    gid = _gid5("te")
+    TER_GAMES[gid] = {
+        "chat_id": update.effective_chat.id, "players": [uid],
+        "names": {uid: _name5(update.effective_user)}, "owner": {}, "turn": 0, "started": False,
+    }
+    await update.effective_message.reply_text(
+        f"🏰 قلمرو گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
+        reply_markup=_join_markup5("ter", gid),
+    )
+
+
+async def territory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    action, gid = parts[1], parts[2]
+    game = TER_GAMES.get(gid)
+    if not game:
+        await q.answer("این بازی تمام شده.", show_alert=True); return
+    uid = update.effective_user.id
+
+    if action == "join":
+        if uid in game["players"]:
+            await q.answer("قبلاً وارد شدی.", show_alert=True); return
+        if game["started"] or len(game["players"]) >= 4:
+            await q.answer("ورود ممکن نیست.", show_alert=True); return
+        game["players"].append(uid); game["names"][uid] = _name5(update.effective_user)
+        await q.edit_message_text(_ter_text(game), reply_markup=_join_markup5("ter", gid))
+        await q.answer(); return
+
+    if action == "beg":
+        if uid != game["players"][0] or len(game["players"]) < 2:
+            await q.answer("حداقل ۲ نفر لازمه و فقط سازنده شروع می‌کنه.", show_alert=True); return
+        game["started"] = True
+        await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+        await q.answer(); return
+
+    if action == "cancel":
+        if uid == game["players"][0]:
+            del TER_GAMES[gid]
+            await q.edit_message_text("🏰 قلمرو لغو شد.")
+        await q.answer(); return
+
+    if not game["started"]:
+        await q.answer(); return
+
+    if action == "leave":
+        if len(game["players"]) <= 2:
+            del TER_GAMES[gid]
+            await q.edit_message_text("🏰 بازی قلمرو پایان یافت.")
+            await q.answer(); return
+        if uid in game["players"]:
+            idx = game["players"].index(uid)
+            game["players"].remove(uid); game["names"].pop(uid, None)
+            game["turn"] %= len(game["players"])
+            await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+        await q.answer(); return
+
+    if uid != game["players"][game["turn"]]:
+        await q.answer("نوبت تو نیست.", show_alert=True); return
+
+    if action == "cell":
+        idx = int(parts[3])
+        if idx in game["owner"]:
+            await q.answer("این خونه قبلاً گرفته شده.", show_alert=True); return
+        game["owner"][idx] = uid
+        if len(game["owner"]) == TER_SIZE * TER_SIZE:
+            counts = {p: 0 for p in game["players"]}
+            for o in game["owner"].values():
+                counts[o] += 1
+            top = max(counts.values())
+            winners = [p for p in game["players"] if counts[p] == top]
+            if len(winners) == 1:
+                result = f"🏆 برنده: {game['names'][winners[0]]} ({top} خونه)"
+            else:
+                result = "🤝 مساوی بین: " + "، ".join(game["names"][w] for w in winners)
+            board_txt = "\n".join(f"{TER_COLORS[game['players'].index(p) % 4]} {game['names'][p]}: {counts[p]}" for p in game["players"])
+            await q.edit_message_text(f"🏰 قلمرو تمام شد!\n\n{board_txt}\n\n{result}", reply_markup=_ter_markup(gid, game))
+            del TER_GAMES[gid]; await q.answer(); return
+        game["turn"] = (game["turn"] + 1) % len(game["players"])
+        await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+        await q.answer(); return
+
+
+# =========================================================
+#  ۳. بیلیارد (ساده‌شده) — دو نفره
+# =========================================================
+
+BIL_GAMES = {}
+BIL_LOBBIES = {}
+
+
+def _bil_lobby_markup(token):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 بپیوند به بازی", callback_data=f"lobby5:{token}")]])
+
+
+def _bil_markup(gid, state):
+    balls = sorted(state["remaining"]) if state["remaining"] else [8]
+    rows, row = [], []
+    for n in balls:
+        label = "⚫ ۸" if n == 8 else f"🎱 {n}"
+        row.append(InlineKeyboardButton(label, callback_data=f"bil:hit:{gid}:{n}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def _launch_billiards(target_msg, p1, p2, edit=False):
+    gid = f"{target_msg.chat.id}_{p1.id}_{p2.id}_{random.randint(1000,9999)}"
+    BIL_GAMES[gid] = {
+        "players": {p1.id: 0, p2.id: 0},
+        "names": {p1.id: p1.first_name, p2.id: p2.first_name},
+        "remaining": set(range(1, 8)), "turn": p1.id,
+    }
+    text = (
+        f"🎱 بیلیارد: {p1.first_name} در برابر {p2.first_name}\n"
+        f"۷ توپ رو زمینه، آخرش باید ۸ سیاه رو بندازی (اگه زودتر بزنیش می‌بازی).\n\n"
+        f"🎯 نوبت: {p1.first_name}"
+    )
+    markup = _bil_markup(gid, BIL_GAMES[gid])
+    if edit:
+        await target_msg.edit_text(text, reply_markup=markup)
+    else:
+        await target_msg.reply_text(text, reply_markup=markup)
+
+
+async def billiards_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    creator = update.effective_user
+    if msg.reply_to_message and msg.reply_to_message.from_user and \
+       not msg.reply_to_message.from_user.is_bot and msg.reply_to_message.from_user.id != creator.id:
+        await _launch_billiards(msg, creator, msg.reply_to_message.from_user)
+        return
+    token = f"{update.effective_chat.id}_{creator.id}_{random.randint(100000, 999999)}"
+    BIL_LOBBIES[token] = {"creator": creator, "kind": "bil"}
+    await msg.reply_text(
+        f"🎮 {creator.first_name} می‌خواد بیلیارد بازی کنه!\nحریف، دکمه‌ی زیر رو بزن تا بازی شروع بشه.",
+        reply_markup=_bil_lobby_markup(token),
+    )
+
+
+async def bil_lobby_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    token = query.data.split(":", 1)[1]
+    lobby = BIL_LOBBIES.get(token)
+    if not lobby:
+        await query.answer("این دعوت منقضی شده یا یکی دیگه قبلاً پیوسته.", show_alert=True); return
+    creator = lobby["creator"]; joiner = query.from_user
+    if joiner.id == creator.id:
+        await query.answer("نمی‌تونی با خودت بازی کنی 🙂", show_alert=True); return
+    del BIL_LOBBIES[token]
+    await _launch_billiards(query.message, creator, joiner, edit=True)
+    await query.answer()
+
+
+async def billiards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    gid, n = parts[2], int(parts[3])
+    state = BIL_GAMES.get(gid)
+    if not state:
+        await q.answer("این بازی تموم شده.", show_alert=True); return
+    uid = update.effective_user.id
+    if uid not in state["players"]:
+        await q.answer("تو تو این بازی نیستی.", show_alert=True); return
+    if state["turn"] != uid:
+        await q.answer("نوبت تو نیست.", show_alert=True); return
+    other = [p for p in state["players"] if p != uid][0]
+
+    if n == 8:
+        if state["remaining"]:
+            await q.edit_message_text(f"⚫ {state['names'][uid]} زودتر از موقع ۸ سیاه رو زد! باخت.\n🏆 برنده: {state['names'][other]}")
+            del BIL_GAMES[gid]; await q.answer(); return
+        if random.random() < 0.6:
+            await q.edit_message_text(f"⚫🎉 {state['names'][uid]} ۸ سیاه رو زد و برد!\n🏆 برنده: {state['names'][uid]}")
+            del BIL_GAMES[gid]; await q.answer(); return
+        state["turn"] = other
+        await q.edit_message_text(f"😅 {state['names'][uid]} به ۸ نزد.\n🎯 نوبت: {state['names'][other]}", reply_markup=_bil_markup(gid, state))
+        await q.answer(); return
+
+    if n not in state["remaining"]:
+        await q.answer("این توپ قبلاً رفته.", show_alert=True); return
+
+    if random.random() < 0.65:
+        state["remaining"].discard(n)
+        state["players"][uid] += 1
+        text = f"🎱 {state['names'][uid]} توپ {n} رو زد! ({state['players'][uid]} امتیاز)\n🎯 نوبت: {state['names'][uid]} (ادامه)"
+        if not state["remaining"]:
+            text += "\n\n⚫ حالا باید ۸ سیاه رو بزنی!"
+        await q.edit_message_text(text, reply_markup=_bil_markup(gid, state))
+        await q.answer(); return
+    else:
+        state["turn"] = other
+        await q.edit_message_text(f"❌ {state['names'][uid]} به توپ {n} نخورد.\n🎯 نوبت: {state['names'][other]}", reply_markup=_bil_markup(gid, state))
+        await q.answer(); return
+
+
+# =========================================================
+#  ۴. مسابقه ماشین — ۲ تا ۴ نفره، تاسی، بوست/لکه‌روغن
+# =========================================================
+
+RACE_GAMES = {}
+RACE_LEN = 30
+RACE_ICONS = ["🚗", "🚙", "🚕", "🏎️"]
+RACE_BOOST = {5: 3, 12: 4, 22: 3}
+RACE_OIL = {8: -3, 17: -4, 25: -2}
+
+
+def _race_text(game):
+    lines = [
+        "🏁 مسابقه ماشین گاتهام", "",
+        "🟢 بوست تو متر: " + "، ".join(str(k) for k in RACE_BOOST),
+        "🛢️ لکه‌روغن تو متر: " + "، ".join(str(k) for k in RACE_OIL), "",
+    ]
+    for i, uid in enumerate(game["players"]):
+        marker = "👉 " if game["started"] and game["players"][game["turn"]] == uid else "   "
+        pos = max(0, min(game["pos"][uid], RACE_LEN))
+        lines.append(f"{marker}{RACE_ICONS[i % 4]} {game['names'][uid]}: متر {pos}/{RACE_LEN}")
+    if game["started"]:
+        lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+    return "\n".join(lines)
+
+
+def _race_markup(gid, game):
+    if not game["started"]:
+        return _join_markup5("race", gid)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 گاز بده!", callback_data=f"race:go:{gid}")],
+        [InlineKeyboardButton("🏳️ خروج", callback_data=f"race:leave:{gid}")],
+    ])
+
+
+async def racing_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    gid = _gid5("rc")
+    RACE_GAMES[gid] = {
+        "chat_id": update.effective_chat.id, "players": [uid],
+        "names": {uid: _name5(update.effective_user)}, "pos": {uid: 0}, "turn": 0, "started": False,
+    }
+    await update.effective_message.reply_text(
+        f"🏁 مسابقه ماشین گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
+        reply_markup=_join_markup5("race", gid),
+    )
+
+
+async def racing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    action, gid = parts[1], parts[2]
+    game = RACE_GAMES.get(gid)
+    if not game:
+        await q.answer("این بازی تمام شده.", show_alert=True); return
+    uid = update.effective_user.id
+
+    if action == "join":
+        if uid in game["players"]:
+            await q.answer("قبلاً وارد شدی.", show_alert=True); return
+        if game["started"] or len(game["players"]) >= 4:
+            await q.answer("ورود ممکن نیست.", show_alert=True); return
+        game["players"].append(uid); game["names"][uid] = _name5(update.effective_user); game["pos"][uid] = 0
+        await q.edit_message_text(_race_text(game), reply_markup=_join_markup5("race", gid))
+        await q.answer(); return
+
+    if action == "beg":
+        if uid != game["players"][0] or len(game["players"]) < 2:
+            await q.answer("حداقل ۲ نفر لازمه و فقط سازنده شروع می‌کنه.", show_alert=True); return
+        game["started"] = True
+        await q.edit_message_text(_race_text(game), reply_markup=_race_markup(gid, game))
+        await q.answer(); return
+
+    if action == "cancel":
+        if uid == game["players"][0]:
+            del RACE_GAMES[gid]
+            await q.edit_message_text("🏁 مسابقه لغو شد.")
+        await q.answer(); return
+
+    if not game["started"]:
+        await q.answer(); return
+
+    if action == "leave":
+        if len(game["players"]) <= 2:
+            del RACE_GAMES[gid]
+            await q.edit_message_text("🏁 مسابقه پایان یافت.")
+            await q.answer(); return
+        game["players"].remove(uid); game["names"].pop(uid, None); game["pos"].pop(uid, None)
+        game["turn"] %= len(game["players"])
+        await q.edit_message_text(_race_text(game), reply_markup=_race_markup(gid, game))
+        await q.answer(); return
+
+    if uid != game["players"][game["turn"]]:
+        await q.answer("نوبت تو نیست.", show_alert=True); return
+
+    if action == "go":
+        roll = random.randint(1, 6)
+        old = game["pos"][uid]
+        new = old + roll
+        extra = ""
+        if new >= RACE_LEN:
+            await q.edit_message_text(
+                f"🏁 {game['names'][uid]} با تاس {roll} خط پایان رو رد کرد!\n\n🏆 برنده: {game['names'][uid]}"
+            )
+            del RACE_GAMES[gid]; await q.answer(); return
+        if new in RACE_BOOST:
+            new += RACE_BOOST[new]; extra = " 🟢 بوست گرفتی!"
+        elif new in RACE_OIL:
+            new = max(0, new + RACE_OIL[new]); extra = " 🛢️ رو روغن سر خوردی!"
+        if new >= RACE_LEN:
+            await q.edit_message_text(
+                f"🏁 {game['names'][uid]} با تاس {roll}{extra} خط پایان رو رد کرد!\n\n🏆 برنده: {game['names'][uid]}"
+            )
+            del RACE_GAMES[gid]; await q.answer(); return
+        game["pos"][uid] = new
+        game["turn"] = (game["turn"] + 1) % len(game["players"])
+        await q.edit_message_text(
+            _race_text(game) + f"\n\n🎲 {game['names'][uid]} تاس {roll} آورد: {old} → {new}.{extra}",
+            reply_markup=_race_markup(gid, game),
+        )
+        await q.answer(); return
+
+
+# =========================================================
+#  ثبت هندلرها
+# =========================================================
+
+def register_extra_games3(app):
+    # نکته: MessageHandler های زیر نباید group=5 بگیرن، چون count_message تو
+    # games_pack3.py یه MessageHandler(filters.TEXT & ~filters.COMMAND) با
+    # group=5 داره که رو هر متنی match می‌شه و اگه زودتر ثبت بشه، جلوی این‌ها رو
+    # می‌گیره. برای همین گروه اختصاصی ۱۲ استفاده شده.
+    app.add_handler(MessageHandler(_kw5("یونو|بازی یونو|uno"), uno_start), group=12)
+    app.add_handler(CallbackQueryHandler(uno_callback, pattern=r"^uno:"), group=5)
+
+    app.add_handler(MessageHandler(_kw5("قلمرو|بازی قلمرو"), territory_start), group=12)
+    app.add_handler(CallbackQueryHandler(territory_callback, pattern=r"^ter:"), group=5)
+
+    app.add_handler(MessageHandler(_kw5("بیلیارد|بازی بیلیارد"), billiards_start), group=12)
+    app.add_handler(CallbackQueryHandler(billiards_callback, pattern=r"^bil:"), group=5)
+    app.add_handler(CallbackQueryHandler(bil_lobby_join_callback, pattern=r"^lobby5:"), group=5)
+
+    app.add_handler(MessageHandler(_kw5("مسابقه ماشین|بازی مسابقه ماشین|مسابقه"), racing_start), group=12)
+    app.add_handler(CallbackQueryHandler(racing_callback, pattern=r"^race:"), group=5)
+
+    app.add_handler(CallbackQueryHandler(_noop5, pattern=r"^noop5$"), group=5)

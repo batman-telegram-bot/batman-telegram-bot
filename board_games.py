@@ -361,4 +361,8 @@ def register_board_games(app):
     app.add_handler(CallbackQueryHandler(_chess_callback, pattern=r"^chess:"), group=1)
     app.add_handler(CallbackQueryHandler(_ludo_callback, pattern=r"^ludo:"), group=1)
     app.add_handler(CallbackQueryHandler(_snake_callback, pattern=r"^snake:"), group=1)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, board_game_router), group=1)
+    # نکته‌ی مهم: این نباید group=1 باشه، چون keyword_router تو games.py هم یه
+    # MessageHandler(filters.TEXT & ~filters.COMMAND) با group=1 داره؛ تو یه گروه،
+    # فقط اولین هندلری که فیلترش match بشه اجرا می‌شه (فیلتر TEXT خام همیشه match
+    # می‌شه)، پس این هندلر هیچ‌وقت اجرا نمی‌شد. باید تو گروه اختصاصی خودش باشه.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, board_game_router), group=11)

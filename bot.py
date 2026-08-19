@@ -31,6 +31,8 @@ from games_pack2 import register_extra_games
 from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
 from board_games import register_board_games
+from games_pack5 import register_extra_games3
+from downloader import register_downloader
 from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
 
@@ -51,6 +53,11 @@ _EXTRA_GAME_TRIGGERS_RE = re.compile(
     r"شطرنج|بازی شطرنج|"
     r"منچ|بازی منچ|"
     r"مار و پله|ماروپله|بازی مار و پله|"
+    r"یونو|بازی یونو|"
+    r"قلمرو|بازی قلمرو|"
+    r"بیلیارد|بازی بیلیارد|"
+    r"مسابقه ماشین|بازی مسابقه ماشین|مسابقه|"
+    r"دانلودر|دانلود|"
     r"لیست پرحرفا|لیست پرحرف\u200cها|پرحرفا|پرحرف\u200cها|"
     r"عضویت پسرا|ثبت پسرا|عضویت دخترا|ثبت دخترا|"
     r"لیست پسرا|لیست دخترا"
@@ -77,7 +84,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
 
 # =========================================================
@@ -968,24 +975,16 @@ async def require_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
     if not GROQ_API_KEY:
-        return "🦇 کلید هوش مصنوعی تنظیم نشده!"
+        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
 
-    system_prompt = (
-        PERSONAS[persona_key]["system"]
-        + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
-    )
-
+    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
     if is_night():
         system_prompt += NIGHT_FLAVOR
 
     history = list(CONVO_MEMORY[chat_id])
-
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
-    messages.append({
-        "role": "user",
-        "content": user_text
-    })
+    messages.append({"role": "user", "content": user_text})
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -997,35 +996,20 @@ async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
                 },
                 json={
                     "model": "openai/gpt-oss-120b",
-                    "messages": messages,
                     "max_tokens": 300,
+                    "messages": messages,
                 },
             )
-
-            if response.status_code != 200:
-                log.error(
-                    f"Groq error {response.status_code}: {response.text}"
-                )
-                return f"🦇 خطای Groq: {response.status_code}"
-
             data = response.json()
             reply = data["choices"][0]["message"]["content"]
-
     except Exception as e:
         log.error(f"AI error: {e}")
         return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
 
-    CONVO_MEMORY[chat_id].append({
-        "role": "user",
-        "content": user_text
-    })
-
-    CONVO_MEMORY[chat_id].append({
-        "role": "assistant",
-        "content": reply
-    })
-
+    CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
+    CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
     return reply
+
 
 # =========================================================
 #  UI BUILDERS
@@ -1049,7 +1033,8 @@ def build_characters_keyboard(player):
 
 PACK2_WORDS = ["2048", "چراغ‌ها", "حافظه", "نبرد دریایی", "گنج پنهان"]
 PACK4_WORDS = ["مین یاب", "نقطه بازی", "تیکو", "جمشید", "گیر بازار"]
-BOARD_WORDS = ["شطرنج", "منچ", "مار و پله"]
+BOARD_WORDS = ["شطرنج", "منچ", "مار و پله", "یونو", "قلمرو", "بیلیارد", "مسابقه ماشین"]
+DOWNLOADER_WORDS = ["دانلودر"]
 PACK3_WORDS = ["لیست پرحرفا", "عضویت پسرا", "عضویت دخترا", "لیست پسرا", "لیست دخترا"]
 
 
@@ -1063,6 +1048,9 @@ def build_words_panel_text() -> str:
         "",
         "🎮 *بازی‌ها (کافیه اسمشو تو چت بنویسی):*",
         "، ".join(game_words),
+        "",
+        "📥 *دانلودر:*",
+        "«دانلودر» — انتخاب پلتفرم (اینستاگرام/یوتیوب/پینترست) و بعد فرستادن لینک",
         "",
         "👥 *لیست‌های اجتماعی:*",
         "، ".join(PACK3_WORDS),
@@ -1130,7 +1118,8 @@ PANEL_TEXTS = {
     "games": (
         "🎮 *بازی‌ها*\n\n"
         "برای شروع هر بازی کافیه اسمش رو تو چت بنویسی، نیازی به / نیست.\n"
-        "برای لیست کامل بنویس «گیم»."
+        "برای لیست کامل بنویس «گیم».\n\n"
+        "📥 *دانلودر:* بنویس «دانلودر»، پلتفرم (اینستاگرام/یوتیوب/پینترست) رو انتخاب کن و لینک رو بفرست."
     ),
     "mod": (
         "🛡 *مدیریت گروه* (فقط ادمین، با ریپلای رو پیام هدف)\n\n"
@@ -3174,6 +3163,8 @@ def main():
     register_extra_lists(app)
     register_extra_games2(app)
     register_board_games(app)  # شطرنج / منچ / مار و پله — فقط با نوشتن اسم بازی
+    register_extra_games3(app)  # یونو / قلمرو / بیلیارد / مسابقه ماشین
+    register_downloader(app)  # دانلودر اینستاگرام / یوتیوب / پینترست
     register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
     register_ttt_gotham(app)  # دوز گاتهام — با نوشتن کلمه تو چت، بدون نیاز به inline mode
 
