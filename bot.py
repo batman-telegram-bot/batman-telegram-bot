@@ -966,36 +966,64 @@ async def require_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 #  AI CALL
 # =========================================================
 
-try:
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "openai/gpt-oss-120b",
-                "max_tokens": 300,
-                "messages": messages,
-            },
-        )
+async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
+    if not GROQ_API_KEY:
+        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
 
-        response.raise_for_status()
-
-        data = response.json()
-        reply = data["choices"][0]["message"]["content"]
-
-except httpx.HTTPStatusError as e:
-    log.error(
-        f"Groq HTTP error: {e.response.status_code} - {e.response.text}"
+    system_prompt = (
+        PERSONAS[persona_key]["system"]
+        + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
     )
-    return f"🦇 خطای Groq: HTTP {e.response.status_code}"
 
-except Exception as e:
-    log.error(f"AI error: {e}")
-    return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+    if is_night():
+        system_prompt += NIGHT_FLAVOR
 
+    history = list(CONVO_MEMORY[chat_id])
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "openai/gpt-oss-120b",
+                    "messages": messages,
+                    "max_tokens": 300,
+                },
+            )
+
+            if response.status_code != 200:
+                log.error(
+                    f"Groq error {response.status_code}: {response.text}"
+                )
+                return f"🦇 خطای Groq: {response.status_code}"
+
+            data = response.json()
+
+            reply = data["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        log.error(f"AI error: {e}")
+        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+
+    CONVO_MEMORY[chat_id].append({
+        "role": "user",
+        "content": user_text
+    })
+
+    CONVO_MEMORY[chat_id].append({
+        "role": "assistant",
+        "content": reply
+    })
+
+    return reply
 
 # =========================================================
 #  UI BUILDERS
