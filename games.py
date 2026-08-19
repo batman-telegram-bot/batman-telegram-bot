@@ -19,6 +19,7 @@ games.py
 
 import asyncio
 import random
+import re
 import string
 from collections import defaultdict
 
@@ -146,8 +147,27 @@ MAFIA_ROLES_BY_COUNT = {
 #  ابزار کمکی
 # =========================================================
 
+# نگاشت کاراکترهای عربی که کیبورد بعضی گوشی‌ها/تلگرام‌ها جای معادل فارسی‌شون
+# می‌فرستن (ي عربی به‌جای ی فارسی، ك عربی به‌جای ک فارسی و...). بدون این نگاشت،
+# پیامی که ظاهرش دقیقاً «گیم» به‌نظر می‌رسه ممکنه از نظر یونیکد با کلمه‌ی محرک
+# ثبت‌شده تو دیکشنری یکی نباشه و بی‌صدا هیچ‌کاری نکنه.
+_ARABIC_TO_PERSIAN = str.maketrans({
+    "\u064a": "\u06cc",  # ي عربی -> ی فارسی
+    "\u0643": "\u06a9",  # ك عربی -> ک فارسی
+    "\u0629": "\u0647",  # ة -> ه
+    "\u06cc\u0670": "\u06cc",
+    "\u200f": "",         # RTL mark
+    "\u200e": "",         # LTR mark
+    "\ufeff": "",         # BOM
+})
+
+
 def norm(text: str) -> str:
-    return (text or "").strip()
+    t = (text or "").strip()
+    t = t.translate(_ARABIC_TO_PERSIAN)
+    # چند تا اسپیس/تب پشت‌سرهم رو یکی کن تا تطبیق با کلمات محرک خراب نشه
+    t = re.sub(r"[ \t]+", " ", t)
+    return t.strip()
 
 
 def _save_game_record(chat_id, winner_id, loser_id):

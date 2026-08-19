@@ -1,35 +1,42 @@
-# Gotham Bot — Full Upgrade Pack
+# Gotham Bot — Bugfix Pack (روی upgrade قبلی)
 
-## Included changes
+## چی درست شد
 
-### 🎮 Games
-- Existing games preserved.
-- Real ♟️ Chess engine/game flow added.
-- Real 🎲 Ludo (2–4 players) added.
-- Real 🐍 Snakes & Ladders (2–4 players) added.
-- Professional games section added to the games list for future modules: UNO, professional Battleship, Territory, Billiards, Racing.
+### 🛠 رفع باگ ربات
+- `bug_reporter.py` که ساخته شده بود ولی هیچ‌وقت وصل نشده بود، حالا کامل وصله.
+- یک error handler سراسری (`app.add_error_handler`) اضافه شد — قبلاً اصلاً وجود نداشت،
+  یعنی هر خطای پیش‌بینی‌نشده (تو دیتابیس، پارس مارک‌داون، هرجای دیگه) کاملاً بی‌صدا گم
+  می‌شد؛ نه کاربر چیزی می‌دید نه مالک ربات خبردار می‌شد. این احتمالاً ریشه‌ی مشکل
+  «گیم رو می‌نویسم لیست نمیاد و هیچ خطایی هم نیست» بود.
+- الان هر خطا هم لاگ می‌شه، هم مستقیم به OWNER_ID فرستاده می‌شه.
+- دکمه‌ی «🛠 رفع باگ ربات» به پنل برگشت.
 
-### 🛠 Bug system
-- Added `bug_reporter.py`.
-- Added `🛠 رفع باگ ربات` to the main panel.
-- Errors can be reported to the bot owner with context.
-- Recent error summary is available through the bug panel.
+### 🦇 پنل تنظیمات — حالا ۸ دکمه
+شخصیت‌ها، بازی‌ها، دانلودر (جدا شد از بازی‌ها)، لیست‌ها، مدیریت گروه، رفع باگ ربات،
+همه کلمات ربات، درباره ربات.
 
-### 🔧 Integration
-- `board_games.py` contains the board-game handlers and callbacks.
-- `bot.py` registers the board games and bug panel.
-- `games.py` contains the updated games list.
-- `requirements.txt` includes `python-chess`.
+### 🎮 «گیم» / کلمات محرک فارسی
+`norm()` تو `games.py` حالا کاراکترهای عربی (ي/ك/ة) که بعضی کیبوردها به‌جای معادل
+فارسی‌شون می‌فرستن رو نرمالایز می‌کنه — قبلاً ممکن بود پیامی که ظاهرش «گیم» به‌نظر
+می‌رسید، از نظر یونیکد با دیکشنری کلمات محرک match نشه و بی‌صدا نادیده گرفته بشه.
 
-## Files changed/added in this pack
-- bot.py — modified
-- games.py — modified
-- board_games.py — added
-- bug_reporter.py — added
-- requirements.txt — modified
-- README.md — included
-- UPGRADE_NOTES.md — added
-- Existing project modules included unchanged in the upgrade package.
+### 📥 دانلودر
+- بخش دانلودر از داخل متن «بازی‌ها»ی پنل درآمد و بخش/دکمه‌ی مستقل خودشو گرفت.
+- برای یوتیوب چند تا player_client (android/ios/web) پشت‌سرهم امتحان می‌شه.
+- پشتیبانی از فایل کوکی اختیاری برای هر پلتفرم: `YT_COOKIES_FILE`, `IG_COOKIES_FILE`,
+  `PIN_COOKIES_FILE` (مسیر یه فایل cookies.txt که از مرورگر لاگین‌شده export شده).
+- دامنه‌های پینترست/اینستاگرام/یوتیوب با substring match چک می‌شن، پس زیردامنه‌ها
+  (m.youtube.com, uk.pinterest.com, www.instagram.com) هم خودکار قبول می‌شن.
+- پیام خطا حالا بین «قفل ضد-ربات پلتفرم» (نیاز به کوکی) و بقیه‌ی خطاها فرق می‌ذاره.
 
-## Important
-The professional games named UNO, professional Battleship, Territory, Billiards and Racing are listed in the menu, but their full game engines are NOT claimed as implemented in this pack. The fully implemented board-game engines in this pack are Chess, Ludo, and Snakes & Ladders.
+## ⚠️ نکته‌ی مهم درباره‌ی خطاهای یوتیوب/اینستاگرام
+خطاهای «Sign in to confirm you're not a bot» (یوتیوب) و «Instagram sent an empty
+media response» (اینستاگرام) باگ کد نیستن — این‌ها قفل ضد-ربات خود پلتفرمن. تا
+وقتی env varهای کوکی بالا ست نشن، بعضی لینک‌ها (خصوصاً یوتیوب‌های محدود یا پست‌های
+اینستاگرام) همچنان ممکنه شکست بخورن. برای رفع قطعی، باید یه فایل cookies.txt از
+یه اکانت لاگین‌شده export کنی و مسیرش رو تو Railway Variables ست کنی.
+
+## فایل‌های تغییرکرده
+- bot.py — پنل ۸ دکمه‌ای، error handler سراسری، وصل شدن bug_reporter
+- games.py — norm() سخت‌گیرانه‌تر
+- downloader.py — کوکی، چند player_client، پیام خطای دقیق‌تر

@@ -46,11 +46,29 @@ PLATFORM_LABELS = {
 }
 
 # برای هر پلتفرم، محدود کردن دانلود فقط به دامنه‌های همون پلتفرم (جلوی سوءاستفاده رو می‌گیره)
+# نکته: از substring match استفاده می‌کنیم، پس زیردامنه‌ها (uk.pinterest.com,
+# www.instagram.com, m.youtube.com و ...) خودکار پوشش داده می‌شن.
 PLATFORM_DOMAINS = {
     "instagram": ("instagram.com", "instagr.am"),
-    "youtube": ("youtube.com", "youtu.be", "m.youtube.com"),
-    "pinterest": ("pinterest.com", "pin.it"),
+    "youtube": ("youtube.com", "youtu.be"),
+    "pinterest": ("pinterest.com", "pin.it", "pinimg.com"),
 }
+
+# فایل کوکی اختیاری برای هر پلتفرم — بعضی لینک‌های یوتیوب/اینستاگرام پشت قفل
+# ضد-ربات‌ان («Sign in to confirm you're not a bot» / «empty media response»)
+# و بدون کوکیِ یه اکانت لاگین‌شده اصلاً قابل دانلود نیستن؛ این یه محدودیت سمت
+# خود پلتفرمه، نه باگ کد. اگه این env varها ست بشن (مسیر یه فایل cookies.txt به
+# فرمت Netscape که از مرورگر export شده)، ازشون استفاده می‌کنیم.
+COOKIES_FILES = {
+    "instagram": os.getenv("IG_COOKIES_FILE"),
+    "youtube": os.getenv("YT_COOKIES_FILE"),
+    "pinterest": os.getenv("PIN_COOKIES_FILE"),
+}
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 URL_RE = re.compile(r"https?://\S+")
 
@@ -96,20 +114,54 @@ async def downloader_pick_callback(update: Update, context: ContextTypes.DEFAULT
     await q.answer()
 
 
-def _yt_dlp_download(url: str, outdir: str):
-    """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه."""
-    ydl_opts = {
+def _base_ydl_opts(outdir: str, platform: str) -> dict:
+    opts = {
         "outtmpl": os.path.join(outdir, "%(id)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "max_filesize": 49 * 1024 * 1024,  # سقف ۴۹ مگابایت — محدودیت آپلود بات‌های تلگرام
+        "retries": 3,
+        "fragment_retries": 3,
+        "http_headers": {"User-Agent": USER_AGENT},
+        "geo_bypass": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filepath = ydl.prepare_filename(info)
-    return filepath, info
+    cookies_file = COOKIES_FILES.get(platform)
+    if cookies_file and os.path.exists(cookies_file):
+        opts["cookiefile"] = cookies_file
+    return opts
+
+
+def _yt_dlp_download(url: str, outdir: str, platform: str):
+    """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
+
+    برای یوتیوب چند تا player_client رو پشت‌سرهم امتحان می‌کنیم، چون بعضی‌هاشون
+    (مثل android/ios) گاهی قفل «Sign in to confirm you're not a bot» رو دور
+    می‌زنن حتی بدون کوکی، ولی تضمینی نیست — اگه یوتیوب واقعاً لینک رو قفل کرده
+    باشه، تنها راه قطعی فایل کوکیِ یه اکانت لاگین‌شده‌ست (YT_COOKIES_FILE).
+    """
+    base = _base_ydl_opts(outdir, platform)
+    attempts = [{}]
+    if platform == "youtube":
+        attempts = [
+            {"extractor_args": {"youtube": {"player_client": ["android"]}}},
+            {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
+            {"extractor_args": {"youtube": {"player_client": ["web"]}}},
+        ]
+
+    last_err = None
+    for extra in attempts:
+        opts = {**base, **extra}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filepath = ydl.prepare_filename(info)
+            return filepath, info
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err
 
 
 async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,13 +194,28 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            filepath, info = await asyncio.to_thread(_yt_dlp_download, url, tmpdir)
+            filepath, info = await asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform)
         except Exception as e:
             log.warning(f"downloader failed for {url}: {e}")
-            await status.edit_text(
-                "❌ دانلود ناموفق بود. لینک رو چک کن یا شاید محتوا خصوصی/حذف‌شده باشه.\n"
-                f"جزئیات فنی: {str(e)[:200]}"
-            )
+            err_text = str(e)
+            if "Sign in to confirm" in err_text or "not a bot" in err_text:
+                await status.edit_text(
+                    "❌ یوتیوب برای این لینک قفل ضد-ربات گذاشته و بدون فایل کوکیِ یه اکانت "
+                    "لاگین‌شده قابل دور زدن نیست — این محدودیت خود یوتیوبه، نه باگ ربات.\n"
+                    "اگه مالک ربات هستی، env var به اسم YT_COOKIES_FILE ست کن (مسیر یه فایل "
+                    "cookies.txt که از مرورگر لاگین‌شده export شده)."
+                )
+            elif "empty media response" in err_text or "login" in err_text.lower():
+                await status.edit_text(
+                    "❌ اینستاگرام برای این پست جواب خالی داد — یا پست خصوصیه، یا اینستاگرام "
+                    "بدون لاگین اجازه‌ی دیدنش رو نمی‌ده. این محدودیت خود اینستاگرامه.\n"
+                    "اگه مالک ربات هستی، env var به اسم IG_COOKIES_FILE ست کن."
+                )
+            else:
+                await status.edit_text(
+                    "❌ دانلود ناموفق بود. لینک رو چک کن یا شاید محتوا خصوصی/حذف‌شده باشه.\n"
+                    f"جزئیات فنی: {err_text[:200]}"
+                )
             return
 
         if not filepath or not os.path.exists(filepath):

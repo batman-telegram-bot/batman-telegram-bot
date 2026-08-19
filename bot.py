@@ -35,6 +35,7 @@ from games_pack5 import register_extra_games3
 from downloader import register_downloader
 from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
+from bug_reporter import recent_errors_text
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -1094,8 +1095,10 @@ def build_panel_main_keyboard():
     rows = [
         [InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona"),
          InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games")],
-        [InlineKeyboardButton("📋 لیست‌ها", callback_data="panel:lists"),
-         InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod")],
+        [InlineKeyboardButton("📥 دانلودر", callback_data="panel:downloader"),
+         InlineKeyboardButton("📋 لیست‌ها", callback_data="panel:lists")],
+        [InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod"),
+         InlineKeyboardButton("🛠 رفع باگ ربات", callback_data="panel:bug")],
         [InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
     ]
@@ -1118,8 +1121,17 @@ PANEL_TEXTS = {
     "games": (
         "🎮 *بازی‌ها*\n\n"
         "برای شروع هر بازی کافیه اسمش رو تو چت بنویسی، نیازی به / نیست.\n"
-        "برای لیست کامل بنویس «گیم».\n\n"
-        "📥 *دانلودر:* بنویس «دانلودر»، پلتفرم (اینستاگرام/یوتیوب/پینترست) رو انتخاب کن و لینک رو بفرست."
+        "برای لیست کامل بنویس «گیم»."
+    ),
+    "downloader": (
+        "📥 *دانلودر گاتهام*\n\n"
+        "بنویس «دانلودر»، پلتفرم (📸 اینستاگرام / ▶️ یوتیوب / 📌 پینترست) رو با دکمه انتخاب کن، "
+        "بعد لینک رو همونجا بفرست.\n"
+        "برای یوتیوب حجم فایل هم تو کپشن نشون داده می‌شه.\n\n"
+        "⚠️ اگه یوتیوب یا اینستاگرام دانلود نشد و خطای «Sign in to confirm» یا «empty media "
+        "response» گرفتی، یعنی اون پلتفرم برای این لینک قفل ضد-ربات گذاشته و برای دور زدنش "
+        "ربات نیاز به فایل کوکی (کوکی مرورگر لاگین‌شده) داره — این یه محدودیت سمت یوتیوب/"
+        "اینستاگرامه، نه باگ ربات."
     ),
     "mod": (
         "🛡 *مدیریت گروه* (فقط ادمین، با ریپلای رو پیام هدف)\n\n"
@@ -2101,7 +2113,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=build_lists_keyboard(), parse_mode="Markdown")
         return
 
-    if data in ("panel:games", "panel:mod", "panel:about", "panel:words"):
+    if data == "panel:bug":
+        try:
+            await query.edit_message_text(
+                recent_errors_text(), reply_markup=build_back_keyboard(), parse_mode="Markdown"
+            )
+        except Exception:
+            await query.edit_message_text(
+                recent_errors_text().replace("*", ""), reply_markup=build_back_keyboard()
+            )
+        return
+
+    if data in ("panel:games", "panel:downloader", "panel:mod", "panel:about", "panel:words"):
         section = data.split(":", 1)[1]
         try:
             await query.edit_message_text(
@@ -3090,6 +3113,30 @@ async def captcha_verify_callback(update: Update, context: ContextTypes.DEFAULT_
 #  MAIN
 # =========================================================
 
+async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر سراسری خطا — قبلاً هیچ‌کدوم از هندلرها به Application وصل نبودن،
+    یعنی هر خطای پیش‌بینی‌نشده (مثلاً تو دیتابیس یا هر جای دیگه) کاملاً بی‌صدا
+    گم می‌شد: نه پیامی به کاربر، نه هیچ اطلاعی به مالک ربات. این باعث می‌شد
+    باگ‌هایی مثل «لیست بازی‌ها نمیاد» بدون هیچ ردی رد بشن. حالا هر خطا هم لاگ
+    می‌شه، هم (اگه ممکن باشه) خلاصه‌ش برای مالک ربات فرستاده می‌شه."""
+    err = context.error
+    log.exception("خطای پیش‌بینی‌نشده در پردازش یک آپدیت", exc_info=err)
+    try:
+        chat_id = update.effective_chat.id if isinstance(update, Update) and update.effective_chat else None
+        user_id = update.effective_user.id if isinstance(update, Update) and update.effective_user else None
+    except Exception:
+        chat_id = user_id = None
+    from bug_reporter import remember_error, format_error
+    item = remember_error("handle_update", err, chat_id=chat_id, user_id=user_id)
+    # مستقیم به OWNER_ID هارد-کد شده‌ی ربات اطلاع بده (env var هم اگه ست شده
+    # باشه، از طریق report_error استفاده می‌شه — اینجا صرفاً یه پشتیبان‌گیریه
+    # تا اگه env ست نشده بود، مالک باز هم بی‌خبر نمونه).
+    try:
+        await context.bot.send_message(chat_id=OWNER_ID, text=format_error(item), parse_mode="Markdown")
+    except Exception:
+        pass
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN تنظیم نشده! برو تو Railway Variables اضافه‌اش کن.")
@@ -3097,6 +3144,12 @@ def main():
     _init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # قبلاً هیچ error handler سراسری‌ای ثبت نشده بود، یعنی هر خطای پیش‌بینی‌نشده
+    # (تو دیتابیس، پارس مارک‌داون، هرچی) کاملاً بی‌صدا گم می‌شد — نه به کاربر
+    # پیامی می‌رسید، نه به مالک ربات. همینه که bug_reporter.py هم تا الان
+    # وصل نشده بود و «رفع باگ ربات» همیشه خالی می‌موند.
+    app.add_error_handler(global_error_handler)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quote", quote))
