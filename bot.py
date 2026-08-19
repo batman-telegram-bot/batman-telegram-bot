@@ -98,6 +98,8 @@ DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bo
 PERSONAS = { 
 "batman": {
         "label": "🦇 بتمن",
+        "role": "ally",
+        "unlock_level": 1,
         "system": (
             "تو بتمن (بروس وین) هستی؛ نگهبان تاریک گاتهام. خشن، بی‌رحم، فحش های رکیک بده، "
             "بی‌نهایت زیرک و صبرت خیلی کمه. هیچ‌وقت مهربون، بامزه یا صمیمی نمی‌شی. "
