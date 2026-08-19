@@ -155,7 +155,6 @@ _ARABIC_TO_PERSIAN = str.maketrans({
     "\u064a": "\u06cc",  # ي عربی -> ی فارسی
     "\u0643": "\u06a9",  # ك عربی -> ک فارسی
     "\u0629": "\u0647",  # ة -> ه
-    "\u06cc\u0670": "\u06cc",
     "\u200f": "",         # RTL mark
     "\u200e": "",         # LTR mark
     "\ufeff": "",         # BOM
@@ -165,6 +164,7 @@ _ARABIC_TO_PERSIAN = str.maketrans({
 def norm(text: str) -> str:
     t = (text or "").strip()
     t = t.translate(_ARABIC_TO_PERSIAN)
+    t = t.replace("\u06cc\u0670", "\u06cc")  # ی + کشیده‌ی زائد -> ی ساده
     # چند تا اسپیس/تب پشت‌سرهم رو یکی کن تا تطبیق با کلمات محرک خراب نشه
     t = re.sub(r"[ \t]+", " ", t)
     return t.strip()

@@ -22,10 +22,12 @@ downloader.py
 
 import os
 import re
+import json
 import asyncio
 import logging
 import tempfile
 
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
@@ -95,6 +97,130 @@ def _human_size(num_bytes):
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+# =========================================================
+#  پینترست — استخراج مستقیم به‌جای yt-dlp
+# =========================================================
+# روش پینترست تو yt-dlp قدیمیه و اغلب یا هیچی برنمی‌گردونه یا فقط کیفیت پایین.
+# این تابع همون تکنیکی رو پیاده می‌کنه که بات‌های اختصاصی پینترست استفاده می‌کنن:
+# ۱) اگه لینک کوتاه pin.it باشه، ریدایرکت رو دنبال می‌کنیم تا لینک اصلی pin/<id>
+#    به‌دست بیاد.
+# ۲) اول resource API خود پینترست (همون APIای که سایتش برای لود کردن پین ازش
+#    استفاده می‌کنه) رو صدا می‌زنیم — بهترین کیفیت ویدیو/عکس اورجینال رو می‌ده.
+# ۳) اگه جواب نداد، خود صفحه‌ی HTML پین رو می‌گیریم و لینک ویدیو/عکس رو باهاش
+#    regex پیدا می‌کنیم.
+# اگه هر دو شکست خوردن، کد صدا زننده به yt-dlp به‌عنوان آخرین راه برمی‌گرده.
+
+_PIN_ID_RE = re.compile(r"/pin/(\d+)")
+
+
+async def _resolve_pinterest_pin_url(url: str, client: httpx.AsyncClient) -> str:
+    if "pin.it" in url.lower():
+        try:
+            resp = await client.get(url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=15)
+            return str(resp.url)
+        except Exception:
+            return url
+    return url
+
+
+async def _pinterest_resource_api(pin_id: str, client: httpx.AsyncClient):
+    payload = {"options": {"id": pin_id, "field_set_key": "unauth_react_main_pin"}, "context": {}}
+    params = {"data": json.dumps(payload)}
+    headers = {
+        "User-Agent": USER_AGENT,
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*, q=0.01",
+        "Referer": "https://www.pinterest.com/",
+    }
+    resp = await client.get(
+        "https://www.pinterest.com/resource/PinResource/get/",
+        params=params, headers=headers, timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    pin = (data.get("resource_response") or {}).get("data") or {}
+    if not pin:
+        return None
+
+    videos = pin.get("videos")
+    if videos:
+        video_list = (videos.get("video_list") or {})
+        if video_list:
+            best = max(video_list.values(), key=lambda v: v.get("width", 0))
+            return {"url": best["url"], "is_video": True, "title": pin.get("title") or pin.get("grid_title") or ""}
+
+    images = pin.get("images") or {}
+    orig = images.get("orig") or {}
+    if orig.get("url"):
+        return {"url": orig["url"], "is_video": False, "title": pin.get("title") or pin.get("grid_title") or ""}
+
+    return None
+
+
+async def _pinterest_html_scrape(pin_url: str, client: httpx.AsyncClient):
+    resp = await client.get(pin_url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=20)
+    resp.raise_for_status()
+    html = resp.text
+
+    m = re.search(r'https?:\\/\\/v1\.pinimg\.com\\/videos\\/[^"\\]+\.mp4', html)
+    if m:
+        return {"url": m.group(0).replace("\\/", "/"), "is_video": True, "title": ""}
+    m = re.search(r'https?://v1\.pinimg\.com/videos/[^"\s]+\.mp4', html)
+    if m:
+        return {"url": m.group(0), "is_video": True, "title": ""}
+
+    m = re.search(r'https?:\\/\\/i\.pinimg\.com\\/originals\\/[^"\\]+\.(?:jpg|jpeg|png|gif)', html)
+    if m:
+        return {"url": m.group(0).replace("\\/", "/"), "is_video": False, "title": ""}
+    m = re.search(r'https?://i\.pinimg\.com/originals/[^"\s]+\.(?:jpg|jpeg|png|gif)', html)
+    if m:
+        return {"url": m.group(0), "is_video": False, "title": ""}
+
+    return None
+
+
+async def _pinterest_extract(url: str):
+    """امتحان می‌کنه ویدیو/عکس رو مستقیم از پینترست دربیاره. اگه هر دو روش
+    شکست خورد، None برمی‌گردونه تا صدا زننده به yt-dlp برگرده."""
+    async with httpx.AsyncClient() as client:
+        try:
+            pin_url = await _resolve_pinterest_pin_url(url, client)
+        except Exception:
+            pin_url = url
+
+        m = _PIN_ID_RE.search(pin_url)
+        if m:
+            try:
+                result = await _pinterest_resource_api(m.group(1), client)
+                if result:
+                    return result
+            except Exception as e:
+                log.info(f"pinterest resource API failed: {e}")
+
+        try:
+            result = await _pinterest_html_scrape(pin_url, client)
+            if result:
+                return result
+        except Exception as e:
+            log.info(f"pinterest html scrape failed: {e}")
+
+    return None
+
+
+async def _download_direct_url(media_url: str, outdir: str, is_video: bool) -> str:
+    ext = ".mp4" if is_video else (os.path.splitext(media_url.split("?")[0])[1] or ".jpg")
+    filepath = os.path.join(outdir, f"pin{ext}")
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "GET", media_url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=60
+        ) as resp:
+            resp.raise_for_status()
+            with open(filepath, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                    f.write(chunk)
+    return filepath
 
 
 async def downloader_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,13 +312,47 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    if yt_dlp is None:
+    # برای پینترست به yt-dlp نیازی نیست (روش مستقیم پایین‌تر کارو انجام می‌ده)،
+    # فقط برای یوتیوب/اینستاگرام (و fallback خود پینترست) لازمه.
+    if yt_dlp is None and platform != "pinterest":
         await msg.reply_text("⚠️ ماژول دانلود نصب نشده. باید yt-dlp تو requirements.txt باشه (اضافه شده، فقط دیپلوی دوباره لازمه).")
         return
 
     status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # پینترست: اول روش مستقیم (resource API / اسکرپ HTML) رو امتحان کن،
+        # چون خیلی سریع‌تر و مطمئن‌تر از yt-dlp برای این پلتفرمه. فقط اگه
+        # شکست خورد میره سراغ yt-dlp (مسیر قدیمی، پایین همین تابع).
+        if platform == "pinterest":
+            try:
+                media = await _pinterest_extract(url)
+            except Exception as e:
+                log.info(f"pinterest direct extract error: {e}")
+                media = None
+            if media:
+                try:
+                    filepath = await _download_direct_url(media["url"], tmpdir, media["is_video"])
+                    caption = media.get("title") or None
+                    with open(filepath, "rb") as f:
+                        if media["is_video"]:
+                            await msg.reply_video(f, caption=caption, supports_streaming=True)
+                        else:
+                            await msg.reply_photo(f, caption=caption)
+                    try:
+                        await status.delete()
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    log.info(f"pinterest direct download/send failed, falling back to yt-dlp: {e}")
+                    # می‌افته پایین، سراغ yt-dlp
+            if yt_dlp is None:
+                await status.edit_text(
+                    "❌ دانلود مستقیم از پینترست شکست خورد و yt-dlp هم نصب نیست تا fallback بشه."
+                )
+                return
+
         try:
             filepath, info = await asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform)
         except Exception as e:
