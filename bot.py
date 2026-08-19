@@ -10,7 +10,10 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict, deque
 
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+)
 from telegram.constants import ChatType
 from telegram.ext import (
     ApplicationBuilder,
@@ -38,6 +41,9 @@ from gotham_content import gotham_signature_line, RIDDLES
 from downloader import register_downloader, dl_menu_markup, DOWNLOADER_HELP_TEXT
 from admin_panel import register_admin_panel
 from bug_reporter import recent_errors_text
+from security_tools import register_security, build_security_text_and_kb
+from tools_and_fun import register_tools_and_fun, TOOLS_TEXT, FUN_TEXT, tools_menu_keyboard, fun_menu_keyboard
+from compress_tools import register_compress
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -1045,7 +1051,21 @@ def build_words_panel_text() -> str:
         "، ".join(game_words),
         "",
         "📥 *دانلودر:*",
-        "«دانلودر» — انتخاب پلتفرم (اینستاگرام/یوتیوب/پینترست) و بعد فرستادن لینک",
+        "«دانلودر» — انتخاب پلتفرم (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/ساندکلاود) و بعد فرستادن لینک",
+        "",
+        "🔐 *امنیت (فقط ادمین، از پنل «امکانات جدید ← امنیت»):*",
+        "آنتی‌لینک — حذف خودکار لینک/آیدی از غیرادمین‌ها",
+        "آنتی‌فلود — میوت خودکار در صورت اسپم پشت‌سرهم",
+        "",
+        "🧰 *ابزارها:*",
+        "«ترجمه <متن>» یا ریپلای + «ترجمه» — ترجمه‌ی هوشمند فارسی↔انگلیسی",
+        "«کیوآر <متن/لینک>» — ساخت بارکد QR",
+        "«پسورد» / «رمز عبور» — ساخت رمز تصادفی امن",
+        "ریپلای روی عکس/ویدیو/صدا + «فشرده» — فشرده‌سازی فایل",
+        "",
+        "🎉 *سرگرمی:*",
+        "«جوک» — یه جوک تصادفی",
+        "«واقعیت جالب» / «فکت» — یه فکت تصادفی",
         "",
         "👥 *لیست‌های اجتماعی:*",
         "، ".join(PACK3_WORDS),
@@ -1086,6 +1106,8 @@ def build_words_panel_text() -> str:
 
 
 def build_panel_main_keyboard():
+    """۸ دکمه‌ی اصلی قبلی + ۱ دکمه‌ی جدید «امکانات جدید» (که خودش زیرمنوی امنیت/
+    ابزارها/سرگرمی رو باز می‌کنه) = ۹ دکمه در کل، طبق چیدمان اصلی."""
     rows = [
         [InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona"),
          InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games")],
@@ -1095,6 +1117,43 @@ def build_panel_main_keyboard():
          InlineKeyboardButton("🛠 رفع باگ ربات", callback_data="panel:bug")],
         [InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
+        [InlineKeyboardButton("🧩 امکانات جدید (امنیت/ابزار/سرگرمی)", callback_data="panel:new")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def build_new_features_keyboard():
+    rows = [
+        [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
+         InlineKeyboardButton("🧰 ابزارها", callback_data="panel:tools")],
+        [InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+NEW_FEATURES_TEXT = (
+    "🧩 *امکانات جدید*\n\n"
+    "یه بخش رو انتخاب کن:\n"
+    "🔐 امنیت — آنتی‌لینک و آنتی‌فلود\n"
+    "🧰 ابزارها — ترجمه، کیوآر، پسورد، فشرده‌سازی فایل\n"
+    "🎉 سرگرمی — جوک، فکت، جمله بتمنی"
+)
+
+
+def build_mod_panel_keyboard():
+    """میانبرهای واقعی «مدیریت گروه» — قبلاً این دکمه فقط یه متن ساکن نشون می‌داد
+    و هیچ اکشنی نداشت که باعث می‌شد به‌نظر برسه با «لیست‌ها» قاطی/جابجا شده.
+    الان مستقیم به لیست‌های پرکاربرد وصله."""
+    rows = [
+        [InlineKeyboardButton("🔨 بن‌شده‌ها", callback_data="lists:banned"),
+         InlineKeyboardButton("🔇 سکوت‌شده‌ها", callback_data="lists:muted")],
+        [InlineKeyboardButton("⚠️ اخطارها", callback_data="lists:warn"),
+         InlineKeyboardButton("🛡 معاف‌شده‌ها", callback_data="lists:exempt")],
+        [InlineKeyboardButton("🚫 کلمات فیلتر", callback_data="lists:filter"),
+         InlineKeyboardButton("🤖 پاسخ خودکار", callback_data="lists:autoreply")],
+        [InlineKeyboardButton("🔐 امنیت گروه", callback_data="panel:security")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -1119,9 +1178,9 @@ PANEL_TEXTS = {
     ),
     "downloader": (
         "📥 *دانلودر گاتهام*\n\n"
-        "بنویس «دانلودر»، پلتفرم (📸 اینستاگرام / ▶️ یوتیوب / 📌 پینترست) رو با دکمه انتخاب کن، "
-        "بعد لینک رو همونجا بفرست.\n"
-        "برای یوتیوب حجم فایل هم تو کپشن نشون داده می‌شه.\n\n"
+        "بنویس «دانلودر»، پلتفرم (📸 اینستاگرام / ▶️ یوتیوب / 🎵 تیک‌تاک / 🐦 ایکس / "
+        "📌 پینترست / 🎧 ساندکلاود) رو با دکمه انتخاب کن، بعد لینک رو همونجا بفرست.\n"
+        "حجم فایل همیشه تو کپشن نشون داده می‌شه.\n\n"
         "⚠️ اگه یوتیوب یا اینستاگرام دانلود نشد و خطای «Sign in to confirm» یا «empty media "
         "response» گرفتی، یعنی اون پلتفرم برای این لینک قفل ضد-ربات گذاشته و برای دور زدنش "
         "ربات نیاز به فایل کوکی (کوکی مرورگر لاگین‌شده) داره — این یه محدودیت سمت یوتیوب/"
@@ -1380,7 +1439,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top رتبه‌بندی گروه\n"
         "/quote یه جمله بتمنی"
     )
+    # دکمه‌ی اشتراک‌گذاری شماره کاملاً اختیاریه — کاربر خودش تصمیم می‌گیره لمسش
+    # کنه یا نه؛ ربات هیچ‌وقت شماره رو اجباری نمی‌کنه و بدونش هم همه‌چی کار می‌کنه.
+    contact_kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 اشتراک‌گذاری شماره (اختیاری)", request_contact=True)],
+         [KeyboardButton("رد شدن، نیازی نیست")]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
     await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(
+        "اگه دوست داشتی می‌تونی شماره‌ت رو با دکمه‌ی رسمی تلگرام (پایین صفحه) به‌صورت "
+        "کاملاً اختیاری با سازنده‌ی ربات به اشتراک بذاری — یا بی‌خیالش شو، هیچ فرقی تو "
+        "کارکرد ربات نداره.",
+        reply_markup=contact_kb,
+    )
+
+
+async def handle_shared_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کاربر با آگاهی کامل و از روی اختیار، با دکمه‌ی رسمی تلگرام شماره‌ش رو فرستاد.
+    این با اجبار گرفتن شماره موقع /start فرق داره: اینجا کاربر می‌تونست راحت رد کنه."""
+    contact = update.message.contact
+    user = update.effective_user
+    if not contact or contact.user_id != user.id:
+        # کسیِ دیگه (نه خودِ فرستنده) رو شیر کرده، این سناریو رو دستکاری نمی‌کنیم
+        await update.message.reply_text(
+            "🦇 ممنون، ولی فقط شماره‌ی خودت رو می‌تونم ثبت کنم.", reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    try:
+        uname = f"@{user.username}" if user.username else "بدون یوزرنیم"
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(
+                f"📱 یه کاربر با اختیار خودش شماره‌ش رو شیر کرد:\n"
+                f"{user.first_name} ({uname}) — آیدی: {user.id}\nشماره: {contact.phone_number}"
+            ),
+        )
+    except Exception:
+        pass
+    await update.message.reply_text("🦇 ممنون! ثبت شد.", reply_markup=ReplyKeyboardRemove())
+
+
+async def handle_skip_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("باشه، مشکلی نیست 🦇", reply_markup=ReplyKeyboardRemove())
 
 
 async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2070,7 +2171,7 @@ _FOREIGN_CALLBACK_PREFIXES = (
     "g2048:", "lo:", "mm:", "bs:", "lobby2:", "tg:", "noop",
     "ms:", "dots:", "tiko:", "jamshid:", "bazar:", "lobby4:",
     "uno:", "ter:", "bil:", "lobby5:", "race:", "noop5",
-    "gttt:", "ittt:",
+    "gttt:", "ittt:", "sec:", "tool:", "fun:",
 )
 
 
@@ -2142,7 +2243,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(DOWNLOADER_HELP_TEXT, reply_markup=dl_menu_markup())
         return
 
-    if data in ("panel:mod", "panel:about", "panel:words"):
+    if data == "panel:mod":
+        # باگ رفع‌شده: قبلاً این دکمه با «درباره ربات»/«کلمات ربات» یکی بود و فقط
+        # یه متن ساکن نشون می‌داد (بدون هیچ دکمه‌ی عملیاتی) — از این‌جهت با
+        # «لیست‌ها» (که واقعاً دکمه‌های عملیاتی داشت) قاطی/جابجا به‌نظر می‌رسید.
+        # الان خودش هم دکمه‌های واقعی داره (میانبر به لیست‌های بن/میوت/اخطار/فیلتر).
+        try:
+            await query.edit_message_text(
+                PANEL_TEXTS["mod"], reply_markup=build_mod_panel_keyboard(), parse_mode="Markdown"
+            )
+        except Exception:
+            await query.edit_message_text(
+                PANEL_TEXTS["mod"].replace("*", ""), reply_markup=build_mod_panel_keyboard()
+            )
+        return
+
+    if data == "panel:new":
+        await query.edit_message_text(NEW_FEATURES_TEXT, reply_markup=build_new_features_keyboard(), parse_mode="Markdown")
+        return
+
+    if data == "panel:security":
+        text, kb = await build_security_text_and_kb(context.application.bot_data["security_deps"], chat_id)
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    if data == "panel:tools":
+        await query.edit_message_text(TOOLS_TEXT, reply_markup=tools_menu_keyboard(), parse_mode="Markdown")
+        return
+
+    if data == "panel:fun":
+        await query.edit_message_text(FUN_TEXT, reply_markup=fun_menu_keyboard(), parse_mode="Markdown")
+        return
+
+    if data in ("panel:about", "panel:words"):
         section = data.split(":", 1)[1]
         try:
             await query.edit_message_text(
@@ -2780,6 +2913,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
 
+    # --- امنیت گروه: آنتی‌لینک/آنتی‌فلود (اگه ادمین فعالشون کرده باشه) ---
+    if is_group:
+        guard_fn = context.application.bot_data.get("security_guard_fn")
+        if guard_fn and await guard_fn(update, context):
+            return
+
     # --- فیلتر کلمات، پاسخ خودکار و دستورات مدیریتی به زبان طبیعی: همیشه فعالن، حتی بدون منشن ---
     if is_group:
         if await handle_filter_check(update, context, chat_id, user_id, text):
@@ -3226,6 +3365,8 @@ def main():
     # نگه داشتیم برای وضوح بیشتر.
     app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
+    app.add_handler(MessageHandler(filters.Regex(r"^رد شدن، نیازی نیست$"), handle_skip_contact))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(MessageHandler(filters.ANIMATION, handle_gif))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Sticker.ALL, handle_photo_sticker))
@@ -3244,6 +3385,23 @@ def main():
         "log_mod_action": _log_mod_action,
         "warn_expiry_seconds": WARN_EXPIRY_SECONDS,
     })
+
+    # --- امنیت گروه (آنتی‌لینک / آنتی‌فلود) ---
+    security_deps = {
+        "is_group_admin": is_group_admin,
+        "list_add": _list_add,
+        "list_remove": _list_remove,
+        "list_get_one": _list_get_one,
+        "db_run": db_run,
+    }
+    app.bot_data["security_deps"] = security_deps
+    register_security(app, security_deps)
+
+    # --- ابزارها (ترجمه/کیوآر/پسورد) و سرگرمی (جوک/فکت) ---
+    register_tools_and_fun(app)
+
+    # --- تبدیل و فشرده‌سازی فایل (ریپلای + «فشرده») ---
+    register_compress(app)
 
     # --- بازی‌ها (کلمه‌محور، بدون /) — باید بعد از handle_message اضافه بشن ---
     register_games(app)

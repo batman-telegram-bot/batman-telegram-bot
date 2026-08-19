@@ -39,12 +39,15 @@ except ImportError:  # اگه نصب نشده باشه، پیام واضح می�
     yt_dlp = None
 
 
-PENDING_DL = {}  # user_id -> "instagram" | "youtube" | "pinterest"
+PENDING_DL = {}  # user_id -> "instagram" | "youtube" | "pinterest" | "tiktok" | "twitter" | "soundcloud"
 
 PLATFORM_LABELS = {
     "instagram": "📸 اینستاگرام",
     "youtube": "▶️ یوتیوب",
     "pinterest": "📌 پینترست",
+    "tiktok": "🎵 تیک‌تاک",
+    "twitter": "🐦 ایکس/توییتر",
+    "soundcloud": "🎧 ساندکلاود",
 }
 
 # برای هر پلتفرم، محدود کردن دانلود فقط به دامنه‌های همون پلتفرم (جلوی سوءاستفاده رو می‌گیره)
@@ -54,6 +57,9 @@ PLATFORM_DOMAINS = {
     "instagram": ("instagram.com", "instagr.am"),
     "youtube": ("youtube.com", "youtu.be"),
     "pinterest": ("pinterest.com", "pin.it", "pinimg.com"),
+    "tiktok": ("tiktok.com",),
+    "twitter": ("twitter.com", "x.com"),
+    "soundcloud": ("soundcloud.com", "snd.sc"),
 }
 
 # فایل کوکی اختیاری برای هر پلتفرم — بعضی لینک‌های یوتیوب/اینستاگرام پشت قفل
@@ -85,6 +91,15 @@ COOKIES_FILES = {
     "pinterest": os.getenv("PIN_COOKIES_FILE") or _default_cookie_path(
         "pinterest_cookies.txt", "pin_cookies.txt"
     ),
+    "tiktok": os.getenv("TT_COOKIES_FILE") or _default_cookie_path(
+        "tiktok_cookies.txt", "tt_cookies.txt"
+    ),
+    "twitter": os.getenv("TW_COOKIES_FILE") or _default_cookie_path(
+        "twitter_cookies.txt", "tw_cookies.txt", "x_cookies.txt"
+    ),
+    "soundcloud": os.getenv("SC_COOKIES_FILE") or _default_cookie_path(
+        "soundcloud_cookies.txt", "sc_cookies.txt"
+    ),
 }
 
 USER_AGENT = (
@@ -95,16 +110,20 @@ USER_AGENT = (
 URL_RE = re.compile(r"https?://\S+")
 
 DOWNLOADER_HELP_TEXT = (
-    "📥 دانلودر — بنویس «دانلودر»، پلتفرم (اینستاگرام/یوتیوب/پینترست) رو با دکمه انتخاب کن، "
-    "بعد لینک رو همونجا بفرست. برای یوتیوب حجم فایل هم تو کپشن نشون داده می‌شه.\n"
+    "📥 دانلودر — بنویس «دانلودر»، پلتفرم (اینستاگرام / یوتیوب / تیک‌تاک / ایکس / "
+    "پینترست / ساندکلاود) رو با دکمه انتخاب کن، بعد لینک رو همونجا بفرست.\n"
+    "حجم فایل همیشه تو کپشن نشون داده می‌شه.\n"
 )
 
 
 def _dl_menu_markup():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(PLATFORM_LABELS["instagram"], callback_data="dl:pick:instagram")],
-        [InlineKeyboardButton(PLATFORM_LABELS["youtube"], callback_data="dl:pick:youtube")],
-        [InlineKeyboardButton(PLATFORM_LABELS["pinterest"], callback_data="dl:pick:pinterest")],
+        [InlineKeyboardButton(PLATFORM_LABELS["instagram"], callback_data="dl:pick:instagram"),
+         InlineKeyboardButton(PLATFORM_LABELS["youtube"], callback_data="dl:pick:youtube")],
+        [InlineKeyboardButton(PLATFORM_LABELS["tiktok"], callback_data="dl:pick:tiktok"),
+         InlineKeyboardButton(PLATFORM_LABELS["twitter"], callback_data="dl:pick:twitter")],
+        [InlineKeyboardButton(PLATFORM_LABELS["pinterest"], callback_data="dl:pick:pinterest"),
+         InlineKeyboardButton(PLATFORM_LABELS["soundcloud"], callback_data="dl:pick:soundcloud")],
     ])
 
 
@@ -300,6 +319,9 @@ def _yt_dlp_download(url: str, outdir: str, platform: str):
             {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
             {"extractor_args": {"youtube": {"player_client": ["web"]}}},
         ]
+    if platform == "soundcloud":
+        # ساندکلاود صوتیه؛ فرمت ویدیویی معنی نداره، بهترین فایل صوتی رو می‌گیریم
+        base = {**base, "format": "bestaudio/best"}
 
     last_err = None
     for extra in attempts:
@@ -409,15 +431,16 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
 
         real_size = os.path.getsize(filepath)
         title = (info.get("title") or "").strip()
-        caption = title
-        if platform == "youtube":
-            caption = f"{title}\n📦 حجم: {_human_size(real_size)}" if title else f"📦 حجم: {_human_size(real_size)}"
+        size_line = f"📦 حجم: {_human_size(real_size)}"
+        caption = f"{title}\n{size_line}" if title else size_line
 
         ext = os.path.splitext(filepath)[1].lower()
         try:
             with open(filepath, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
                     await msg.reply_photo(f, caption=caption or None)
+                elif platform == "soundcloud" or ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav"):
+                    await msg.reply_audio(f, caption=caption or None, title=title or None)
                 else:
                     await msg.reply_video(f, caption=caption or None, supports_streaming=True)
         except Exception as e:
