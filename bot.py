@@ -89,9 +89,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
-
 # =========================================================
 #  PERSONAS
 # =========================================================
@@ -945,42 +944,67 @@ async def require_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 # =========================================================
 
 async def call_ai(chat_id, persona_key: str, level: int, user_text: str) -> str:
-    if not GROQ_API_KEY:
-        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو GROQ_API_KEY رو تو Railway بذار!"
+    if not OPENROUTER_API_KEY:
+        return "🦇 کلید هوش مصنوعی تنظیم نشده، برو OPENROUTER_API_KEY رو تو Railway بذار!"
 
-    system_prompt = PERSONAS[persona_key]["system"] + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
+    system_prompt = (
+        PERSONAS[persona_key]["system"]
+        + LEVEL_FLAVOR.get(level, LEVEL_FLAVOR[MAX_CHAR_LEVEL])
+    )
+
     if is_night():
         system_prompt += NIGHT_FLAVOR
 
     history = list(CONVO_MEMORY[chat_id])
-    messages = [{"role": "system", "content": system_prompt}]
+
+    messages = [
+        {"role": "system", "content": system_prompt}
+    ]
+
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({
+        "role": "user",
+        "content": user_text
+    })
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/",
+                    "X-Title": "Gotham Telegram Bot",
                 },
                 json={
                     "model": "openai/gpt-oss-120b",
-                    "max_tokens": 300,
                     "messages": messages,
+                    "max_tokens": 300,
                 },
             )
+
+            response.raise_for_status()
+
             data = response.json()
+
             reply = data["choices"][0]["message"]["content"]
+
     except Exception as e:
         log.error(f"AI error: {e}")
-        return "🦇 مغزم قاطی کرد، بعداً امتحان کن."
+        return "🦇 مغزم قاطی کرد، بعداً دوباره امتحان کن."
 
-    CONVO_MEMORY[chat_id].append({"role": "user", "content": user_text})
-    CONVO_MEMORY[chat_id].append({"role": "assistant", "content": reply})
+    CONVO_MEMORY[chat_id].append({
+        "role": "user",
+        "content": user_text
+    })
+
+    CONVO_MEMORY[chat_id].append({
+        "role": "assistant",
+        "content": reply
+    })
+
     return reply
-
 
 # =========================================================
 #  UI BUILDERS
