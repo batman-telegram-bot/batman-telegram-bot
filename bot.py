@@ -49,6 +49,8 @@ from midnight_announcement import _get_all_chat_ids
 from group_admin_extra import register_group_admin_extra
 from new_features_extra import register_new_features
 from fortune_and_extras import register_fortune_and_extras
+from reminders import register_reminders
+from media_recognition import register_media_recognition
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -1170,7 +1172,11 @@ def build_new_features_keyboard():
          InlineKeyboardButton("🎡 چرخ گردون", callback_data="panel:wheel_info")],
         [InlineKeyboardButton("🎫 تیکت پشتیبانی", callback_data="panel:ticket_info"),
          InlineKeyboardButton("🎂 یادآور تولد", callback_data="panel:bday_info")],
-        [InlineKeyboardButton("🎙 صدا به متن", callback_data="panel:voice_info")],
+        [InlineKeyboardButton("🎙 صدا به متن", callback_data="panel:voice_info"),
+         InlineKeyboardButton("⏰ یادآور", callback_data="panel:reminder_info")],
+        [InlineKeyboardButton("🎬 تشخیص فیلم/سریال", callback_data="panel:movie_info"),
+         InlineKeyboardButton("🎵 تشخیص آهنگ", callback_data="panel:song_info")],
+        [InlineKeyboardButton("📝 خلاصه‌ی گروه", callback_data="panel:summary_info")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -1191,7 +1197,11 @@ NEW_FEATURES_TEXT = (
     "🎡 چرخ گردون — یه‌بار در روز، امتیاز رایگان\n"
     "🎫 تیکت پشتیبانی — تو چت خصوصی، «تیکت <متن>»\n"
     "🎂 یادآور تولد — «تولدم ۱۵ مرداد»\n"
-    "🎙 صدا به متن — ریپلای رو ویس + «متن کن»"
+    "🎙 صدا به متن — ریپلای رو ویس + «متن کن»\n"
+    "⏰ یادآور — «یادآور 10 دقیقه/ساعت/روز <متن>» یا «یادآور 14:30 <متن>»\n"
+    "🎬 تشخیص فیلم/سریال — ریپلای رو عکس یا ویدیو + «تشخیص فیلم»\n"
+    "🎵 تشخیص آهنگ — ریپلای رو ویس/صدا/ویدیو + «تشخیص آهنگ»\n"
+    "📝 خلاصه‌ی گروه — بنویس «خلاصه گروه» تا خلاصه‌ی بحث اخیر رو بدم"
 )
 
 PANEL_INFO_TEXTS = {
@@ -1207,6 +1217,10 @@ PANEL_INFO_TEXTS = {
     "panel:voice_info": "🎙 روی یه پیام صوتی/ویس ریپلای کن و بنویس «متن کن» تا رونویسیش کنم.",
     "panel:lock_info": "🔒 بنویس «قفل گروه» یا «باز کردن گروه» (فقط ادمین‌ها).",
     "panel:purge_info": "🧹 روی قدیمی‌ترین پیامی که می‌خوای حذف بشه ریپلای کن و بنویس «پاکسازی».",
+    "panel:reminder_info": "⏰ بنویس «یادآور 10 دقیقه <متن>» یا «یادآور 14:30 <متن>» یا «یادآور فردا 9:00 <متن>». برای دیدن لیست: «یادآورهای من».",
+    "panel:movie_info": "🎬 روی یه عکس یا ویدیو (صحنه‌ی فیلم/سریال) ریپلای کن و بنویس «تشخیص فیلم».",
+    "panel:song_info": "🎵 روی یه ویس، صدا یا ویدیوی موزیکال ریپلای کن و بنویس «تشخیص آهنگ».",
+    "panel:summary_info": "📝 بنویس «خلاصه گروه» تا خلاصه‌ی آخرین پیام‌های گروه رو برات بدم.",
 }
 
 
@@ -2253,6 +2267,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data or ""
     if data.startswith(_FOREIGN_CALLBACK_PREFIXES):
         return
+
+    # نکته‌ی مهم: تلگرام فقط یه‌بار اجازه‌ی answer به هر callback query رو می‌ده.
+    # قبلاً اینجا همیشه query.answer() خالی صدا زده می‌شد و بعد پایین‌تر
+    # برای دکمه‌های PANEL_INFO_TEXTS دوباره query.answer(..., show_alert=True)
+    # صدا زده می‌شد که همیشه خطا می‌داد و باعث می‌شد دکمه هیچ کاری نکنه.
+    if data in PANEL_INFO_TEXTS:
+        await query.answer(PANEL_INFO_TEXTS[data], show_alert=True)
+        return
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
@@ -2333,10 +2356,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "panel:new":
         await query.edit_message_text(NEW_FEATURES_TEXT, reply_markup=build_new_features_keyboard(), parse_mode="Markdown")
-        return
-
-    if data in PANEL_INFO_TEXTS:
-        await query.answer(PANEL_INFO_TEXTS[data], show_alert=True)
         return
 
     if data == "panel:security":
@@ -3496,6 +3515,12 @@ def main():
         "owner_id": OWNER_ID,
         "db_path": DB_PATH,
     })
+
+    # --- یادآور واقعی با زمان‌بندی (JobQueue + دیتابیس) ---
+    register_reminders(app, {"db_path": DB_PATH})
+
+    # --- تشخیص فیلم/سریال از عکس یا ویدیو، تشخیص آهنگ، خلاصه‌ی گروه ---
+    register_media_recognition(app)
 
     # --- ۶ امکان دیگه: فال، اسلات، پرونده روز، کوییز شخصیت، کپسول زمان، شهروند نمونه ---
     register_fortune_and_extras(app, {

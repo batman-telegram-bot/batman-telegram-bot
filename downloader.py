@@ -124,6 +124,13 @@ def _dl_menu_markup():
          InlineKeyboardButton(PLATFORM_LABELS["twitter"], callback_data="dl:pick:twitter")],
         [InlineKeyboardButton(PLATFORM_LABELS["pinterest"], callback_data="dl:pick:pinterest"),
          InlineKeyboardButton(PLATFORM_LABELS["soundcloud"], callback_data="dl:pick:soundcloud")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
+    ])
+
+
+def _dl_after_pick_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 انتخاب پلتفرم دیگه", callback_data="panel:downloader")],
     ])
 
 
@@ -279,7 +286,8 @@ async def downloader_pick_callback(update: Update, context: ContextTypes.DEFAULT
     platform = q.data.split(":")[2]
     PENDING_DL[q.from_user.id] = platform
     await q.edit_message_text(
-        f"{PLATFORM_LABELS[platform]} انتخاب شد ✅\n🔗 حالا لینک رو همینجا بفرست تا برات دانلودش کنم."
+        f"{PLATFORM_LABELS[platform]} انتخاب شد ✅\n🔗 حالا لینک رو همینجا بفرست تا برات دانلودش کنم.",
+        reply_markup=_dl_after_pick_markup(),
     )
     await q.answer()
 
