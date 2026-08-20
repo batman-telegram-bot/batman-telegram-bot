@@ -44,6 +44,11 @@ from bug_reporter import recent_errors_text
 from security_tools import register_security, build_security_text_and_kb
 from tools_and_fun import register_tools_and_fun, TOOLS_TEXT, FUN_TEXT, tools_menu_keyboard, fun_menu_keyboard
 from compress_tools import register_compress
+from voice_to_text import register_voice_to_text
+from midnight_announcement import _get_all_chat_ids
+from group_admin_extra import register_group_admin_extra
+from new_features_extra import register_new_features
+from fortune_and_extras import register_fortune_and_extras
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -1067,6 +1072,35 @@ def build_words_panel_text() -> str:
         "«جوک» — یه جوک تصادفی",
         "«واقعیت جالب» / «فکت» — یه فکت تصادفی",
         "",
+        "🎩 *فال، اسلات، پرونده روز، کوییز، کپسول زمان:*",
+        "«فال» — فال گاتهامی روزانه",
+        "«اسلات» — دستگاه اسلات، شانستو با امتیاز امتحان کن",
+        "«پرونده روز» + «جواب <حدس>» — معمای روزانه با جایزه",
+        "«شخصیت گاتهامی» — کوییز کوتاه، بفهم کدوم شخصیتی هستی",
+        "«کپسول <روز> <متن>» — پیام برای N روز بعدِ خودت",
+        "🏅 شهروند نمونه — هر روز یه عضو تصادفی گروه معرفی می‌شه (خودکار)",
+        "",
+        "🎙 *صدا به متن:*",
+        "ریپلای رو ویس/صوت + «متن کن» / «رونویسی»",
+        "",
+        "🎡 *چرخ گردون روزانه:*",
+        "«چرخ گردون» — یه‌بار در روز، امتیاز رایگان",
+        "",
+        "🎫 *تیکت پشتیبانی:*",
+        "تو چت خصوصی: «تیکت <متن>»",
+        "",
+        "🎂 *یادآور تولد:*",
+        "«تولدم ۱۵ مرداد» — تبریک خودکار سر تاریخ",
+        "",
+        "🔒 *قفل/باز کردن گروه (ادمین):*",
+        "«قفل گروه» / «باز کردن گروه»",
+        "",
+        "🧹 *پاکسازی (ادمین):*",
+        "ریپلای رو قدیمی‌ترین پیام + «پاکسازی»",
+        "",
+        "📊 *آمار هفتگی گروه (ادمین):*",
+        "/groupreport یا «گزارش گروه» — پرفعالیت‌ترین اعضای هفته",
+        "",
         "👥 *لیست‌های اجتماعی:*",
         "، ".join(PACK3_WORDS),
         "",
@@ -1126,7 +1160,17 @@ def build_new_features_keyboard():
     rows = [
         [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
          InlineKeyboardButton("🧰 ابزارها", callback_data="panel:tools")],
-        [InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun")],
+        [InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun"),
+         InlineKeyboardButton("🔮 فال گاتهام", callback_data="panel:fortune_info")],
+        [InlineKeyboardButton("🎰 اسلات گاتهام", callback_data="panel:slot_info"),
+         InlineKeyboardButton("🧩 پرونده روز", callback_data="panel:case_info")],
+        [InlineKeyboardButton("🧠 کدوم شخصیتم؟", callback_data="panel:quiz_info"),
+         InlineKeyboardButton("⏳ کپسول زمان", callback_data="panel:capsule_info")],
+        [InlineKeyboardButton("🏅 شهروند نمونه", callback_data="panel:citizen_info"),
+         InlineKeyboardButton("🎡 چرخ گردون", callback_data="panel:wheel_info")],
+        [InlineKeyboardButton("🎫 تیکت پشتیبانی", callback_data="panel:ticket_info"),
+         InlineKeyboardButton("🎂 یادآور تولد", callback_data="panel:bday_info")],
+        [InlineKeyboardButton("🎙 صدا به متن", callback_data="panel:voice_info")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -1137,8 +1181,33 @@ NEW_FEATURES_TEXT = (
     "یه بخش رو انتخاب کن:\n"
     "🔐 امنیت — آنتی‌لینک و آنتی‌فلود\n"
     "🧰 ابزارها — ترجمه، کیوآر، پسورد، فشرده‌سازی فایل\n"
-    "🎉 سرگرمی — جوک، فکت، جمله بتمنی"
+    "🎉 سرگرمی — جوک، فکت، جمله بتمنی\n"
+    "🔮 فال گاتهام — «فال»، یه‌بار در روز\n"
+    "🎰 اسلات گاتهام — «اسلات»، شانستو با امتیازت امتحان کن\n"
+    "🧩 پرونده روز — «پرونده روز»، یه معمای گاتهامی با جایزه\n"
+    "🧠 کدوم شخصیت گاتهامی هستی؟ — «شخصیت گاتهامی»\n"
+    "⏳ کپسول زمان — «کپسول <روز> <متن>»، پیام برای آینده‌ی خودت\n"
+    "🏅 شهروند نمونه — هر روز یه عضو تصادفی تو گروه معرفی می‌شه\n"
+    "🎡 چرخ گردون — یه‌بار در روز، امتیاز رایگان\n"
+    "🎫 تیکت پشتیبانی — تو چت خصوصی، «تیکت <متن>»\n"
+    "🎂 یادآور تولد — «تولدم ۱۵ مرداد»\n"
+    "🎙 صدا به متن — ریپلای رو ویس + «متن کن»"
 )
+
+PANEL_INFO_TEXTS = {
+    "panel:fortune_info": "🔮 بنویس «فال» — یه‌بار در روز، فال گاتهامی امروزتو بگیر.",
+    "panel:slot_info": "🎰 بنویس «اسلات» — دستگاه اسلات گاتهام رو بچرخون، اگه سه‌تا یکی بشه امتیاز می‌بری.",
+    "panel:case_info": "🧩 بنویس «پرونده روز» تا معمای امروز رو ببینی، بعد با «جواب <حدست>» جواب بده.",
+    "panel:quiz_info": "🧠 بنویس «شخصیت گاتهامی» و به چند سوال جواب بده تا بفهمی کدوم شخصیتی هستی.",
+    "panel:capsule_info": "⏳ بنویس «کپسول <تعداد روز> <متن>» — مثلاً «کپسول 7 سلام به خودم». بعد از اون روزها همون پیام رو برات می‌فرستم.",
+    "panel:citizen_info": "🏅 هر روز یه عضو تصادفی از گروه به‌عنوان «شهروند نمونه‌ی امروز» تو خودِ گروه معرفی می‌شه — کاری لازم نیست بکنی.",
+    "panel:wheel_info": "🎡 بنویس «چرخ گردون» — یه‌بار تو روز، امتیاز رایگان بگیر.",
+    "panel:ticket_info": "🎫 تو چت خصوصی ربات بنویس «تیکت <متن درخواستت>» تا مستقیم برای پشتیبانی بره.",
+    "panel:bday_info": "🎂 تو گروه بنویس «تولدم ۱۵ مرداد» تا سر تاریخش براتون تبریک بگم.",
+    "panel:voice_info": "🎙 روی یه پیام صوتی/ویس ریپلای کن و بنویس «متن کن» تا رونویسیش کنم.",
+    "panel:lock_info": "🔒 بنویس «قفل گروه» یا «باز کردن گروه» (فقط ادمین‌ها).",
+    "panel:purge_info": "🧹 روی قدیمی‌ترین پیامی که می‌خوای حذف بشه ریپلای کن و بنویس «پاکسازی».",
+}
 
 
 def build_mod_panel_keyboard():
@@ -1152,6 +1221,8 @@ def build_mod_panel_keyboard():
          InlineKeyboardButton("🛡 معاف‌شده‌ها", callback_data="lists:exempt")],
         [InlineKeyboardButton("🚫 کلمات فیلتر", callback_data="lists:filter"),
          InlineKeyboardButton("🤖 پاسخ خودکار", callback_data="lists:autoreply")],
+        [InlineKeyboardButton("🔒 قفل/باز کردن گروه", callback_data="panel:lock_info"),
+         InlineKeyboardButton("🧹 پاکسازی", callback_data="panel:purge_info")],
         [InlineKeyboardButton("🔐 امنیت گروه", callback_data="panel:security")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
@@ -1203,7 +1274,9 @@ PANEL_TEXTS = {
         "/allowusername یوزرنیم — مجاز کردن یوزرنیم\n"
         "/allowforward یوزرنیم کانال — مجاز کردن فوروارد\n"
         "/schedule YYYY-MM-DD HH:MM متن — زمانبندی پست\n\n"
-        "یا به زبان طبیعی: «بن کن»، «میوت کن»، «کیک کن»، «پاکش کن»"
+        "یا به زبان طبیعی: «بن کن»، «میوت کن»، «کیک کن»، «پاکش کن»\n\n"
+        "🔒 «قفل گروه» / «باز کردن گروه» — بستن/باز کردن ارسال پیام برای همه\n"
+        "🧹 ریپلای رو قدیمی‌ترین پیام + «پاکسازی» — حذف دسته‌جمعی پیام‌ها (تا ۱۰۰ تا)"
     ),
     "about": (
         "🦇 *بتمن گاتهام*\n\n"
@@ -2171,7 +2244,7 @@ _FOREIGN_CALLBACK_PREFIXES = (
     "g2048:", "lo:", "mm:", "bs:", "lobby2:", "tg:", "noop",
     "ms:", "dots:", "tiko:", "jamshid:", "bazar:", "lobby4:",
     "uno:", "ter:", "bil:", "lobby5:", "race:", "noop5",
-    "gttt:", "ittt:", "sec:", "tool:", "fun:",
+    "gttt:", "ittt:", "sec:", "tool:", "fun:", "quiz:",
 )
 
 
@@ -2260,6 +2333,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "panel:new":
         await query.edit_message_text(NEW_FEATURES_TEXT, reply_markup=build_new_features_keyboard(), parse_mode="Markdown")
+        return
+
+    if data in PANEL_INFO_TEXTS:
+        await query.answer(PANEL_INFO_TEXTS[data], show_alert=True)
         return
 
     if data == "panel:security":
@@ -3402,6 +3479,34 @@ def main():
 
     # --- تبدیل و فشرده‌سازی فایل (ریپلای + «فشرده») ---
     register_compress(app)
+
+    # --- تبدیل صدا به متن ---
+    register_voice_to_text(app)
+
+    # --- مدیریت گروه: قفل/باز کردن + پاکسازی ---
+    register_group_admin_extra(app, {"is_group_admin": is_group_admin})
+
+    # --- امکانات جدید: چرخ گردون، تیکت پشتیبانی، یادآور تولد ---
+    register_new_features(app, {
+        "get_player": _get_player,
+        "save_player": _save_player,
+        "get_inventory": get_inventory,
+        "set_inventory": set_inventory,
+        "db_run": db_run,
+        "owner_id": OWNER_ID,
+        "db_path": DB_PATH,
+    })
+
+    # --- ۶ امکان دیگه: فال، اسلات، پرونده روز، کوییز شخصیت، کپسول زمان، شهروند نمونه ---
+    register_fortune_and_extras(app, {
+        "get_player": _get_player,
+        "save_player": _save_player,
+        "get_inventory": get_inventory,
+        "set_inventory": set_inventory,
+        "db_run": db_run,
+        "get_leaderboard": _get_leaderboard,
+        "get_all_chat_ids": _get_all_chat_ids,
+    })
 
     # --- بازی‌ها (کلمه‌محور، بدون /) — باید بعد از handle_message اضافه بشن ---
     register_games(app)

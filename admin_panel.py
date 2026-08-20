@@ -51,26 +51,26 @@ _DEPS_KEY = "admin_panel_deps"
 
 def _panel_keyboard(target_id, msg_id):
     rows = [
-        [InlineKeyboardButton("🔨 بن", callback_data=f"adm:ban:{target_id}"),
-         InlineKeyboardButton("👢 کیک", callback_data=f"adm:kick:{target_id}")],
-        [InlineKeyboardButton("🔇 میوت", callback_data=f"adm:mutemenu:{target_id}"),
-         InlineKeyboardButton("🔊 آنمیوت", callback_data=f"adm:unmute:{target_id}")],
-        [InlineKeyboardButton("⚠️ اخطار", callback_data=f"adm:warn:{target_id}"),
-         InlineKeyboardButton("✅ حذف اخطار", callback_data=f"adm:unwarn:{target_id}")],
-        [InlineKeyboardButton("⭐ ویژه", callback_data=f"adm:special:{target_id}"),
-         InlineKeyboardButton("🛡 معاف", callback_data=f"adm:exempt:{target_id}")],
+        [InlineKeyboardButton("🔨 بن", callback_data=f"adm:ban:{target_id}:{msg_id}"),
+         InlineKeyboardButton("👢 کیک", callback_data=f"adm:kick:{target_id}:{msg_id}")],
+        [InlineKeyboardButton("🔇 میوت", callback_data=f"adm:mutemenu:{target_id}:{msg_id}"),
+         InlineKeyboardButton("🔊 آنمیوت", callback_data=f"adm:unmute:{target_id}:{msg_id}")],
+        [InlineKeyboardButton("⚠️ اخطار", callback_data=f"adm:warn:{target_id}:{msg_id}"),
+         InlineKeyboardButton("✅ حذف اخطار", callback_data=f"adm:unwarn:{target_id}:{msg_id}")],
+        [InlineKeyboardButton("⭐ ویژه", callback_data=f"adm:special:{target_id}:{msg_id}"),
+         InlineKeyboardButton("🛡 معاف", callback_data=f"adm:exempt:{target_id}:{msg_id}")],
         [InlineKeyboardButton("🗑 حذف پیامش", callback_data=f"adm:delete:{target_id}:{msg_id}")],
         [InlineKeyboardButton("❌ بستن", callback_data="adm:close")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
-def _mute_keyboard(target_id):
+def _mute_keyboard(target_id, msg_id):
     rows = [
-        [InlineKeyboardButton(label, callback_data=f"adm:mute:{target_id}:{minutes}")]
+        [InlineKeyboardButton(label, callback_data=f"adm:mute:{target_id}:{minutes}:{msg_id}")]
         for label, minutes in MUTE_DURATIONS
     ]
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"adm:back:{target_id}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"adm:back:{target_id}:{msg_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -122,6 +122,12 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     target_id = int(parts[2])
+    # msg_id همیشه بعد از target_id میاد، به‌جز اکشن «mute» که یه پارامتر
+    # اضافه (مدت‌زمان) قبلش داره: adm:mute:{target_id}:{minutes}:{msg_id}
+    if action == "mute":
+        msg_id = int(parts[4]) if len(parts) > 4 else 0
+    else:
+        msg_id = int(parts[3]) if len(parts) > 3 else 0
     try:
         target_member = await context.bot.get_chat_member(chat_id, target_id)
         target_user = target_member.user
@@ -132,7 +138,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if action == "back":
         await query.edit_message_text(
             f"🛡 مدیریت {target_user.first_name}\nیه عملیات رو انتخاب کن:",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -140,7 +146,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if action == "mutemenu":
         await query.edit_message_text(
             f"🔇 مدت سکوت {target_user.first_name} رو انتخاب کن:",
-            reply_markup=_mute_keyboard(target_id),
+            reply_markup=_mute_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -187,7 +193,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, f"میوت {label}", target_user.first_name)
         await query.edit_message_text(
             f"🔇 {target_user.first_name} به مدت {label} تو سلول سکوت آرکهام موند.",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -210,7 +216,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, "آنمیوت", target_user.first_name)
         await query.edit_message_text(
             f"🔊 {target_user.first_name} از سلول سکوت آزاد شد.",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -236,7 +242,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, f"اخطار ({count}/۳)", target_user.first_name)
         await query.edit_message_text(
             f"⚠️ {target_user.first_name} اخطار گرفت ({count}/۳).",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -246,7 +252,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, "پاک‌کردن اخطار", target_user.first_name)
         await query.edit_message_text(
             f"✅ اخطارهای {target_user.first_name} پاک شد.",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -256,7 +262,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, "عضو ویژه", target_user.first_name)
         await query.edit_message_text(
             f"⭐ {target_user.first_name} عضو ویژه شد.",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
@@ -266,16 +272,23 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         deps["log_mod_action"](chat_id, admin_user.first_name, "معاف", target_user.first_name)
         await query.edit_message_text(
             f"🛡 {target_user.first_name} معاف شد.",
-            reply_markup=_panel_keyboard(target_id, 0),
+            reply_markup=_panel_keyboard(target_id, msg_id),
         )
         await query.answer()
         return
 
     if action == "delete":
-        msg_id = int(parts[3]) if len(parts) > 3 else 0
+        # msg_id از بالا (خط مشترک همه‌ی اکشن‌ها) گرفته شده، همیشه صحیحه چون
+        # الان تو هر دکمه‌ی پنل propagate می‌شه (باگ رفع‌شده — قبلاً بعد از
+        # هر اکشن دیگه صفر می‌شد و این دکمه ادعای دروغین «حذف شد» می‌داد).
+        if not msg_id:
+            await query.answer(
+                "⚠️ شناسه‌ی پیام هدف در دسترس نیست؛ دوباره روی همون پیام ریپلای کن و «مدیریت» بزن.",
+                show_alert=True,
+            )
+            return
         try:
-            if msg_id:
-                await context.bot.delete_message(chat_id, msg_id)
+            await context.bot.delete_message(chat_id, msg_id)
             await query.edit_message_text(f"🗑 پیامِ {target_user.first_name} حذف شد.")
         except Exception as e:
             await query.answer(f"⚠️ نشد حذفش کنم (شاید قبلاً حذف شده): {e}", show_alert=True)
