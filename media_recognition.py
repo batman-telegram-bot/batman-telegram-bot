@@ -32,8 +32,8 @@ import subprocess
 from collections import defaultdict, deque
 
 import httpx
-from telegram import Update
-from telegram.ext import ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +41,17 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 AUDD_API_TOKEN = os.getenv("AUDD_API_TOKEN")
 
-MOVIE_RE = filters.Regex(r"(?i)^\s*(تشخیص فیلم|این چه فیلمیه|چه فیلمیه|اسم فیلم چیه)\s*$") & filters.REPLY
-SONG_RE = filters.Regex(r"(?i)^\s*(تشخیص آهنگ|این چه آهنگیه|اسم آهنگ چیه|آهنگه چیه)\s*$") & filters.REPLY
+MOVIE_RE = filters.Regex(r"(?i)^\s*(تشخیص فیلم|این چه فیلمیه|چه فیلمیه|اسم فیلم چیه|فیلم\?|فیلم؟)\s*$") & filters.REPLY
+SONG_RE = filters.Regex(r"(?i)^\s*(تشخیص آهنگ|این چه آهنگیه|اسم آهنگ چیه|آهنگه چیه|آهنگ\?|آهنگ؟)\s*$") & filters.REPLY
 SUMMARY_RE = filters.Regex(r"(?i)^\s*(خلاصه گروه|خلاصه چت|خلاصه بحث)\s*$")
+
+# چت خصوصی: وقتی عکس/ویدیو/صدا مستقیم (بدون ریپلای) برای ربات فرستاده بشه،
+# فوراً دکمه‌ی تشخیص زیرش میاد — دیگه نیازی به تایپ کلمه نیست.
+PRIVATE_MEDIA_FILTER = (
+    filters.ChatType.PRIVATE
+    & (filters.PHOTO | filters.VIDEO | filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE)
+    & ~filters.REPLY
+)
 
 # --- بافر حافظه‌ای برای خلاصه‌سازی گروه (بدون دیتابیس، فقط همین سشن) ---
 _CHAT_LOG = defaultdict(lambda: deque(maxlen=60))
@@ -329,10 +337,139 @@ async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"📝 *خلاصه‌ی بحث اخیر گروه:*\n\n{summary}", parse_mode="Markdown")
 
 
+async def private_media_offer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تو چت خصوصی، رو هر عکس/ویدیو/صدایی که مستقیم فرستاده بشه، دکمه‌ی تشخیص
+    زیرش میاد — کاربر لازم نیست هیچی تایپ کنه."""
+    msg = update.effective_message
+    rows = []
+    if msg.photo or msg.video:
+        rows.append([InlineKeyboardButton("🎬 تشخیص فیلم/سریال", callback_data="mr:movie")])
+    if msg.voice or msg.audio or msg.video or msg.video_note:
+        rows.append([InlineKeyboardButton("🎵 تشخیص آهنگ", callback_data="mr:song")])
+    if not rows:
+        return
+    await msg.reply_text("چیکار کنم باهاش؟ 👇", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def private_media_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    target_msg = query.message.reply_to_message
+    if not target_msg:
+        await query.edit_message_text("⚠️ پیام اصلی پیدا نشد، دوباره عکس/صدا رو بفرست.")
+        return
+
+    action = query.data.split(":", 1)[1]
+    await query.edit_message_text("در حال پردازش... ⏳")
+
+    if action == "movie":
+        if target_msg.photo:
+            import io
+            photo_file = await target_msg.photo[-1].get_file()
+            buf = io.BytesIO()
+            await photo_file.download_to_memory(buf)
+            await _run_movie_recognition(query.message, buf.getvalue())
+        elif target_msg.video:
+            await _run_movie_recognition_from_video(query.message, target_msg)
+        else:
+            await query.message.reply_text("⚠️ این پیام عکس یا ویدیو نیست.")
+    elif action == "song":
+        await _run_song_recognition(query.message, target_msg)
+
+
+async def _run_movie_recognition_from_video(msg, video_msg):
+    await msg.reply_text("🎬 دارم از ویدیو یه فریم می‌گیرم...")
+    if not _ffmpeg_available():
+        await msg.reply_text("⚠️ ffmpeg رو سرور نصب نیست، نمی‌تونم از ویدیو فریم بگیرم.")
+        return
+    vid_file = await video_msg.video.get_file()
+    with tempfile.TemporaryDirectory() as tmp:
+        vid_path = os.path.join(tmp, "in.mp4")
+        frame_path = os.path.join(tmp, "frame.jpg")
+        await vid_file.download_to_drive(vid_path)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", vid_path, "-ss", "00:00:01", "-vframes", "1", frame_path],
+                check=True, capture_output=True, timeout=60,
+            )
+            with open(frame_path, "rb") as f:
+                image_bytes = f.read()
+        except Exception as e:
+            log.error(f"frame extract failed: {e}")
+            await msg.reply_text("⚠️ نتونستم از ویدیو فریم بگیرم.")
+            return
+    await _run_movie_recognition(msg, image_bytes)
+
+
+async def _run_song_recognition(msg, media_msg):
+    if not AUDD_API_TOKEN:
+        await msg.reply_text("🎵 کلید AUDD_API_TOKEN تنظیم نشده.")
+        return
+
+    tg_file = None
+    is_video = False
+    if media_msg.voice:
+        tg_file = await media_msg.voice.get_file()
+    elif media_msg.audio:
+        tg_file = await media_msg.audio.get_file()
+    elif media_msg.video:
+        tg_file = await media_msg.video.get_file()
+        is_video = True
+    elif media_msg.video_note:
+        tg_file = await media_msg.video_note.get_file()
+        is_video = True
+    else:
+        await msg.reply_text("⚠️ این پیام صدا/ویدیو نیست.")
+        return
+
+    await msg.reply_text("🎵 دارم آهنگ رو تشخیص می‌دم...")
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = os.path.join(tmp, "src")
+        await tg_file.download_to_drive(src_path)
+        audio_path = src_path
+        if is_video:
+            if not _ffmpeg_available():
+                await msg.reply_text("⚠️ ffmpeg رو سرور نصب نیست، نمی‌تونم صدا رو از ویدیو جدا کنم.")
+                return
+            audio_path = os.path.join(tmp, "audio.mp3")
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", src_path, "-vn", "-ar", "44100", "-ac", "2", audio_path],
+                    check=True, capture_output=True, timeout=120,
+                )
+            except Exception as e:
+                log.error(f"audio extract failed: {e}")
+                await msg.reply_text("⚠️ نتونستم صدا رو از ویدیو جدا کنم.")
+                return
+        try:
+            result = await _audd_recognize(audio_path)
+        except Exception as e:
+            log.error(f"audd failed: {e}")
+            await msg.reply_text("⚠️ سرویس تشخیص آهنگ الان جواب نداد.")
+            return
+
+    if not result:
+        await msg.reply_text("🎵 نتونستم این آهنگ رو تشخیص بدم.")
+        return
+
+    title = result.get("title", "نامشخص")
+    artist = result.get("artist", "نامشخص")
+    lines = [f"🎵 *{title}*", f"🎤 {artist}"]
+    spotify = result.get("spotify", {}) or {}
+    apple = result.get("apple_music", {}) or {}
+    if spotify.get("external_urls", {}).get("spotify"):
+        lines.append(f"[Spotify]({spotify['external_urls']['spotify']})")
+    if apple.get("url"):
+        lines.append(f"[Apple Music]({apple['url']})")
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
+
+
 def register_media_recognition(app):
     app.add_handler(MessageHandler(MOVIE_RE, movie_recognize_handler), group=28)
     app.add_handler(MessageHandler(SONG_RE, song_recognize_handler), group=28)
     app.add_handler(MessageHandler(SUMMARY_RE, summary_handler), group=28)
+    app.add_handler(MessageHandler(PRIVATE_MEDIA_FILTER, private_media_offer_handler), group=28)
+    app.add_handler(CallbackQueryHandler(private_media_button_callback, pattern=r"^mr:"), group=28)
     # هندلر منفعلِ جمع‌آوری پیام برای خلاصه‌سازی، تو گروه جدا (۲۹) تا رو بقیه تاثیر نذاره
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, collect_message_for_summary), group=29

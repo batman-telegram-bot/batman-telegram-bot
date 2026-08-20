@@ -265,8 +265,8 @@ def register_reminders(app, deps):
     _init_table(db_path)
     app.bot_data["reminders_deps"] = deps
 
-    app.add_handler(MessageHandler(LIST_RE, reminder_list_handler), group=27)
-    app.add_handler(MessageHandler(DELETE_RE, reminder_delete_handler), group=27)
+    app.add_handler(MessageHandler(filters.Regex(LIST_RE), reminder_list_handler), group=27)
+    app.add_handler(MessageHandler(filters.Regex(DELETE_RE), reminder_delete_handler), group=27)
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r"(?i)^\s*یادآور\b"),
                         reminder_set_handler),
