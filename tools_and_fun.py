@@ -20,10 +20,14 @@ register_tools_and_fun(app) — مستقل از بقیه‌ی ماژول‌ها�
 httpx استفاده می‌کنه که از قبل تو requirements هست.
 """
 
+import re
+import ast
+import math
 import random
 import secrets
 import string
 import logging
+import operator as op
 from urllib.parse import quote
 
 import httpx
@@ -36,8 +40,167 @@ TOOLS_TEXT = (
     "🧰 *ابزارها*\n\n"
     "🌐 ترجمه هوشمند: بنویس «ترجمه <متن>» یا روی یه پیام ریپلای کن و فقط بنویس «ترجمه».\n"
     "📱 کیوآر: بنویس «کیوآر <متن یا لینک>» تا عکس بارکد بسازم.\n"
-    "🔑 پسورد قوی: بنویس «پسورد» یا «رمز عبور» تا یه رمز تصادفی امن بسازم."
+    "🔑 پسورد قوی: بنویس «پسورد» یا «رمز عبور» تا یه رمز تصادفی امن بسازم.\n"
+    "📐 تبدیل واحد: بنویس «تبدیل <عدد> <واحد۱> به <واحد۲>» (وزن/طول/دما/ارز).\n"
+    "🧮 ماشین‌حساب: بنویس «حساب <عبارت>» (مثل «حساب (۱۲+۳)*۲» یا «حساب sqrt(81)»)."
 )
+
+PERSIAN_DIGITS_TRANS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+
+# ---------- ماشین‌حساب امن (بدون eval واقعی) ----------
+
+_ALLOWED_OPERATORS = {
+    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
+    ast.FloorDiv: op.floordiv, ast.Mod: op.mod, ast.Pow: op.pow,
+    ast.USub: op.neg, ast.UAdd: op.pos,
+}
+_ALLOWED_FUNCS = {
+    "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "log": math.log, "log10": math.log10, "abs": abs, "round": round,
+    "exp": math.exp, "factorial": math.factorial,
+}
+_ALLOWED_NAMES = {"pi": math.pi, "e": math.e}
+
+
+def _safe_eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _safe_eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise ValueError("مقدار نامعتبر")
+    if isinstance(node, ast.BinOp):
+        op_type = type(node.op)
+        if op_type not in _ALLOWED_OPERATORS:
+            raise ValueError("عملگر مجاز نیست")
+        return _ALLOWED_OPERATORS[op_type](_safe_eval_node(node.left), _safe_eval_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op_type = type(node.op)
+        if op_type not in _ALLOWED_OPERATORS:
+            raise ValueError("عملگر مجاز نیست")
+        return _ALLOWED_OPERATORS[op_type](_safe_eval_node(node.operand))
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
+            raise ValueError("تابع مجاز نیست")
+        args = [_safe_eval_node(a) for a in node.args]
+        return _ALLOWED_FUNCS[node.func.id](*args)
+    if isinstance(node, ast.Name):
+        if node.id in _ALLOWED_NAMES:
+            return _ALLOWED_NAMES[node.id]
+        raise ValueError("نام مجاز نیست")
+    raise ValueError("عبارت مجاز نیست")
+
+
+def safe_calc(expr: str):
+    expr = expr.translate(PERSIAN_DIGITS_TRANS)
+    expr = expr.replace("^", "**").replace("×", "*").replace("÷", "/").replace("٪", "%")
+    tree = ast.parse(expr, mode="eval")
+    return _safe_eval_node(tree)
+
+
+# ---------- تبدیل واحد ----------
+
+LENGTH_TO_M = {"m": 1, "cm": 0.01, "mm": 0.001, "km": 1000, "mile": 1609.344, "yard": 0.9144, "foot": 0.3048, "inch": 0.0254}
+LENGTH_ALIASES = {
+    "متر": "m", "m": "m",
+    "سانتی متر": "cm", "سانتیمتر": "cm", "cm": "cm",
+    "میلی متر": "mm", "میلیمتر": "mm", "mm": "mm",
+    "کیلومتر": "km", "km": "km",
+    "مایل": "mile", "mile": "mile",
+    "یارد": "yard", "yard": "yard",
+    "فوت": "foot", "foot": "foot", "ft": "foot",
+    "اینچ": "inch", "inch": "inch", "in": "inch",
+}
+
+WEIGHT_TO_G = {"g": 1, "kg": 1000, "mg": 0.001, "lb": 453.592, "oz": 28.3495, "ton": 1_000_000}
+WEIGHT_ALIASES = {
+    "گرم": "g", "g": "g",
+    "کیلوگرم": "kg", "کیلو": "kg", "kg": "kg",
+    "میلی گرم": "mg", "میلیگرم": "mg", "mg": "mg",
+    "پوند": "lb", "lb": "lb",
+    "اونس": "oz", "oz": "oz",
+    "تن": "ton", "ton": "ton",
+}
+
+TEMP_ALIASES = {
+    "سلسیوس": "c", "celsius": "c", "c": "c",
+    "فارنهایت": "f", "fahrenheit": "f", "f": "f",
+    "کلوین": "k", "kelvin": "k", "k": "k",
+}
+
+CURRENCY_ALIASES = {
+    "دلار": "USD", "dollar": "USD", "usd": "USD",
+    "یورو": "EUR", "euro": "EUR", "eur": "EUR",
+    "تومان": "TOMAN", "toman": "TOMAN",
+    "ریال": "IRR", "rial": "IRR", "irr": "IRR",
+    "پوند انگلیس": "GBP", "گبپ": "GBP", "gbp": "GBP",
+    "لیر": "TRY", "try": "TRY",
+    "درهم": "AED", "aed": "AED",
+    "ین": "JPY", "jpy": "JPY",
+    "یوان": "CNY", "cny": "CNY",
+}
+
+
+def _convert_temp(value, uf, ut):
+    if uf == ut:
+        return value
+    if uf == "f":
+        c = (value - 32) * 5 / 9
+    elif uf == "k":
+        c = value - 273.15
+    else:
+        c = value
+    if ut == "f":
+        return c * 9 / 5 + 32
+    if ut == "k":
+        return c + 273.15
+    return c
+
+
+async def _get_usd_rates():
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get("https://open.er-api.com/v6/latest/USD")
+        resp.raise_for_status()
+        data = resp.json()
+    if data.get("result") != "success":
+        raise ValueError("دریافت نرخ ارز الان جواب نداد")
+    return data["rates"]
+
+
+async def _convert_currency(amount, cf, ct):
+    rates = await _get_usd_rates()
+
+    def rate_for(code):
+        if code == "TOMAN":
+            return rates["IRR"] / 10
+        if code not in rates:
+            raise ValueError(f"نرخ {code} در دسترس نیست")
+        return rates[code]
+
+    usd_amount = amount / rate_for(cf)
+    return usd_amount * rate_for(ct)
+
+
+async def do_unit_convert(amount: float, unit_from_raw: str, unit_to_raw: str) -> float:
+    uf = unit_from_raw.strip().lower()
+    ut = unit_to_raw.strip().lower()
+    if uf in CURRENCY_ALIASES or ut in CURRENCY_ALIASES:
+        if uf not in CURRENCY_ALIASES or ut not in CURRENCY_ALIASES:
+            raise ValueError("واحدهای پولی رو باید هر دو ارز بنویسی")
+        return await _convert_currency(amount, CURRENCY_ALIASES[uf], CURRENCY_ALIASES[ut])
+    if uf in TEMP_ALIASES and ut in TEMP_ALIASES:
+        return _convert_temp(amount, TEMP_ALIASES[uf], TEMP_ALIASES[ut])
+    if uf in LENGTH_ALIASES and ut in LENGTH_ALIASES:
+        base = amount * LENGTH_TO_M[LENGTH_ALIASES[uf]]
+        return base / LENGTH_TO_M[LENGTH_ALIASES[ut]]
+    if uf in WEIGHT_ALIASES and ut in WEIGHT_ALIASES:
+        base = amount * WEIGHT_TO_G[WEIGHT_ALIASES[uf]]
+        return base / WEIGHT_TO_G[WEIGHT_ALIASES[ut]]
+    raise ValueError("این واحدها رو نشناختم یا با هم سازگار نیستن")
+
+
+UNIT_RE = re.compile(r"^\s*تبدیل\s+([۰-۹0-9.]+)\s+(.+?)\s+به\s+(.+?)\s*$")
+CALC_RE = re.compile(r"^\s*(?:حساب|محاسبه)\s+(.+)$")
 
 FUN_TEXT = "🎉 *سرگرمی*\n\nیکی رو انتخاب کن یا کلمه‌ش رو بنویس:"
 
@@ -90,6 +253,8 @@ def tools_menu_keyboard():
         [InlineKeyboardButton("🌐 ترجمه", callback_data="tool:howto:translate"),
          InlineKeyboardButton("📱 کیوآر", callback_data="tool:howto:qr")],
         [InlineKeyboardButton("🔑 پسورد تصادفی", callback_data="tool:password")],
+        [InlineKeyboardButton("📐 تبدیل واحد", callback_data="tool:howto:convert"),
+         InlineKeyboardButton("🧮 ماشین‌حساب", callback_data="tool:howto:calc")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:new")],
     ])
 
@@ -170,6 +335,46 @@ def register_tools_and_fun(app):
         )
         return True
 
+    async def unit_convert_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        msg = update.effective_message
+        text = (msg.text or "").strip()
+        m = UNIT_RE.match(text)
+        if not m:
+            return False
+        amount_raw, uf_raw, ut_raw = m.groups()
+        try:
+            amount = float(amount_raw.translate(PERSIAN_DIGITS_TRANS))
+        except ValueError:
+            await msg.reply_text("✏️ عدد رو درست ننوشتی. مثال: تبدیل 10 کیلوگرم به پوند")
+            return True
+        try:
+            result = await do_unit_convert(amount, uf_raw, ut_raw)
+        except ValueError as e:
+            await msg.reply_text(f"⚠️ {e}")
+            return True
+        except Exception as e:
+            log.info(f"unit convert failed: {e}")
+            await msg.reply_text("⚠️ الان نتونستم تبدیل کنم، یه‌کم بعد دوباره امتحان کن.")
+            return True
+        await msg.reply_text(f"📐 {amount_raw} {uf_raw} = {result:.4g} {ut_raw}")
+        return True
+
+    async def calc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        msg = update.effective_message
+        text = (msg.text or "").strip()
+        m = CALC_RE.match(text)
+        if not m:
+            return False
+        try:
+            result = safe_calc(m.group(1))
+        except Exception:
+            await msg.reply_text("⚠️ نتونستم این عبارت رو محاسبه کنم. مثال: حساب (12+3)*2 یا حساب sqrt(81)")
+            return True
+        if isinstance(result, float) and result.is_integer():
+            result = int(result)
+        await msg.reply_text(f"🧮 نتیجه: {result}")
+        return True
+
     async def fun_keyword_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         text = (update.effective_message.text or "").strip()
         if text == "جوک":
@@ -195,6 +400,10 @@ def register_tools_and_fun(app):
             return
         if await qr_handler(update, context):
             return
+        if await unit_convert_handler(update, context):
+            return
+        if await calc_handler(update, context):
+            return
         if await translate_handler(update, context):
             return
 
@@ -211,6 +420,12 @@ def register_tools_and_fun(app):
             return
         if data == "tool:howto:qr":
             await query.answer("بنویس «کیوآر <متن یا لینک>»", show_alert=True)
+            return
+        if data == "tool:howto:convert":
+            await query.answer("بنویس مثلاً: تبدیل 10 کیلوگرم به پوند / تبدیل 100 دلار به تومان", show_alert=True)
+            return
+        if data == "tool:howto:calc":
+            await query.answer("بنویس مثلاً: حساب (12+3)*2 یا حساب sqrt(81)", show_alert=True)
             return
 
     async def fun_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
