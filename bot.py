@@ -1497,6 +1497,14 @@ async def send_profile(update: Update, chat, player, edit=False):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # 🃏 اگه کاربر از دیپ‌لینکِ «دستِ کارت‌های بازی کارتی» اومده (چون تو گروه هنوز PV
+    # با ربات رو استارت نکرده بود)، دستش رو الان بفرست و بازی رو ادامه بده.
+    if context.args and context.args[0] == "cardhand":
+        try:
+            from card_room import try_resume_after_start
+            await try_resume_after_start(update, context)
+        except Exception as e:
+            log.info(f"start: card room resume failed (harmless): {e}")
     is_new = await db_run(_log_bot_starter, user)
     if is_new and user.id != OWNER_ID:
         try:

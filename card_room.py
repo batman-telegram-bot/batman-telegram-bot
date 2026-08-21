@@ -94,7 +94,10 @@ CARD_GAMES_MENU = [
     ("blackjack", "🃏 بلک‌جک"),
 ]
 CARD_GAME_LABELS = dict(CARD_GAMES_MENU)
-IMPLEMENTED_GAMES = {"war", "bj21", "blackjack", "hokm"}
+IMPLEMENTED_GAMES = {"war", "bj21", "blackjack", "hokm", "haft"}
+
+# بازی‌های چندنفره (۲..۶ نفر) که لابی مخصوص خودشون رو دارن، نه لابی دونفره‌ی cr:join
+MULTI_PLAYER_GAMES = {"haft": (2, 6)}
 
 CARD_RULES_TEXT = (
     "📖 *قوانین اتاق پاسور*\n\n"
@@ -106,7 +109,11 @@ CARD_RULES_TEXT = (
     "🃏 حکم (دونفره) — هرکی کارتِ اول بالاتر بیاد حکم (خال برتر) رو انتخاب می‌کنه؛ "
     "هر دست ۱۳ دست کوچیک بازی می‌شه، باید هم‌خال بازی کنی وگرنه می‌تونی حکم بزنی یا "
     "کارت بی‌ربط بندازی؛ هرکی ۷ دست کوچیک رو ببره برنده‌ست.\n\n"
-    "هفت‌خبیث، چهاربرگ، پوکر و رامی به‌زودی اضافه می‌شن."
+    "🃏 هفت‌خبیث (۲ تا ۶ نفره) — یه کارتِ «خبیث» بی‌جفت تو بازیه. نوبتی از نفر بعدی یه "
+    "کارت کور می‌کشی؛ هر جفتِ هم‌ارزش تو دستت رو خودکار دور می‌ندازی. هرکی دستش خالی شد "
+    "برنده‌ست و از بازی بیرون میاد؛ آخرین نفری که کارتِ خبیث دستشه می‌بازه. دست هر بازیکن "
+    "فقط تو چت خصوصی خودش نشون داده می‌شه.\n\n"
+    "چهاربرگ، پوکر و رامی به‌زودی اضافه می‌شن."
 )
 
 
@@ -155,6 +162,151 @@ async def _open_lobby(query_or_msg, creator, game_key, edit=False):
         await query_or_msg.reply_text(text, reply_markup=_lobby_markup(token))
 
 
+# =========================================================
+#  لابی چندنفره (۲..۶ نفر) — برای بازی‌های کارتی گروهی مثل هفت‌خبیث
+# =========================================================
+
+MULTI_LOBBIES = {}  # token -> {"creator": user, "game": key, "players": {uid: user}, "order": [uid,...]}
+
+
+def _multi_lobby_markup(token, game_key, joined_count):
+    min_p, max_p = MULTI_PLAYER_GAMES[game_key]
+    rows = [[InlineKeyboardButton("➕ پیوستن", callback_data=f"cr:mjoin:{token}")]]
+    row2 = [InlineKeyboardButton("❌ لغو", callback_data=f"cr:mcancel:{token}")]
+    if joined_count >= min_p:
+        row2.insert(0, InlineKeyboardButton("🚀 شروع بازی", callback_data=f"cr:mstart:{token}"))
+    rows.append(row2)
+    return InlineKeyboardMarkup(rows)
+
+
+def _multi_lobby_text(lobby, game_key):
+    label = CARD_GAME_LABELS.get(game_key, game_key)
+    min_p, max_p = MULTI_PLAYER_GAMES[game_key]
+    names = "\n".join(f"👤 {_name(u)}" for u in lobby["order"] and [lobby["players"][uid] for uid in lobby["order"]] or [])
+    return (
+        f"🃏 GOTHAM CARD ROOM — {label}\n\n"
+        f"👥 {len(lobby['order'])}/{max_p} نفر (حداقل {min_p} نفر لازمه)\n\n"
+        f"{names}\n\n"
+        "با «➕ پیوستن» وارد بازی شو. بعد از رسیدن به حداقل نفرات، سازنده می‌تونه "
+        "«🚀 شروع بازی» رو بزنه.\n\n"
+        "⚠️ توجه: کارت‌های دستت فقط تو چت خصوصی ربات نشونت داده می‌شه، پس مطمئن شو "
+        "قبلاً /start رو تو چت خصوصی ربات زدی."
+    )
+
+
+async def _open_multi_lobby(query_or_msg, creator, game_key, edit=False):
+    token = _gid("crmlobby")
+    MULTI_LOBBIES[token] = {
+        "creator": creator, "game": game_key,
+        "players": {creator.id: creator}, "order": [creator.id],
+    }
+    lobby = MULTI_LOBBIES[token]
+    text = _multi_lobby_text(lobby, game_key)
+    markup = _multi_lobby_markup(token, game_key, len(lobby["order"]))
+    if edit:
+        await query_or_msg.edit_message_text(text, reply_markup=markup)
+    else:
+        await query_or_msg.reply_text(text, reply_markup=markup)
+
+
+async def _multi_lobby_callback(q, update, context, action, parts):
+    token = parts[2]
+    lobby = MULTI_LOBBIES.get(token)
+    if not lobby:
+        await q.answer("این لابی منقضی شده یا بازی شروع شده.", show_alert=True); return
+    game_key = lobby["game"]
+    min_p, max_p = MULTI_PLAYER_GAMES[game_key]
+    user = update.effective_user
+
+    if action == "mcancel":
+        if user.id != lobby["creator"].id:
+            await q.answer("فقط سازنده‌ی لابی می‌تونه لغوش کنه.", show_alert=True); return
+        del MULTI_LOBBIES[token]
+        await q.edit_message_text("❌ لابی لغو شد.")
+        await q.answer(); return
+
+    if action == "mjoin":
+        if user.id in lobby["players"]:
+            await q.answer("قبلاً پیوستی.", show_alert=True); return
+        if len(lobby["order"]) >= max_p:
+            await q.answer("لابی پره.", show_alert=True); return
+        lobby["players"][user.id] = user
+        lobby["order"].append(user.id)
+        await q.edit_message_text(
+            _multi_lobby_text(lobby, game_key),
+            reply_markup=_multi_lobby_markup(token, game_key, len(lobby["order"])),
+        )
+        await q.answer("پیوستی! 🃏"); return
+
+    if action == "mstart":
+        if user.id != lobby["creator"].id:
+            await q.answer("فقط سازنده‌ی لابی می‌تونه بازی رو شروع کنه.", show_alert=True); return
+        if len(lobby["order"]) < min_p:
+            await q.answer(f"حداقل {min_p} بازیکن لازمه.", show_alert=True); return
+        del MULTI_LOBBIES[token]
+        players = [lobby["players"][uid] for uid in lobby["order"]]
+        await q.answer()
+        await MULTI_LAUNCHERS[game_key](context, q.message, players)
+        return
+
+    await q.answer()
+
+
+# =========================================================
+#  چت خصوصی برای کارت‌های مخفی — معماری مشترک بازی‌های کارتی چندنفره
+# =========================================================
+#
+# چون تلگرام هیچ راهی برای «نشون دادن یه چیز فقط به یه نفر تو گروه» نداره،
+# دستِ هر بازیکن باید تو چت خصوصی (Private Chat) با خودِ ربات فرستاده بشه.
+# این بخش سه تا مسئولیت داره:
+#   1) فرستادن/آپدیت‌کردن پیامِ دستِ هر بازیکن تو PV خودش (send_or_update_hand)
+#   2) اگه بازیکن هنوز /start رو تو PV نزده، به‌جای Crash کردن، پیام گروه رو
+#      با راهنما و دکمه‌ی دیپ‌لینک به PV ربات آپدیت می‌کنه و بازی رو مکث می‌کنه
+#      (PRIVATE_PENDING) تا وقتی بازیکن /start بزنه.
+#   3) وقتی بازیکن /start می‌زنه (با دیپ‌لینک cardhand)، بوت.پی این ماژول رو
+#      صدا می‌زنه (try_resume_after_start) تا دستش رو بفرسته و بازی ادامه پیدا کنه.
+
+PRIVATE_PENDING = {}  # user_id -> set of gid هایی که منتظر Start کردنِ این کاربرن
+
+
+async def _deliver_hand(context, gid, uid, text, markup=None):
+    """پیام دستِ بازیکن رو تو PV می‌فرسته یا آپدیت می‌کنه. اگه بازیکن هنوز با ربات
+    PV نزده (Forbidden)، uid رو تو PRIVATE_PENDING علامت می‌زنه و False برمی‌گردونه."""
+    try:
+        await context.bot.send_message(chat_id=uid, text=text, reply_markup=markup)
+        PRIVATE_PENDING.setdefault(uid, set()).discard(gid)
+        return True
+    except Exception as e:
+        log.info(f"card_room: could not DM {uid} (probably hasn't started bot): {e}")
+        PRIVATE_PENDING.setdefault(uid, set()).add(gid)
+        return False
+
+
+async def _private_hint_markup(context):
+    try:
+        me = await context.bot.get_me()
+        url = f"https://t.me/{me.username}?start=cardhand"
+        return InlineKeyboardMarkup([[InlineKeyboardButton("👉 استارت زدن به ربات", url=url)]])
+    except Exception:
+        return None
+
+
+async def try_resume_after_start(update, context):
+    """از bot.py صدا زده می‌شه وقتی کاربر /start رو با دیپ‌لینک cardhand زده.
+    اگه این کاربر تو یه بازی کارتی منتظر Start بوده، الان دستش رو می‌فرستیم و
+    اگه همه منتظر بودن، بازی رو ادامه می‌دیم."""
+    uid = update.effective_user.id
+    pending_gids = list(PRIVATE_PENDING.get(uid, set()))
+    if not pending_gids:
+        return
+    for gid in pending_gids:
+        state = HAFT_GAMES.get(gid)
+        if not state:
+            PRIVATE_PENDING.get(uid, set()).discard(gid)
+            continue
+        await _haft_resume_player(context, gid, uid)
+
+
 async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -173,6 +325,9 @@ async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         game_key = parts[2]
         if game_key not in IMPLEMENTED_GAMES:
             await q.answer("این بازی به‌زودی اضافه می‌شه 🚧", show_alert=True); return
+        if game_key in MULTI_PLAYER_GAMES:
+            await _open_multi_lobby(q.message, update.effective_user, game_key, edit=True)
+            await q.answer(); return
         await _open_lobby(q.message, update.effective_user, game_key, edit=True)
         await q.answer(); return
 
@@ -188,6 +343,10 @@ async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         game_key = lobby["game"]
         await LAUNCHERS[game_key](q.message, creator, joiner)
         await q.answer(); return
+
+    if action in ("mjoin", "mstart", "mcancel"):
+        await _multi_lobby_callback(q, update, context, action, parts)
+        return
 
     await q.answer()
 
@@ -728,6 +887,352 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+#  🃏 هفت‌خبیث (Old-Maid style, ۲..۶ نفره) — با چت خصوصی
+# =========================================================
+
+HAFT_GAMES = {}          # gid -> state
+HAFT_REMATCH = {}        # token -> [PseudoUser, ...]
+HAFT_VILLAIN = ("Q", "♠")
+HAFT_TURN_TIMEOUT_SEC = 90
+
+
+class _PseudoUser:
+    """برای دکمه‌ی «بازی مجدد» — بعد از تموم‌شدن بازی، آبجکت User واقعی تلگرام رو
+    نداریم، پس یه نسخه‌ی سبک نگه می‌داریم که _name() باهاش کار کنه."""
+    def __init__(self, uid, first_name, username=""):
+        self.id = uid
+        self.first_name = first_name
+        self.username = username
+
+
+def _haft_new_deck():
+    deck = [(r, s) for s in SUITS for r in RANKS]
+    # فقط بی‌بی‌پیک رو نگه می‌داریم؛ سه‌تای دیگه حذف می‌شن تا این کارت تو کل بازی جفت نداشته باشه
+    deck = [c for c in deck if not (c[0] == "Q" and c[1] != "♠")]
+    return deck  # ۴۹ کارت؛ (Q,♠) تنها کارتِ «خبیث»ه
+
+
+def _haft_discard_pairs(hand):
+    """جفت‌های هم‌ارزش (صرف‌نظر از خال) رو از دست حذف می‌کنه؛ کارتِ خبیث هیچ‌وقت جفت نداره
+    چون تو کل بازی فقط یه دونه‌ست. لیستِ کارت‌های حذف‌شده رو برمی‌گردونه."""
+    removed = []
+    ranks = {}
+    for c in hand:
+        ranks.setdefault(c[0], []).append(c)
+    for rank, cards in ranks.items():
+        pairs = len(cards) // 2
+        for c in cards[: pairs * 2]:
+            hand.remove(c)
+            removed.append(c)
+    return removed
+
+
+def _haft_job_name(gid):
+    return f"haft_timeout_{gid}"
+
+
+def _haft_cancel_job(app, gid):
+    if not getattr(app, "job_queue", None):
+        return
+    for job in app.job_queue.get_jobs_by_name(_haft_job_name(gid)):
+        job.schedule_removal()
+
+
+def _haft_schedule_timeout(app, gid):
+    _haft_cancel_job(app, gid)
+    if getattr(app, "job_queue", None):
+        app.job_queue.run_once(_haft_turn_timeout, when=HAFT_TURN_TIMEOUT_SEC,
+                                data={"gid": gid}, name=_haft_job_name(gid))
+
+
+def _haft_text(state, note=""):
+    lines = ["🃏 GOTHAM — هفت‌خبیث", ""]
+    for uid in state["order"]:
+        mark = "👉 " if state["order"][state["turn_idx"]] == uid else "• "
+        lines.append(f"{mark}{state['names'][uid]}: {len(state['hands'][uid])} کارت")
+    if state["out_order"]:
+        winners = "، ".join(state["names"][u] for u in state["out_order"])
+        lines.append(f"\n✅ دستشون خالی شده (تو بازی نیستن): {winners}")
+    if note:
+        lines.append(f"\n{note}")
+    lines.append(f"\n⏳ نوبتِ {state['names'][state['order'][state['turn_idx']]]}")
+    return "\n".join(lines)
+
+
+def _haft_markup(gid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎴 کشیدن کارت", callback_data=f"haft:draw:{gid}")],
+        [InlineKeyboardButton("🃏 دست من", callback_data=f"haft:hand:{gid}"),
+         InlineKeyboardButton("🏳 خروج از بازی", callback_data=f"haft:leave:{gid}")],
+    ])
+
+
+def _haft_end_markup(token):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔁 بازی مجدد", callback_data=f"haft:rematch:{token}")]])
+
+
+async def _haft_send_hand(context, gid, uid):
+    state = HAFT_GAMES.get(gid)
+    if not state or uid not in state["hands"]:
+        return
+    hand = state["hands"][uid]
+    text = (
+        f"🃏 دستِ تو تو بازیِ هفت‌خبیث:\n\n{_hand_label(hand)}\n\n"
+        f"({len(hand)} کارت) — برای دیدن وضعیتِ کلی به گروه برگرد."
+    )
+    ok = await _deliver_hand(context, gid, uid, text)
+    if not ok:
+        hint = await _private_hint_markup(context)
+        try:
+            await context.bot.send_message(
+                chat_id=state["chat_id"],
+                text=(f"⚠️ {state['names'][uid]} هنوز چت خصوصی با ربات رو Start نکرده؛ "
+                      "برای دیدن کارت‌هاش باید اول تو PV ربات /start بزنه، بعد بازی ادامه پیدا می‌کنه."),
+                reply_markup=hint,
+            )
+        except Exception:
+            pass
+    return ok
+
+
+async def _haft_resume_player(context, gid, uid):
+    """وقتی کاربر تو PV ربات /start می‌زنه، صدا زده می‌شه: دستِ فعلیش رو می‌فرسته."""
+    ok = await _haft_send_hand(context, gid, uid)
+    state = HAFT_GAMES.get(gid)
+    if ok and state:
+        PRIVATE_PENDING.get(uid, set()).discard(gid)
+        try:
+            await context.bot.send_message(
+                chat_id=state["chat_id"],
+                text=f"✅ {state['names'][uid]} وارد چت خصوصی ربات شد؛ بازی ادامه پیدا می‌کنه.",
+            )
+        except Exception:
+            pass
+
+
+async def _launch_haft(context, target_msg, players):
+    gid = _gid("haft")
+    deck = _haft_new_deck()
+    random.shuffle(deck)
+    hands = {u.id: [] for u in players}
+    for i, c in enumerate(deck):
+        hands[players[i % len(players)].id].append(c)
+    for uid in hands:
+        _haft_discard_pairs(hands[uid])
+
+    order = [u.id for u in players if len(hands[u.id]) > 0]
+    names = {u.id: _name(u) for u in players}
+    state = {
+        "chat_id": target_msg.chat_id, "message_id": None,
+        "order": order, "names": names, "hands": hands,
+        "out_order": [u.id for u in players if len(hands[u.id]) == 0],
+        "turn_idx": 0, "processing": False,
+        "player_objs": players,
+    }
+    HAFT_GAMES[gid] = state
+
+    if len(order) <= 1:
+        # اتفاق نادر: بعد از تقسیم اولیه، بقیه دستشون کاملاً جفت شده و خالی شده
+        await _haft_finish(context, gid, target_msg, note="🍀 شانسی! همون تقسیمِ اول همه‌چی رو جفت کرد.")
+        return
+
+    msg = await target_msg.edit_text(_haft_text(state), reply_markup=_haft_markup(gid))
+    state["message_id"] = msg.message_id
+    _haft_schedule_timeout(context.application, gid)
+    for uid in order:
+        await _haft_send_hand(context, gid, uid)
+
+
+async def _haft_finish(context, gid, message=None, note=""):
+    state = HAFT_GAMES.get(gid)
+    if not state:
+        return
+    _haft_cancel_job(context.application, gid)
+    loser = state["order"][0] if state["order"] else None
+    winner = state["out_order"][0] if state["out_order"] else None
+    if loser and winner:
+        try:
+            import bot as _bot
+            _bot._record_game_result(state["chat_id"], winner, loser)
+        except Exception as e:
+            log.info(f"haft: could not save game record (harmless): {e}")
+    text = "🃏 بازی هفت‌خبیث تموم شد."
+    if note:
+        text = f"{note}\n\n{text}"
+    if loser:
+        text += f"\n\n💀 {state['names'][loser]} کارتِ خبیث دستش موند و باخت!"
+        if winner:
+            text += f"\n🏆 برنده: {state['names'][winner]}"
+    token = _gid("haftrm")
+    HAFT_REMATCH[token] = state["player_objs"]
+    markup = _haft_end_markup(token)
+    try:
+        if message is not None:
+            await message.edit_text(text, reply_markup=markup)
+        elif state.get("message_id"):
+            await context.bot.edit_message_text(
+                chat_id=state["chat_id"], message_id=state["message_id"],
+                text=text, reply_markup=markup,
+            )
+        else:
+            await context.bot.send_message(chat_id=state["chat_id"], text=text, reply_markup=markup)
+    except Exception as e:
+        log.info(f"haft: finish edit failed (harmless): {e}")
+    del HAFT_GAMES[gid]
+
+
+async def _haft_execute_turn(context, gid, acting_uid, auto=False):
+    state = HAFT_GAMES.get(gid)
+    if not state or state.get("processing"):
+        return
+    state["processing"] = True
+    try:
+        order = state["order"]
+        if acting_uid not in order:
+            return
+        cur_idx = order.index(acting_uid)
+        nxt_idx = (cur_idx + 1) % len(order)
+        nxt_uid = order[nxt_idx]
+        cur_hand = state["hands"][acting_uid]
+        nxt_hand = state["hands"][nxt_uid]
+        if not nxt_hand:
+            return
+        draw_idx = random.randrange(len(nxt_hand))
+        card = nxt_hand.pop(draw_idx)
+        cur_hand.append(card)
+        removed_pairs = _haft_discard_pairs(cur_hand)
+
+        note = f"🎴 {state['names'][acting_uid]} از {state['names'][nxt_uid]} یه کارت کور کشید."
+        if auto:
+            note = f"⏱️ زمان تموم شد — {note}"
+        if removed_pairs:
+            note += f"\n🃏 {state['names'][acting_uid]} یه جفت دور انداخت."
+
+        finishing = []
+        if not nxt_hand:
+            finishing.append(nxt_uid)
+        if not cur_hand:
+            finishing.append(acting_uid)
+        for uid in finishing:
+            if uid in state["order"]:
+                state["order"].remove(uid)
+                state["out_order"].append(uid)
+
+        try:
+            bot_app = context.application
+        except Exception:
+            bot_app = None
+
+        if len(state["order"]) <= 1:
+            await _haft_finish(context, gid, message=None, note=note)
+            return
+
+        # نوبت رو به نفر بعدیِ فعال بده
+        if acting_uid in state["order"]:
+            state["turn_idx"] = state["order"].index(acting_uid)
+            state["turn_idx"] = (state["turn_idx"] + 1) % len(state["order"])
+        else:
+            state["turn_idx"] = state["turn_idx"] % len(state["order"])
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=state["chat_id"], message_id=state["message_id"],
+                text=_haft_text(state, note=note), reply_markup=_haft_markup(gid),
+            )
+        except Exception as e:
+            log.info(f"haft: edit failed (harmless): {e}")
+
+        if bot_app:
+            _haft_schedule_timeout(bot_app, gid)
+
+        for uid in {acting_uid, nxt_uid} & set(state["order"]):
+            await _haft_send_hand(context, gid, uid)
+    finally:
+        state["processing"] = False
+
+
+async def _haft_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    state = HAFT_GAMES.get(gid)
+    if not state:
+        return
+    uid = state["order"][state["turn_idx"]]
+    await _haft_execute_turn(context, gid, uid, auto=True)
+
+
+async def haft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split(":")
+    action = parts[1]
+    token_or_gid = parts[2]
+
+    if action == "rematch":
+        players = HAFT_REMATCH.pop(token_or_gid, None)
+        if not players:
+            await q.answer("این دکمه دیگه معتبر نیست.", show_alert=True); return
+        await q.answer("🃏 بازی مجدد شروع شد!")
+        await _launch_haft(context, q.message, players)
+        return
+
+    gid = token_or_gid
+    state = HAFT_GAMES.get(gid)
+    if not state:
+        await q.answer("این بازی تموم شده یا پیدا نشد.", show_alert=True); return
+    uid = update.effective_user.id
+
+    if action == "hand":
+        if uid not in state["hands"] or uid not in state["order"]:
+            await q.answer("تو تو این بازی نیستی یا کارت‌هات تموم شده.", show_alert=True); return
+        await q.answer("🃏 دستت رو تو PV فرستادم.")
+        await _haft_send_hand(context, gid, uid)
+        return
+
+    if action == "leave":
+        if uid not in state["order"]:
+            await q.answer("تو تو این بازی نیستی.", show_alert=True); return
+        _haft_cancel_job(context.application, gid)
+        state["order"].remove(uid)
+        remaining = state["order"]
+        if remaining:
+            winner = min(remaining, key=lambda x: len(state["hands"][x]))
+            try:
+                import bot as _bot
+                _bot._record_game_result(state["chat_id"], winner, uid)
+            except Exception as e:
+                log.info(f"haft: could not save forfeit record (harmless): {e}")
+            text = (f"🏳 {state['names'][uid]} از هفت‌خبیث انصراف داد؛ بازی همین‌جا تموم شد.\n"
+                    f"🏆 برنده: {state['names'][winner]}")
+        else:
+            text = f"🏳 {state['names'][uid]} از هفت‌خبیث انصراف داد. بازی تموم شد."
+        token = _gid("haftrm")
+        HAFT_REMATCH[token] = state["player_objs"]
+        try:
+            await q.edit_message_text(text, reply_markup=_haft_end_markup(token))
+        except Exception:
+            pass
+        del HAFT_GAMES[gid]
+        await q.answer(); return
+
+    if action == "draw":
+        if state.get("processing"):
+            await q.answer("یه لحظه صبر کن، دور قبلی داره پردازش می‌شه...", show_alert=True); return
+        if uid not in state["order"]:
+            await q.answer("تو تو این بازی نیستی یا بردی/از بازی خارج شدی.", show_alert=True); return
+        if state["order"][state["turn_idx"]] != uid:
+            await q.answer("الان نوبتِ تو نیست.", show_alert=True); return
+        await q.answer()
+        await _haft_execute_turn(context, gid, uid)
+        return
+
+    await q.answer()
+
+
+MULTI_LAUNCHERS = {
+    "haft": _launch_haft,
+}
+
+
+# =========================================================
 #  راه‌انداز هر بازی (از لابی مشترک صدا زده می‌شه)
 # =========================================================
 
@@ -750,3 +1255,4 @@ def register_card_room(app):
     app.add_handler(CallbackQueryHandler(bj21_callback, pattern=r"^bj21:"), group=5)
     app.add_handler(CallbackQueryHandler(blackjack_callback, pattern=r"^bjd:"), group=5)
     app.add_handler(CallbackQueryHandler(hokm_callback, pattern=r"^hokm:"), group=5)
+    app.add_handler(CallbackQueryHandler(haft_callback, pattern=r"^haft:"), group=5)
