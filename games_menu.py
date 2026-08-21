@@ -24,6 +24,8 @@ from board_games import chess_start, ludo_start, snakes_start
 from games_pack2 import g2048_start, lightsout_start, memory_start, battleship_start, treasure_start
 from games_pack4 import minesweeper_start, dots_start, tiko_start, jamshid_start, bazar_start
 from games_pack5 import uno_start, territory_start, billiards_start, racing_start
+from group_rps import group_rps_start
+from card_room import card_room_start
 
 
 # =========================================================
@@ -68,6 +70,7 @@ CATEGORIES = [
         ("terr", "🗺 قلمرو", territory_start),
         ("bill", "🎱 بیلیارد", billiards_start),
         ("race", "🏎 مسابقه ماشین", racing_start),
+        ("cards", "🃏 پاسور", card_room_start),
     ]),
     ("puzzle", "🧩 پازل و فکری", [
         ("g2048", "🔢 ۲۰۴۸", g2048_start),
@@ -84,6 +87,7 @@ CATEGORIES = [
     ("group", "👥 گروهی", [
         ("mafia", "🎭 مافیا", mafia_join),
         ("roul", "🔫 رولت روسی", roulette_start),
+        ("grps", "🎮 سنگ کاغذ قیچی", group_rps_start),
     ]),
 ]
 

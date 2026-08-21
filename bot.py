@@ -34,9 +34,11 @@ from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
 from games_pack5 import register_extra_games3
 from board_games import register_board_games
+from group_rps import register_group_rps
 from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
 from games_menu import register_games_menu, GAMES_MENU_MAIN_TEXT, build_games_menu_root_keyboard
+from card_room import register_card_room
 from gotham_content import gotham_signature_line, RIDDLES
 from downloader import register_downloader, dl_menu_markup, DOWNLOADER_HELP_TEXT
 from admin_panel import register_admin_panel
@@ -1091,8 +1093,8 @@ def build_words_panel_text() -> str:
         "🎫 *تیکت پشتیبانی:*",
         "تو چت خصوصی: «تیکت <متن>»",
         "",
-        "🎂 *یادآور تولد:*",
-        "«تولدم ۱۵ مرداد» — تبریک خودکار سر تاریخ",
+        "🎂 *یادآور تولد یار بتمن:*",
+        "پنل «امکانات جدید» — دکمه‌ای، تقویم شمسی؛ «تولدم ۱۵ مرداد» هم هنوز کار می‌کنه",
         "",
         "🔒 *قفل/باز کردن گروه (ادمین):*",
         "«قفل گروه» / «باز کردن گروه»",
@@ -1171,7 +1173,7 @@ def build_new_features_keyboard():
         [InlineKeyboardButton("🏅 شهروند نمونه", callback_data="panel:citizen_info"),
          InlineKeyboardButton("🎡 چرخ گردون", callback_data="panel:wheel_info")],
         [InlineKeyboardButton("🎫 تیکت پشتیبانی", callback_data="panel:ticket_info"),
-         InlineKeyboardButton("🎂 یادآور تولد", callback_data="panel:bday_info")],
+         InlineKeyboardButton("🎂 یادآور تولد یار بتمن", callback_data="bday:open")],
         [InlineKeyboardButton("🎙 صدا به متن", callback_data="panel:voice_info"),
          InlineKeyboardButton("⏰ یادآور", callback_data="panel:reminder_info")],
         [InlineKeyboardButton("🎬 تشخیص فیلم/سریال", callback_data="panel:movie_info"),
@@ -1196,7 +1198,7 @@ NEW_FEATURES_TEXT = (
     "🏅 شهروند نمونه — هر روز یه عضو تصادفی تو گروه معرفی می‌شه\n"
     "🎡 چرخ گردون — یه‌بار در روز، امتیاز رایگان\n"
     "🎫 تیکت پشتیبانی — تو چت خصوصی، «تیکت <متن>»\n"
-    "🎂 یادآور تولد — «تولدم ۱۵ مرداد»\n"
+    "🎂 یادآور تولد یار بتمن — دکمه‌ای، با تقویم شمسی\n"
     "🎙 صدا به متن — ریپلای رو ویس + «متن کن»\n"
     "⏰ یادآور — «یادآور 10 دقیقه/ساعت/روز <متن>» یا «یادآور 14:30 <متن>»\n"
     "🎬 تشخیص فیلم/سریال — ریپلای رو عکس یا ویدیو + «تشخیص فیلم»\n"
@@ -1213,7 +1215,6 @@ PANEL_INFO_TEXTS = {
     "panel:citizen_info": "🏅 هر روز یه عضو تصادفی از گروه به‌عنوان «شهروند نمونه‌ی امروز» تو خودِ گروه معرفی می‌شه — کاری لازم نیست بکنی.",
     "panel:wheel_info": "🎡 بنویس «چرخ گردون» — یه‌بار تو روز، امتیاز رایگان بگیر.",
     "panel:ticket_info": "🎫 تو چت خصوصی ربات بنویس «تیکت <متن درخواستت>» تا مستقیم برای پشتیبانی بره.",
-    "panel:bday_info": "🎂 تو گروه بنویس «تولدم ۱۵ مرداد» تا سر تاریخش براتون تبریک بگم.",
     "panel:voice_info": "🎙 روی یه پیام صوتی/ویس ریپلای کن و بنویس «متن کن» تا رونویسیش کنم.",
     "panel:lock_info": "🔒 بنویس «قفل گروه» یا «باز کردن گروه» (فقط ادمین‌ها).",
     "panel:purge_info": "🧹 روی قدیمی‌ترین پیامی که می‌خوای حذف بشه ریپلای کن و بنویس «پاکسازی».",
@@ -2259,6 +2260,7 @@ _FOREIGN_CALLBACK_PREFIXES = (
     "ms:", "dots:", "tiko:", "jamshid:", "bazar:", "lobby4:",
     "uno:", "ter:", "bil:", "lobby5:", "race:", "noop5",
     "gttt:", "ittt:", "sec:", "tool:", "fun:", "quiz:",
+    "grps:", "bday:",
 )
 
 
@@ -3540,6 +3542,8 @@ def main():
     register_extra_games2(app)
     register_board_games(app)  # شطرنج / منچ / مار و پله — فقط با نوشتن اسم بازی
     register_extra_games3(app)  # یونو / قلمرو / بیلیارد / مسابقه ماشین
+    register_group_rps(app)  # سنگ کاغذ قیچی گروهی — PvP واقعی، از منوی بازی‌ها ← 👥 گروهی
+    register_card_room(app)  # 🃏 اتاق پاسور: جنگ / بیست‌ویک / بلک‌جک / حکم (دونفره)
     register_downloader(app)  # دانلودر اینستاگرام / یوتیوب / پینترست
     register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
     register_ttt_gotham(app)  # دوز گاتهام — با نوشتن کلمه تو چت، بدون نیاز به inline mode

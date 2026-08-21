@@ -23,9 +23,11 @@ downloader.py
 import os
 import re
 import json
+import shutil
 import asyncio
 import logging
 import tempfile
+import subprocess
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -311,6 +313,149 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
     return opts
 
 
+_VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".ts")
+
+_FFMPEG_OK = shutil.which("ffmpeg") is not None
+_FFPROBE_OK = shutil.which("ffprobe") is not None
+if not (_FFMPEG_OK and _FFPROBE_OK):
+    log.warning(
+        "ffmpeg/ffprobe پیدا نشد — رفع باگ «۰۰:۰۰ و صفحه سیاه» ویدیوهای اینستاگرام "
+        "غیرفعال می‌مونه (ویدیو خام و بدون remux فرستاده می‌شه). "
+        "روی Railway، nixPkgs = [\"ffmpeg\"] تو nixpacks.toml باید همینو حل کنه."
+    )
+
+
+def _ffprobe_json(filepath: str):
+    """بلاک‌کننده‌ست — با asyncio.to_thread صدا زده می‌شه.
+    خروجی ffprobe رو به‌صورت dict برمی‌گردونه، یا None اگه فایل اصلاً قابل‌خوندن نبود."""
+    if not _FFPROBE_OK:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", filepath],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        return json.loads(proc.stdout)
+    except Exception as e:
+        log.info(f"ffprobe failed for {filepath}: {e}")
+        return None
+
+
+def _video_meta(probe):
+    """duration (float یا None), width, height رو از خروجی ffprobe استخراج می‌کنه."""
+    if not probe:
+        return None, None, None
+    duration = None
+    fmt = probe.get("format") or {}
+    try:
+        duration = float(fmt["duration"]) if fmt.get("duration") else None
+    except (TypeError, ValueError):
+        duration = None
+    width = height = None
+    for s in probe.get("streams", []):
+        if s.get("codec_type") == "video":
+            width, height = s.get("width"), s.get("height")
+            if not duration and s.get("duration"):
+                try:
+                    duration = float(s["duration"])
+                except (TypeError, ValueError):
+                    pass
+            break
+    return duration, width, height
+
+
+def _remux_faststart(filepath: str):
+    """بلاک‌کننده‌ست. Remux سریع (بدون Re-encode، فقط -c copy) با +faststart تا
+    moov atom بیاد اول فایل و duration/metadata درست تشخیص داده بشه. اگه موفق
+    نشد None برمی‌گردونه (نه Exception) تا فراخوان بره سراغ Re-encode."""
+    if not _FFMPEG_OK:
+        return None
+    base, _ = os.path.splitext(filepath)
+    out_path = base + "_fx.mp4"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", filepath, "-c", "copy", "-movflags", "+faststart", out_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        log.info(f"faststart remux failed for {filepath}: {e}")
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+    return None
+
+
+def _reencode_video(filepath: str):
+    """بلاک‌کننده‌ست. فقط وقتی صدا زده می‌شه که remux ساده کافی نبوده (نادر —
+    مثلاً استریم‌های ناجور/خراب منبع). کیفیت رو تا حد امکان حفظ می‌کنه
+    (CRF ثابت به‌جای بیت‌ریت پایین‌ی ثابت) تا حجم و کیفیت بی‌دلیل بد نشه."""
+    if not _FFMPEG_OK:
+        return None
+    base, _ = os.path.splitext(filepath)
+    out_path = base + "_enc.mp4"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", filepath,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+             "-c:a", "aac", "-b:a", "128k",
+             "-movflags", "+faststart", out_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception as e:
+        log.info(f"re-encode fallback failed for {filepath}: {e}")
+    return None
+
+
+def _fix_video_for_telegram(filepath: str):
+    """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
+
+    مشکل: بعضی ویدیوهای دانلودی (مخصوصاً از اینستاگرام، ویدیوهای نسبتاً طولانی)
+    moov atom‌شون آخر فایل‌ه یا duration/metadata‌شون کامل نیست؛ تلگرام قبل از
+    کامل شدن دانلودِ کاربر، پلیر رو با 00:00 و صفحه‌ی سیاه نشون می‌ده.
+
+    راه‌حل: اول یه Remux سریع و بدون افت کیفیت (-c copy) با +faststart امتحان
+    می‌کنیم (تقریباً رایگان از نظر CPU). فقط اگه بعد از remux هم duration درست
+    تشخیص داده نشد (یعنی خودِ remux کافی نبود)، می‌ریم سراغ Re-encode واقعی —
+    نه به‌صورت پیش‌فرض برای همه‌ی ویدیوها.
+
+    خروجی: (مسیر_نهایی_فایل, duration_یا_None, width_یا_None, height_یا_None)
+    """
+    probe = _ffprobe_json(filepath)
+    duration, width, height = _video_meta(probe)
+
+    if probe is None:
+        # فایل با ffprobe اصلاً قابل‌خوندن نبود (یا ffprobe نصب نیست) — همون فایل
+        # خام رو برمی‌گردونیم؛ بهتره تلگرام خودش امتحان کنه تا اصلاً نفرستیم.
+        return filepath, None, None, None
+
+    remuxed = _remux_faststart(filepath)
+    if remuxed:
+        d2, w2, h2 = _video_meta(_ffprobe_json(remuxed))
+        if d2:
+            return remuxed, d2, w2, h2
+        try:
+            os.remove(remuxed)
+        except Exception:
+            pass
+
+    reencoded = _reencode_video(filepath)
+    if reencoded:
+        d3, w3, h3 = _video_meta(_ffprobe_json(reencoded))
+        return reencoded, d3, w3, h3
+
+    # نه remux و نه re-encode جواب نداد — فایل اصلی رو با هر متادیتایی که از اول
+    # پیدا شده بود می‌فرستیم؛ حداقل چیزی که فرستادیم می‌شه بهتر از هیچی نیست.
+    return filepath, duration, width, height
+
+
 def _yt_dlp_download(url: str, outdir: str, platform: str):
     """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
 
@@ -443,14 +588,32 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         caption = f"{title}\n{size_line}" if title else size_line
 
         ext = os.path.splitext(filepath)[1].lower()
+        send_path = filepath
+        v_duration = v_width = v_height = None
+        if ext in _VIDEO_EXTS and platform != "soundcloud":
+            # رفع باگ «۰۰:۰۰ / صفحه سیاه»: قبل از ارسال، duration و metadata رو
+            # با ffprobe چک و در صورت نیاز با ffmpeg (remux سریع، نه لزوماً
+            # re-encode) درست می‌کنیم. این کار تو ترد جدا انجام می‌شه تا event
+            # loop ربات قفل نشه.
+            try:
+                send_path, v_duration, v_width, v_height = await asyncio.to_thread(
+                    _fix_video_for_telegram, filepath
+                )
+            except Exception as e:
+                log.warning(f"video fixup failed, sending raw file: {e}")
+                send_path = filepath
         try:
-            with open(filepath, "rb") as f:
+            with open(send_path, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
                     await msg.reply_photo(f, caption=caption or None)
                 elif platform == "soundcloud" or ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav"):
                     await msg.reply_audio(f, caption=caption or None, title=title or None)
                 else:
-                    await msg.reply_video(f, caption=caption or None, supports_streaming=True)
+                    await msg.reply_video(
+                        f, caption=caption or None, supports_streaming=True,
+                        duration=int(v_duration) if v_duration else None,
+                        width=v_width or None, height=v_height or None,
+                    )
         except Exception as e:
             log.warning(f"send failed, fallback to document: {e}")
             try:

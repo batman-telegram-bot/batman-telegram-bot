@@ -13,8 +13,10 @@ games_pack5.py
 
 نکته: چون تلگرام گرافیک/فیزیک بلادرنگ نداره، بیلیارد و مسابقه ماشین نسخه‌ی
 نوبتی و ساده‌شده‌ان (نه فیزیک واقعی)، ولی کاملاً قابل‌بازی و بدون باگ‌ان.
-یونو هم چون پیام‌ها تو گروه عمومیه، دست بازیکن‌ها (مثل بقیه‌ی بازی‌های این
-ربات) فقط موقع نوبتشون رو دکمه‌ها دیده می‌شه - نه کاملاً مخفیِ خصوصی.
+یونو الان یه تایمر ۴۵ ثانیه‌ای نوبت هم داره: اگه بازیکن/انتخاب‌کننده‌ی رنگ
+دیر کنه، خودکار یه کارت می‌کشه (یا رنگ رندوم انتخاب می‌شه) و نوبت رد می‌شه —
+تا بازی گروه رو قفل نکنه. چون پیام‌ها تو گروه عمومیه، دست بازیکن‌ها (مثل
+بقیه‌ی بازی‌های این ربات) فقط موقع نوبتشون رو دکمه‌ها دیده می‌شه.
 
 نحوه‌ی اتصال (کنار بقیه‌ی register_ها تو bot.py):
 
@@ -25,13 +27,16 @@ games_pack5.py
 
 import random
 import uuid
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
+
+log = logging.getLogger(__name__)
 
 
 EXTRA_GAMES_LIST_TEXT5 = (
     "یونو — ۲ تا ۴ نفره، دکمه‌ی «پیوستن» رو بزن\n"
-    "قلمرو — ۲ تا ۴ نفره، هر خونه رو یکی بگیره، آخرش هرکی بیشتر داره برنده‌ست\n"
+    "قلمرو — ۲ تا ۴ نفره، استراتژیک: منابع/نیرو/دفاع/حمله/توسعه، ۱۰ دور، بیشترین امتیاز می‌بره\n"
     "بیلیارد — دو نفره، ریپلای کن یا «پیوستن» رو بزن، توپ‌ها رو بزن و آخرش ۸ سیاه\n"
     "مسابقه ماشین — ۲ تا ۴ نفره، تاس بنداز، بوست و لکه‌روغن رو مدیریت کن\n"
 )
@@ -68,6 +73,7 @@ async def _noop5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 UNO_GAMES = {}
 UNO_COLORS = {"R": "🔴", "G": "🟢", "B": "🔵", "Y": "🟡"}
 UNO_LABELS = {"skip": "⏭", "reverse": "🔄", "+2": "+2"}
+UNO_TURN_TIMEOUT_SEC = 45
 
 
 def _uno_build_deck():
@@ -128,6 +134,61 @@ def _uno_advance(game, effect):
         game["turn"] = next_idx
 
 
+def _uno_job_name(gid):
+    return f"uno_turn:{gid}"
+
+
+def _uno_cancel_timer(app, gid):
+    for job in app.job_queue.get_jobs_by_name(_uno_job_name(gid)):
+        job.schedule_removal()
+
+
+def _uno_schedule_timer(app, gid, game, chat_id, message_id):
+    """تایمر ۴۵ ثانیه‌ای نوبت. با «timer_token» چک می‌کنیم که تایمر قدیمی
+    (که قبل از رسیدنش، نوبت با یه اکشن دیگه عوض شده) اثری نداشته باشه، حتی
+    اگه schedule_removal به هر دلیلی جا مونده باشه."""
+    _uno_cancel_timer(app, gid)
+    game["timer_token"] = game.get("timer_token", 0) + 1
+    app.job_queue.run_once(
+        _uno_turn_timeout,
+        when=UNO_TURN_TIMEOUT_SEC,
+        data={"gid": gid, "token": game["timer_token"], "chat_id": chat_id, "message_id": message_id},
+        name=_uno_job_name(gid),
+    )
+
+
+async def _uno_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
+    d = context.job.data
+    gid = d["gid"]
+    game = UNO_GAMES.get(gid)
+    if not game or game.get("timer_token") != d["token"]:
+        return  # بازی تموم شده یا این تایمر قدیمیه و نوبت عوض شده
+    try:
+        if game.get("awaiting"):
+            uid = game["awaiting"]["uid"]
+            name = game["names"][uid]
+            color = random.choice("RGBY")
+            card = game["awaiting"]["card"]
+            game["color"] = color; game["value"] = card[1]
+            effect = "draw4" if card[1] == "+4" else "normal"
+            game["awaiting"] = None
+            _uno_advance(game, effect)
+            note = f"\n\n⏱️ {name} تو انتخاب رنگ دیر کرد — رنگ {UNO_COLORS[color]} خودکار انتخاب شد."
+        else:
+            uid = game["players"][game["turn"]]
+            name = game["names"][uid]
+            game["hands"][uid].extend(_uno_draw(game, 1))
+            _uno_advance(game, "normal")
+            note = f"\n\n⏱️ {name} تو نوبتش دیر کرد — یه کارت خودکار کشید و نوبت رد شد."
+        _uno_schedule_timer(context.application, gid, game, d["chat_id"], d["message_id"])
+        await context.bot.edit_message_text(
+            chat_id=d["chat_id"], message_id=d["message_id"],
+            text=_uno_text(game) + note, reply_markup=_uno_markup(gid, game),
+        )
+    except Exception as e:
+        log.info(f"uno turn-timeout handling failed (harmless): {e}")
+
+
 def _uno_text(game):
     lines = ["🃏 یونو گاتهام", ""]
     top = game["discard"][-1]
@@ -169,6 +230,7 @@ async def uno_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     UNO_GAMES[gid] = {
         "chat_id": update.effective_chat.id, "players": [uid],
         "names": {uid: _name5(update.effective_user)}, "started": False,
+        "timer_token": 0,
     }
     await update.effective_message.reply_text(
         f"🃏 یونو گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
@@ -208,10 +270,12 @@ async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "color": color, "value": first[1], "turn": 0, "direction": 1, "awaiting": None,
         })
         await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        _uno_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
         await q.answer(); return
 
     if action == "cancel":
         if uid == game["players"][0]:
+            _uno_cancel_timer(context.application, gid)
             del UNO_GAMES[gid]
             await q.edit_message_text("🃏 یونو لغو شد.")
         await q.answer(); return
@@ -230,6 +294,7 @@ async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game["awaiting"] = None
             _uno_advance(game, effect)
             await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+            _uno_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
         await q.answer(); return
 
     if uid != game["players"][game["turn"]]:
@@ -247,60 +312,111 @@ async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hand.pop(idx)
         game["discard"].append(card)
         if not hand:
+            _uno_cancel_timer(context.application, gid)
             await q.edit_message_text(f"🃏 یونو تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🎉 کارت‌هاش تموم شد!")
             del UNO_GAMES[gid]; await q.answer(); return
         if card[0] == "W":
             game["awaiting"] = {"uid": uid, "card": card}
             await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+            _uno_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
             await q.answer(); return
         game["color"] = card[0]; game["value"] = card[1]
         effect = {"skip": "skip", "reverse": "reverse", "+2": "draw2"}.get(card[1], "normal")
         _uno_advance(game, effect)
         await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        _uno_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
         await q.answer(); return
 
     if action == "draw":
         game["hands"][uid].extend(_uno_draw(game, 1))
         _uno_advance(game, "normal")
         await q.edit_message_text(_uno_text(game), reply_markup=_uno_markup(gid, game))
+        _uno_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
         await q.answer(); return
 
 
 # =========================================================
-#  ۲. قلمرو (Territory) — گرید ۶×۶، ۲ تا ۴ نفره
+#  ۲. قلمرو (Kingdom) — استراتژیک، ۲ تا ۴ نفره
+#     هر بازیکن: قلمرو با منابع/نیرو/دفاع/سطح/امتیاز؛ هر نوبت یکی از ۶ اقدام
+#     رو انتخاب می‌کنه: حمله، دفاع، جمع‌آوری منابع، توسعه‌ی قلمرو، ارتقا،
+#     یا یه اقدام استراتژیک (کمک به یه هم‌پیمان). بعد از TER_MAX_ROUNDS دور
+#     کامل، بازیکنی که بیشترین امتیاز رو داره برنده‌ست.
 # =========================================================
 
 TER_GAMES = {}
-TER_SIZE = 6
 TER_COLORS = ["🔴", "🟢", "🟡", "🔵"]
+TER_MAX_ROUNDS = 10
+TER_TURN_TIMEOUT_SEC = 45
+
+TER_ACTIONS = {
+    "gather": ("💰 جمع‌آوری منابع", 0),
+    "build": ("🏰 توسعه قلمرو", None),   # هزینه‌ش به سطح فعلی بستگی داره
+    "upgrade": ("🔬 ارتقا", 25),
+    "defend": ("🛡 دفاع", 15),
+    "attack": ("⚔️ حمله", 0),
+    "alliance": ("🤝 اقدام استراتژیک", 10),
+}
+
+
+def _ter_new_kingdom():
+    return {"resources": 40, "power": 10, "defense": 10, "level": 1, "score": 0}
+
+
+def _ter_score(k):
+    return k["level"] * 100 + k["resources"] + k["power"] * 5 + k["defense"] * 2
+
+
+def _ter_build_cost(level):
+    return 30 + level * 15
 
 
 def _ter_text(game):
-    lines = ["🏰 قلمرو گاتهام", "", f"گرید {TER_SIZE}×{TER_SIZE} — هر نوبت یه خونه بگیر، آخرش هرکی بیشتر داره می‌بره.", ""]
-    counts = {uid: 0 for uid in game["players"]}
-    for owner in game["owner"].values():
-        counts[owner] += 1
+    lines = ["🏰 GOTHAM KINGDOM — نبرد قلمروها", ""]
+    if not game["started"]:
+        for uid in game["players"]:
+            lines.append(f"👤 {game['names'][uid]}")
+        lines.append("\n۲ تا ۴ نفر می‌تونن وارد بشن.")
+        return "\n".join(lines)
     for i, uid in enumerate(game["players"]):
-        marker = "👉 " if game["started"] and game["players"][game["turn"]] == uid else "   "
-        lines.append(f"{marker}{TER_COLORS[i % 4]} {game['names'][uid]}: {counts[uid]} خونه")
-    if game["started"]:
-        lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+        k = game["kingdoms"][uid]
+        marker = "👉 " if game["players"][game["turn"]] == uid else "   "
+        lines.append(
+            f"{marker}{TER_COLORS[i % 4]} {game['names'][uid]} — سطح {k['level']} | "
+            f"💰{k['resources']} ⚔️{k['power']} 🛡{k['defense']} | امتیاز: {_ter_score(k)}"
+        )
+    lines.append(f"\n🗓 دور {game['round']} از {TER_MAX_ROUNDS}")
+    if game.get("log"):
+        lines.append(f"\n📜 {game['log']}")
+    lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
     return "\n".join(lines)
 
 
 def _ter_markup(gid, game):
     if not game["started"]:
         return _join_markup5("ter", gid)
+    uid = game["players"][game["turn"]]
+    level = game["kingdoms"][uid]["level"]
+    build_label = f"🏰 توسعه قلمرو (ۀ{_ter_build_cost(level)}💰)"
+    rows = [
+        [InlineKeyboardButton("⚔️ حمله", callback_data=f"ter:attack:{gid}"),
+         InlineKeyboardButton("🛡 دفاع (۱۵💰)", callback_data=f"ter:defend:{gid}")],
+        [InlineKeyboardButton("💰 جمع‌آوری منابع", callback_data=f"ter:gather:{gid}")],
+        [InlineKeyboardButton(build_label, callback_data=f"ter:build:{gid}")],
+        [InlineKeyboardButton("🔬 ارتقا (۲۵💰)", callback_data=f"ter:upgrade:{gid}"),
+         InlineKeyboardButton("🤝 استراتژیک (۱۰💰)", callback_data=f"ter:alliance:{gid}")],
+        [InlineKeyboardButton("🏳️ خروج", callback_data=f"ter:leave:{gid}")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _ter_target_markup(gid, game, action):
+    uid = game["players"][game["turn"]]
     rows = []
-    for r in range(TER_SIZE):
-        row = []
-        for c in range(TER_SIZE):
-            idx = r * TER_SIZE + c
-            owner = game["owner"].get(idx)
-            label = TER_COLORS[game["players"].index(owner) % 4] if owner is not None else "⬜"
-            row.append(InlineKeyboardButton(label, callback_data=f"ter:cell:{gid}:{idx}"))
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🏳️ خروج", callback_data=f"ter:leave:{gid}")])
+    for p in game["players"]:
+        if p == uid:
+            continue
+        rows.append([InlineKeyboardButton(f"🎯 {game['names'][p]}", callback_data=f"ter:{action}t:{gid}:{p}")])
+    rows.append([InlineKeyboardButton("🔙 انصراف", callback_data=f"ter:cancelaction:{gid}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -309,12 +425,79 @@ async def territory_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gid = _gid5("te")
     TER_GAMES[gid] = {
         "chat_id": update.effective_chat.id, "players": [uid],
-        "names": {uid: _name5(update.effective_user)}, "owner": {}, "turn": 0, "started": False,
+        "names": {uid: _name5(update.effective_user)}, "turn": 0, "started": False,
+        "round": 1, "log": "", "timer_token": 0,
     }
     await update.effective_message.reply_text(
-        f"🏰 قلمرو گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
-        reply_markup=_join_markup5("ter", gid),
+        _ter_text(TER_GAMES[gid]), reply_markup=_join_markup5("ter", gid),
     )
+
+
+def _ter_job_name(gid):
+    return f"ter_turn:{gid}"
+
+
+def _ter_cancel_timer(app, gid):
+    for job in app.job_queue.get_jobs_by_name(_ter_job_name(gid)):
+        job.schedule_removal()
+
+
+def _ter_schedule_timer(app, gid, game, chat_id, message_id):
+    _ter_cancel_timer(app, gid)
+    game["timer_token"] = game.get("timer_token", 0) + 1
+    app.job_queue.run_once(
+        _ter_turn_timeout, when=TER_TURN_TIMEOUT_SEC,
+        data={"gid": gid, "token": game["timer_token"], "chat_id": chat_id, "message_id": message_id},
+        name=_ter_job_name(gid),
+    )
+
+
+async def _ter_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
+    d = context.job.data
+    gid = d["gid"]
+    game = TER_GAMES.get(gid)
+    if not game or game.get("timer_token") != d["token"]:
+        return
+    try:
+        uid = game["players"][game["turn"]]
+        name = game["names"][uid]
+        game["log"] = f"⏱️ {name} تو نوبتش دیر کرد و نوبتش رد شد (بدون اقدام)."
+        _ter_end_turn(game)
+        _ter_schedule_timer(context.application, gid, game, d["chat_id"], d["message_id"])
+        finished = _ter_maybe_finish(gid, game)
+        if finished:
+            await context.bot.edit_message_text(chat_id=d["chat_id"], message_id=d["message_id"], text=finished)
+            _ter_cancel_timer(context.application, gid)
+            return
+        await context.bot.edit_message_text(
+            chat_id=d["chat_id"], message_id=d["message_id"],
+            text=_ter_text(game), reply_markup=_ter_markup(gid, game),
+        )
+    except Exception as e:
+        log.info(f"territory turn-timeout handling failed (harmless): {e}")
+
+
+def _ter_end_turn(game):
+    """نوبت رو می‌بره جلو؛ اگه یه دور کامل شد، شمارنده‌ی دور رو زیاد می‌کنه."""
+    game["turn"] += 1
+    if game["turn"] >= len(game["players"]):
+        game["turn"] = 0
+        game["round"] += 1
+
+
+def _ter_maybe_finish(gid, game):
+    """اگه دورها تموم شده باشه، متن نتیجه‌ی نهایی رو برمی‌گردونه و بازی رو پاک می‌کنه؛
+    وگرنه None."""
+    if game["round"] <= TER_MAX_ROUNDS:
+        return None
+    scored = sorted(game["players"], key=lambda p: _ter_score(game["kingdoms"][p]), reverse=True)
+    lines = ["🏰 نبرد قلمروها تمام شد!", ""]
+    for i, p in enumerate(scored, 1):
+        k = game["kingdoms"][p]
+        medal = "🏆" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▫️"))
+        lines.append(f"{medal} {game['names'][p]} — سطح {k['level']} | امتیاز {_ter_score(k)}")
+    del TER_GAMES[gid]
+    return "\n".join(lines)
 
 
 async def territory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,7 +522,9 @@ async def territory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if uid != game["players"][0] or len(game["players"]) < 2:
             await q.answer("حداقل ۲ نفر لازمه و فقط سازنده شروع می‌کنه.", show_alert=True); return
         game["started"] = True
+        game["kingdoms"] = {p: _ter_new_kingdom() for p in game["players"]}
         await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+        _ter_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
         await q.answer(); return
 
     if action == "cancel":
@@ -353,40 +538,105 @@ async def territory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "leave":
         if len(game["players"]) <= 2:
+            _ter_cancel_timer(context.application, gid)
             del TER_GAMES[gid]
             await q.edit_message_text("🏰 بازی قلمرو پایان یافت.")
             await q.answer(); return
         if uid in game["players"]:
-            idx = game["players"].index(uid)
-            game["players"].remove(uid); game["names"].pop(uid, None)
+            game["players"].remove(uid); game["names"].pop(uid, None); game["kingdoms"].pop(uid, None)
             game["turn"] %= len(game["players"])
             await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
         await q.answer(); return
 
+    if action == "cancelaction":
+        if uid != game["players"][game["turn"]]:
+            await q.answer(); return
+        await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+        await q.answer(); return
+
+    # اقدام‌های هدف‌دار (حمله / کمک استراتژیک) دو مرحله‌این: اول نفر رو انتخاب کن
+    if action in ("attack", "alliance") and uid == game["players"][game["turn"]] and len(parts) == 3:
+        if len(game["players"]) == 2:
+            target = next(p for p in game["players"] if p != uid)
+            action = action + "t"
+            parts = [parts[0], action, gid, str(target)]
+        else:
+            await q.edit_message_text(
+                f"{_ter_text(game)}\n\n🎯 هدفت رو انتخاب کن:", reply_markup=_ter_target_markup(gid, game, action)
+            )
+            await q.answer(); return
+
     if uid != game["players"][game["turn"]]:
         await q.answer("نوبت تو نیست.", show_alert=True); return
 
-    if action == "cell":
-        idx = int(parts[3])
-        if idx in game["owner"]:
-            await q.answer("این خونه قبلاً گرفته شده.", show_alert=True); return
-        game["owner"][idx] = uid
-        if len(game["owner"]) == TER_SIZE * TER_SIZE:
-            counts = {p: 0 for p in game["players"]}
-            for o in game["owner"].values():
-                counts[o] += 1
-            top = max(counts.values())
-            winners = [p for p in game["players"] if counts[p] == top]
-            if len(winners) == 1:
-                result = f"🏆 برنده: {game['names'][winners[0]]} ({top} خونه)"
-            else:
-                result = "🤝 مساوی بین: " + "، ".join(game["names"][w] for w in winners)
-            board_txt = "\n".join(f"{TER_COLORS[game['players'].index(p) % 4]} {game['names'][p]}: {counts[p]}" for p in game["players"])
-            await q.edit_message_text(f"🏰 قلمرو تمام شد!\n\n{board_txt}\n\n{result}", reply_markup=_ter_markup(gid, game))
-            del TER_GAMES[gid]; await q.answer(); return
-        game["turn"] = (game["turn"] + 1) % len(game["players"])
-        await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+    k = game["kingdoms"][uid]
+
+    if action == "gather":
+        gained = random.randint(8, 15) + k["level"] * 2
+        k["resources"] += gained
+        game["log"] = f"💰 {game['names'][uid]} {gained} منبع جمع کرد."
+        _ter_end_turn(game)
+
+    elif action == "build":
+        cost = _ter_build_cost(k["level"])
+        if k["resources"] < cost:
+            await q.answer(f"منابع کافی نیست (نیاز: {cost}💰).", show_alert=True); return
+        k["resources"] -= cost
+        k["level"] += 1
+        k["defense"] += 5
+        game["log"] = f"🏰 {game['names'][uid]} قلمروش رو به سطح {k['level']} رسوند."
+        _ter_end_turn(game)
+
+    elif action == "upgrade":
+        if k["resources"] < 25:
+            await q.answer("منابع کافی نیست (نیاز: ۲۵💰).", show_alert=True); return
+        k["resources"] -= 25
+        k["power"] += 8
+        game["log"] = f"🔬 {game['names'][uid]} نیروی نظامیش رو ارتقا داد."
+        _ter_end_turn(game)
+
+    elif action == "defend":
+        if k["resources"] < 15:
+            await q.answer("منابع کافی نیست (نیاز: ۱۵💰).", show_alert=True); return
+        k["resources"] -= 15
+        k["defense"] += 10
+        game["log"] = f"🛡 {game['names'][uid]} دفاع قلمروش رو تقویت کرد."
+        _ter_end_turn(game)
+
+    elif action == "attackt":
+        target = int(parts[3])
+        tk = game["kingdoms"][target]
+        if k["power"] > tk["defense"]:
+            loot = max(5, int(tk["resources"] * random.uniform(0.2, 0.4)))
+            tk["resources"] = max(0, tk["resources"] - loot)
+            tk["defense"] = max(0, tk["defense"] - 5)
+            k["resources"] += loot
+            game["log"] = f"⚔️ {game['names'][uid]} به {game['names'][target]} حمله کرد و برد! (+{loot}💰 غنیمت)"
+        else:
+            k["power"] = max(0, k["power"] - 5)
+            game["log"] = f"⚔️ حمله‌ی {game['names'][uid]} به {game['names'][target]} شکست خورد (دفاع حریف قوی‌تر بود)."
+        _ter_end_turn(game)
+
+    elif action == "alliancet":
+        target = int(parts[3])
+        if k["resources"] < 10:
+            await q.answer("منابع کافی نیست (نیاز: ۱۰💰).", show_alert=True); return
+        k["resources"] -= 10
+        game["kingdoms"][target]["resources"] += 15
+        game["log"] = f"🤝 {game['names'][uid]} به {game['names'][target]} کمک استراتژیک کرد (+۱۵💰 براش)."
+        _ter_end_turn(game)
+
+    else:
         await q.answer(); return
+
+    _ter_schedule_timer(context.application, gid, game, game["chat_id"], q.message.message_id)
+    finished = _ter_maybe_finish(gid, game)
+    if finished:
+        _ter_cancel_timer(context.application, gid)
+        await q.edit_message_text(finished)
+        await q.answer(); return
+    await q.edit_message_text(_ter_text(game), reply_markup=_ter_markup(gid, game))
+    await q.answer()
 
 
 # =========================================================
