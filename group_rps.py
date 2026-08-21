@@ -84,11 +84,14 @@ def _battle_text(game) -> str:
 
 
 def _battle_markup(gid) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🪨 سنگ", callback_data=f"grps:choice:{gid}:rock"),
-        InlineKeyboardButton("📄 کاغذ", callback_data=f"grps:choice:{gid}:paper"),
-        InlineKeyboardButton("✂️ قیچی", callback_data=f"grps:choice:{gid}:scissors"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🪨 سنگ", callback_data=f"grps:choice:{gid}:rock"),
+            InlineKeyboardButton("📄 کاغذ", callback_data=f"grps:choice:{gid}:paper"),
+            InlineKeyboardButton("✂️ قیچی", callback_data=f"grps:choice:{gid}:scissors"),
+        ],
+        [InlineKeyboardButton("🏳 انصراف", callback_data=f"grps:forfeit:{gid}")],
+    ])
 
 
 def _result_markup(gid) -> InlineKeyboardMarkup:
@@ -117,6 +120,18 @@ async def _safe_edit(bot, chat_id, message_id, text, reply_markup=None):
         )
     except Exception as e:
         log.info(f"group_rps: edit failed (harmless, message probably unchanged): {e}")
+
+
+def _record_result(chat_id, winner_id, loser_id):
+    """برد/باخت رو تو سیستم امتیازدهیِ مشترکِ ربات ثبت می‌کنه (همون تابعی که
+    card_room.py هم استفاده می‌کنه) — بدون ساختن سیستم امتیاز جدید."""
+    if not chat_id or not winner_id or not loser_id:
+        return
+    try:
+        import bot as _bot
+        _bot._record_game_result(chat_id, winner_id, loser_id)
+    except Exception as e:
+        log.info(f"group_rps: could not save game record (harmless): {e}")
 
 
 # =========================================================
@@ -177,7 +192,9 @@ async def _choice_timeout_job(context: ContextTypes.DEFAULT_TYPE):
     chosen = list(game["choices"].keys())
     if len(chosen) == 1:
         winner_id = chosen[0]
+        loser_id = game["opponent_id"] if winner_id == game["creator_id"] else game["creator_id"]
         winner_name = game["creator_name"] if winner_id == game["creator_id"] else game["opponent_name"]
+        _record_result(game["chat_id"], winner_id, loser_id)
         text = (
             "⏱️ زمان انتخاب تموم شد!\n"
             f"🏆 برنده: {winner_name}\n"
@@ -255,8 +272,11 @@ async def group_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if outcome == 0:
                 header = "🤝 مساوی شد!"
             else:
+                winner_id = game["creator_id"] if outcome == 1 else game["opponent_id"]
+                loser_id = game["opponent_id"] if outcome == 1 else game["creator_id"]
                 winner = n1 if outcome == 1 else n2
                 header = f"🏆 برنده: {winner}\n💀 بازنده: {n2 if outcome == 1 else n1}"
+                _record_result(game["chat_id"], winner_id, loser_id)
             text = (
                 "🎮 نتیجه‌ی نبرد گاتهام\n\n"
                 f"👤 {n1}: {e1} {CHOICE_LABEL[c1]}\n"
@@ -297,6 +317,30 @@ async def group_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             GRPS_GAMES.pop(gid, None)
             await q.edit_message_text("🏠 از بازی سنگ کاغذ قیچی گاتهام خارج شدی. هر وقت خواستی، از «👥 گروهی» دوباره بساز.")
             await q.answer()
+            return
+
+        if action == "forfeit":
+            game = GRPS_GAMES.get(gid)
+            if not game or game["phase"] not in ("choose",):
+                await q.answer("این بازی دیگه در دسترس نیست.", show_alert=True)
+                return
+            if user.id not in (game["creator_id"], game["opponent_id"]):
+                await q.answer("این بازی برای تو نیست.", show_alert=True)
+                return
+            _cancel_job(context.application, f"grps_choice:{gid}")
+            GRPS_GAMES.pop(gid, None)
+            loser_id = user.id
+            winner_id = game["opponent_id"] if user.id == game["creator_id"] else game["creator_id"]
+            winner_name = game["opponent_name"] if user.id == game["creator_id"] else game["creator_name"]
+            loser_name = game["creator_name"] if user.id == game["creator_id"] else game["opponent_name"]
+            _record_result(game["chat_id"], winner_id, loser_id)
+            text = (
+                "🏳 انصراف داده شد!\n\n"
+                f"👤 {loser_name} انصراف داد.\n"
+                f"🏆 برنده: {winner_name}"
+            )
+            await _safe_edit(context.bot, game["chat_id"], game["message_id"], text, _result_markup(gid))
+            await q.answer("انصراف ثبت شد.")
             return
 
         await q.answer()

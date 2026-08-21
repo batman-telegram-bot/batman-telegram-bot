@@ -255,7 +255,7 @@ def tools_menu_keyboard():
         [InlineKeyboardButton("🔑 پسورد تصادفی", callback_data="tool:password")],
         [InlineKeyboardButton("📐 تبدیل واحد", callback_data="tool:howto:convert"),
          InlineKeyboardButton("🧮 ماشین‌حساب", callback_data="tool:howto:calc")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:new")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ])
 
 
@@ -264,7 +264,7 @@ def fun_menu_keyboard():
         [InlineKeyboardButton("😂 جوک", callback_data="fun:joke"),
          InlineKeyboardButton("💡 واقعیت جالب", callback_data="fun:fact")],
         [InlineKeyboardButton("🦇 جمله بتمنی", callback_data="fun:quote")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:new")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ])
 
 

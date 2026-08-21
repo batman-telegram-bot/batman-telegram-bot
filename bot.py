@@ -519,6 +519,7 @@ def _init_db():
         ("last_active_date", "ALTER TABLE players ADD COLUMN last_active_date TEXT DEFAULT ''"),
         ("week_message_count", "ALTER TABLE players ADD COLUMN week_message_count INTEGER DEFAULT 0"),
         ("week_start_date", "ALTER TABLE players ADD COLUMN week_start_date TEXT DEFAULT ''"),
+        ("first_seen_ts", "ALTER TABLE players ADD COLUMN first_seen_ts REAL DEFAULT 0"),
     ):
         try:
             c.execute(ddl)
@@ -644,9 +645,9 @@ def _get_player(chat_id, user_id, username=""):
     row = c.fetchone()
     if row is None:
         c.execute(
-            "INSERT INTO players (chat_id, user_id, username, points_capacity, pps, last_collect) "
-            "VALUES (?,?,?,?,?,?)",
-            (chat_id, user_id, username, BASE_CAPACITY, BASE_PPS, time.time()),
+            "INSERT INTO players (chat_id, user_id, username, points_capacity, pps, last_collect, first_seen_ts) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (chat_id, user_id, username, BASE_CAPACITY, BASE_PPS, time.time(), time.time()),
         )
         conn.commit()
         c.execute("SELECT * FROM players WHERE chat_id=? AND user_id=?", (chat_id, user_id))
@@ -702,6 +703,94 @@ def _get_weekly_activity(chat_id, limit=10):
         "WHERE chat_id=? AND week_start_date=? ORDER BY week_message_count DESC LIMIT ?",
         (chat_id, week_start, limit),
     )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_top_wins(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, game_wins, game_losses FROM players "
+        "WHERE chat_id=? AND game_wins > 0 ORDER BY game_wins DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_top_streaks(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, streak_days FROM players "
+        "WHERE chat_id=? AND streak_days > 0 ORDER BY streak_days DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_newest_members(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, first_seen_ts FROM players "
+        "WHERE chat_id=? AND first_seen_ts > 0 ORDER BY first_seen_ts DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_oldest_members(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, first_seen_ts FROM players "
+        "WHERE chat_id=? ORDER BY first_seen_ts ASC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_low_activity_members(chat_id, limit=10):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT username, last_active_date, message_count FROM players "
+        "WHERE chat_id=? ORDER BY message_count ASC, last_active_date ASC LIMIT ?",
+        (chat_id, limit),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def _get_member_stats(chat_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(message_count),0) AS msgs, "
+        "COALESCE(SUM(game_wins),0) AS wins, COALESCE(SUM(game_losses),0) AS losses "
+        "FROM players WHERE chat_id=?",
+        (chat_id,),
+    )
+    row = dict(c.fetchone())
+    conn.close()
+    return row
+
+
+def _get_all_players_in_chat(chat_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT * FROM players WHERE chat_id=?", (chat_id,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
@@ -1144,52 +1233,58 @@ def build_words_panel_text() -> str:
 
 
 def build_panel_main_keyboard():
-    """۸ دکمه‌ی اصلی قبلی + ۱ دکمه‌ی جدید «امکانات جدید» (که خودش زیرمنوی امنیت/
-    ابزارها/سرگرمی رو باز می‌کنه) = ۹ دکمه در کل، طبق چیدمان اصلی."""
+    """🦇 GOTHAM CONTROL CENTER — چیدمان اصلی طبق مشخصات: ۱۰ دکمه‌ی سطح اول
+    (بازی‌ها، شخصیت‌ها، لیست‌ها، دانلودر، رفع باگ، مدیریت گروه، ابزار، سرگرمی،
+    امنیت، درباره) + یه ردیف اضافه برای موارد متفرقه‌ای که تو مشخصات ۱۰تایی
+    نبودن (فال/اسلات/پرونده‌روز/کپسول/...). هیچ Handler جدیدی لازم نبود؛
+    امنیت/ابزار/سرگرمی از قبل با callback_data=panel:security/tools/fun تو
+    button_handler پیاده‌سازی شده بودن، فقط یه لایه پایین‌تر (زیر «امکانات
+    جدید») بودن — الان به سطح اول Control Center منتقل شدن (Integration، نه
+    بازسازی)."""
     rows = [
-        [InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona"),
-         InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games")],
-        [InlineKeyboardButton("📥 دانلودر", callback_data="panel:downloader"),
-         InlineKeyboardButton("📋 لیست‌ها", callback_data="panel:lists")],
-        [InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod"),
-         InlineKeyboardButton("🛠 رفع باگ ربات", callback_data="panel:bug")],
-        [InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"),
+        [InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games"),
+         InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona")],
+        [InlineKeyboardButton("📋 لیست‌های گاتهام", callback_data="panel:gdb"),
+         InlineKeyboardButton("📥 دانلودر", callback_data="panel:downloader")],
+        [InlineKeyboardButton("🛠 رفع باگ ربات", callback_data="panel:bug"),
+         InlineKeyboardButton("🛡 مدیریت گروه", callback_data="panel:mod")],
+        [InlineKeyboardButton("🧰 ابزار", callback_data="panel:tools"),
+         InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun")],
+        [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
-        [InlineKeyboardButton("🧩 امکانات جدید (امنیت/ابزار/سرگرمی)", callback_data="panel:new")],
+        [InlineKeyboardButton("🧩 امکانات دیگر", callback_data="panel:new"),
+         InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
 def build_new_features_keyboard():
+    """موارد متفرقه‌ای که تو ۱۰ دکمه‌ی اصلیِ Control Center جا نمی‌شن (امنیت/
+    ابزار/سرگرمی دیگه اینجا نیستن — به سطح اول منتقل شدن، build_panel_main_keyboard
+    رو ببین)."""
     rows = [
-        [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
-         InlineKeyboardButton("🧰 ابزارها", callback_data="panel:tools")],
-        [InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun"),
-         InlineKeyboardButton("🔮 فال گاتهام", callback_data="panel:fortune_info")],
-        [InlineKeyboardButton("🎰 اسلات گاتهام", callback_data="panel:slot_info"),
-         InlineKeyboardButton("🧩 پرونده روز", callback_data="panel:case_info")],
-        [InlineKeyboardButton("🧠 کدوم شخصیتم؟", callback_data="panel:quiz_info"),
-         InlineKeyboardButton("⏳ کپسول زمان", callback_data="panel:capsule_info")],
-        [InlineKeyboardButton("🏅 شهروند نمونه", callback_data="panel:citizen_info"),
-         InlineKeyboardButton("🎡 چرخ گردون", callback_data="panel:wheel_info")],
-        [InlineKeyboardButton("🎫 تیکت پشتیبانی", callback_data="panel:ticket_info"),
-         InlineKeyboardButton("🎂 یادآور تولد یار بتمن", callback_data="bday:open")],
+        [InlineKeyboardButton("🔮 فال گاتهام", callback_data="panel:fortune_info"),
+         InlineKeyboardButton("🎰 اسلات گاتهام", callback_data="panel:slot_info")],
+        [InlineKeyboardButton("🧩 پرونده روز", callback_data="panel:case_info"),
+         InlineKeyboardButton("🧠 کدوم شخصیتم؟", callback_data="panel:quiz_info")],
+        [InlineKeyboardButton("⏳ کپسول زمان", callback_data="panel:capsule_info"),
+         InlineKeyboardButton("🏅 شهروند نمونه", callback_data="panel:citizen_info")],
+        [InlineKeyboardButton("🎡 چرخ گردون", callback_data="panel:wheel_info"),
+         InlineKeyboardButton("🎫 تیکت پشتیبانی", callback_data="panel:ticket_info")],
         [InlineKeyboardButton("🎙 صدا به متن", callback_data="panel:voice_info"),
          InlineKeyboardButton("⏰ یادآور", callback_data="panel:reminder_info")],
         [InlineKeyboardButton("🎬 تشخیص فیلم/سریال", callback_data="panel:movie_info"),
          InlineKeyboardButton("🎵 تشخیص آهنگ", callback_data="panel:song_info")],
-        [InlineKeyboardButton("📝 خلاصه‌ی گروه", callback_data="panel:summary_info")],
+        [InlineKeyboardButton("🎂 یادآور تولد یار بتمن", callback_data="bday:open"),
+         InlineKeyboardButton("📝 خلاصه‌ی گروه", callback_data="panel:summary_info")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
 
 
 NEW_FEATURES_TEXT = (
-    "🧩 *امکانات جدید*\n\n"
+    "🧩 *امکانات دیگر*\n\n"
     "یه بخش رو انتخاب کن:\n"
-    "🔐 امنیت — آنتی‌لینک و آنتی‌فلود\n"
-    "🧰 ابزارها — ترجمه، کیوآر، پسورد، فشرده‌سازی فایل\n"
-    "🎉 سرگرمی — جوک، فکت، جمله بتمنی\n"
     "🔮 فال گاتهام — «فال»، یه‌بار در روز\n"
     "🎰 اسلات گاتهام — «اسلات»، شانستو با امتیازت امتحان کن\n"
     "🧩 پرونده روز — «پرونده روز»، یه معمای گاتهامی با جایزه\n"
@@ -1238,7 +1333,8 @@ def build_mod_panel_keyboard():
          InlineKeyboardButton("🤖 پاسخ خودکار", callback_data="lists:autoreply")],
         [InlineKeyboardButton("🔒 قفل/باز کردن گروه", callback_data="panel:lock_info"),
          InlineKeyboardButton("🧹 پاکسازی", callback_data="panel:purge_info")],
-        [InlineKeyboardButton("🔐 امنیت گروه", callback_data="panel:security")],
+        [InlineKeyboardButton("🔐 امنیت گروه", callback_data="panel:security"),
+         InlineKeyboardButton("📋 نمای کلی لیست‌های مدیریتی", callback_data="panel:lists")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -1402,6 +1498,177 @@ async def build_list_detail_text(context: ContextTypes.DEFAULT_TYPE, chat_id, li
         else:
             lines.append(f"• {value or key}")
     return "\n".join(lines)
+
+
+# =========================================================
+#  📋 GOTHAM DATABASE — آمار و رتبه‌بندی (جدا از مدیریت گروه)
+# =========================================================
+# این بخش صرفاً «اطلاعات، آمار و رتبه‌بندی» نشون می‌ده (طبق مشخصات، جدا از
+# 🛡 مدیریت گروه که عملیات مدیریتیه). از همون جدول players / group_lists
+# فعلی استفاده می‌کنه — جدول یا سیستم موازی ساخته نشده.
+
+GOTHAM_DATABASE_TEXT = "📋 *GOTHAM DATABASE*\n\nیه بخش رو انتخاب کن:"
+
+GDB_SECTIONS = [
+    ("special", "⭐ اعضای ویژه"),
+    ("hof", "🏆 تالار افتخار"),
+    ("active", "⚡ فعال‌ترین‌ها"),
+    ("champs", "🎮 قهرمانان بازی"),
+    ("streaks", "🏅 رکورددارن (استریک)"),
+    ("badges", "🎖 کلکسیون بج‌ها"),
+    ("couples", "💍 روابط گاتهام"),
+    ("citizens", "🦇 شهروندان گاتهام"),
+    ("newest", "👤 اعضای جدید"),
+    ("oldest", "🕰 اعضای قدیمی"),
+    ("lowactive", "👻 کم‌فعال‌ها"),
+    ("stats", "📊 آمار اعضا"),
+]
+
+
+def build_gotham_database_keyboard():
+    rows, row = [], []
+    for key, label in GDB_SECTIONS:
+        row.append(InlineKeyboardButton(label, callback_data=f"gdb:{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_gdb_detail_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="panel:gdb")]])
+
+
+def _fmt_name(row) -> str:
+    u = row.get("username") or ""
+    return f"@{u}" if u else "بازیکن ناشناس"
+
+
+async def build_gdb_detail_text(context: ContextTypes.DEFAULT_TYPE, chat_id, section: str) -> str:
+    label = dict(GDB_SECTIONS).get(section, section)
+
+    if section == "special":
+        items = _list_get(chat_id, "special")
+        if not items:
+            return f"{label}\n\nهنوز عضو ویژه‌ای ثبت نشده."
+        lines = [label, ""] + [f"• {value or key}" for key, value in items]
+        return "\n".join(lines)
+
+    if section == "hof":
+        top_score = await db_run(_get_leaderboard, chat_id, 10)
+        top_wins = await db_run(_get_top_wins, chat_id, 5)
+        lines = [label, "", "🏆 بهترین بازیکنان (امتیاز):"]
+        if top_score:
+            lines += [f"{i}. {_fmt_name(r)} — {r['score']} امتیاز" for i, r in enumerate(top_score, 1)]
+        else:
+            lines.append("— هنوز کسی امتیازی نداره —")
+        lines += ["", "🥇 بیشترین برد بازی:"]
+        if top_wins:
+            lines += [f"{i}. {_fmt_name(r)} — {r['game_wins']} برد" for i, r in enumerate(top_wins, 1)]
+        else:
+            lines.append("— هنوز کسی بردی نداره —")
+        return "\n".join(lines)
+
+    if section == "active":
+        rows = await db_run(_get_weekly_activity, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nهنوز کسی این هفته پیام نداده."
+        lines = [label, "", "(بر اساس تعداد پیام تو این هفته)"]
+        lines += [f"{i}. {_fmt_name(r)} — {r['week_message_count']} پیام" for i, r in enumerate(rows, 1)]
+        return "\n".join(lines)
+
+    if section == "champs":
+        rows = await db_run(_get_top_wins, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nهنوز کسی تو بازی‌ها برد ثبت‌شده‌ای نداره."
+        lines = [label, ""]
+        for i, r in enumerate(rows, 1):
+            total = r["game_wins"] + r["game_losses"]
+            rate = (r["game_wins"] / total * 100) if total else 0
+            lines.append(f"{i}. {_fmt_name(r)} — {r['game_wins']} برد / {r['game_losses']} باخت ({rate:.0f}٪)")
+        return "\n".join(lines)
+
+    if section == "streaks":
+        rows = await db_run(_get_top_streaks, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nهنوز کسی استریک فعالیت نداره."
+        lines = [label, "", "(استریک فعالیت روزانه — نه استریک برد؛ چون تو دیتابیس فعلی برد متوالی جداگانه ثبت نمی‌شه)"]
+        lines += [f"{i}. {_fmt_name(r)} — {r['streak_days']} روز متوالی" for i, r in enumerate(rows, 1)]
+        return "\n".join(lines)
+
+    if section == "badges":
+        players = await db_run(_get_all_players_in_chat, chat_id)
+        counts = {b_label: 0 for b_label, _ in BADGES}
+        for p in players:
+            for b_label in get_earned_badges(p):
+                counts[b_label] = counts.get(b_label, 0) + 1
+        lines = [label, "", "چند نفر از اعضای این گروه هر بج رو گرفتن:"]
+        lines += [f"{b_label} — {counts.get(b_label, 0)} نفر" for b_label, _ in BADGES]
+        return "\n".join(lines)
+
+    if section == "couples":
+        items = _list_get(chat_id, "married")
+        if not items:
+            return f"{label}\n\nهنوز کسی تو یه رابطه‌ی ثبت‌شده نیست."
+        lines = [label, ""]
+        for _key, value in items:
+            try:
+                data = json.loads(value)
+                lines.append(f"💍 {data.get('a_name', '؟')} ❤️ {data.get('b_name', '؟')}")
+            except Exception:
+                continue
+        return "\n".join(lines)
+
+    if section == "citizens":
+        stats = await db_run(_get_member_stats, chat_id)
+        return (
+            f"{label}\n\n"
+            f"🦇 تعداد کل شهروندان ثبت‌شده: {stats['n']}\n"
+            f"📨 مجموع پیام‌های ثبت‌شده: {stats['msgs']}\n"
+        )
+
+    if section == "newest":
+        rows = await db_run(_get_newest_members, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nهنوز عضوی با تاریخ عضویت ثبت‌شده نیست."
+        lines = [label, ""]
+        for i, r in enumerate(rows, 1):
+            lines.append(f"{i}. {_fmt_name(r)}")
+        return "\n".join(lines)
+
+    if section == "oldest":
+        rows = await db_run(_get_oldest_members, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nعضوی ثبت نشده."
+        lines = [label, ""]
+        for i, r in enumerate(rows, 1):
+            lines.append(f"{i}. {_fmt_name(r)}")
+        return "\n".join(lines)
+
+    if section == "lowactive":
+        rows = await db_run(_get_low_activity_members, chat_id, 10)
+        if not rows:
+            return f"{label}\n\nهنوز داده‌ای برای این بخش نیست."
+        lines = [label, ""]
+        for i, r in enumerate(rows, 1):
+            lines.append(f"{i}. {_fmt_name(r)} — {r.get('message_count', 0) or 0} پیام")
+        return "\n".join(lines)
+
+    if section == "stats":
+        stats = await db_run(_get_member_stats, chat_id)
+        n = stats["n"] or 1
+        return (
+            f"{label}\n\n"
+            f"🦇 تعداد اعضای فعال ثبت‌شده: {stats['n']}\n"
+            f"📨 مجموع پیام‌ها: {stats['msgs']}\n"
+            f"🎮 مجموع بردها: {stats['wins']}\n"
+            f"💀 مجموع باخت‌ها: {stats['losses']}\n"
+            f"📈 میانگین پیام هر عضو: {stats['msgs'] / n:.1f}"
+        )
+
+    return f"{label}\n\nاین بخش هنوز داده‌ای نداره."
 
 
 def build_profile_text(chat, player) -> str:
@@ -2269,6 +2536,14 @@ _FOREIGN_CALLBACK_PREFIXES = (
     "uno:", "ter:", "bil:", "lobby5:", "race:", "noop5",
     "gttt:", "ittt:", "sec:", "tool:", "fun:", "quiz:",
     "grps:", "bday:",
+    # 🃏 اتاق پاسور (card_room.py) — قبلاً اینجا نبودن، برای همین button_handler
+    # (گروه ۰، بدون pattern) اول query.answer() رو مصرف می‌کرد و بعد هندلر واقعیِ
+    # card_room (گروه ۵) موقع answer/edit خودش با خطای "قبلاً answer شده" مواجه
+    # می‌شد و دکمه بی‌صدا هیچ کاری نمی‌کرد. رفع باگ: همون الگوی lobby4/lobby5/gttt/grps.
+    "cr:", "war:", "bj21:", "bjd:", "hokm:", "haft:", "charbarg:", "rummy:", "poker:",
+    # 🎬 تشخیص رسانه (media_recognition.py) — همون کلاس باگ؛ دکمه‌های "تشخیص
+    # فیلم/سریال" و "تشخیص آهنگ" هم قبلاً تو این لیست نبودن.
+    "mr:",
 )
 
 
@@ -2326,6 +2601,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "panel:lists":
         text = await build_lists_summary_text(context, chat_id)
         await query.edit_message_text(text, reply_markup=build_lists_keyboard(), parse_mode="Markdown")
+        return
+
+    if data == "panel:gdb":
+        await query.edit_message_text(
+            GOTHAM_DATABASE_TEXT, reply_markup=build_gotham_database_keyboard(), parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("gdb:"):
+        section = data.split(":", 1)[1]
+        text = await build_gdb_detail_text(context, chat_id, section)
+        try:
+            await query.edit_message_text(text, reply_markup=build_gdb_detail_keyboard(), parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(text.replace("*", ""), reply_markup=build_gdb_detail_keyboard())
         return
 
     if data == "panel:bug":

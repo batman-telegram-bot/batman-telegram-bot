@@ -83,7 +83,7 @@ async def build_security_text_and_kb(deps, chat_id):
         [InlineKeyboardButton(
             f"🚫 آنتی‌فلود: {_status_label(antiflood)}", callback_data="sec:toggle:antiflood"
         )],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:new")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return text, InlineKeyboardMarkup(rows)
 
