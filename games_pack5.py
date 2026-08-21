@@ -640,23 +640,67 @@ async def territory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-#  ۳. بیلیارد (ساده‌شده) — دو نفره
+#  ۳. بیلیارد — Turn-Based Billiards حرفه‌ای، دونفره
 # =========================================================
+# چون تلگرام فیزیک واقعی نداره، هر توپ یه «جهت + قدرت درست» مخفی و seed-دار
+# داره (ثابت در طول همون بازی). بازیکن جهت (۸ جهته) و قدرت (۴ درجه) ضربه رو
+# انتخاب می‌کنه؛ هرچه به ترکیب درست نزدیک‌تر باشه، احتمال ورود توپ بیشتره —
+# پس نتیجه منطقیه، نه کاملاً شانسی. بعد از هر توپ درست، نوبت همون بازیکن
+# ادامه پیدا می‌کنه (مثل بیلیارد واقعی)؛ خطا نوبت رو به حریف می‌ده.
 
 BIL_GAMES = {}
 BIL_LOBBIES = {}
+BIL_TURN_TIMEOUT_SEC = 30
+
+BIL_DIRS = ["nw", "n", "ne", "w", "e", "sw", "s", "se"]
+BIL_DIR_LABEL = {"nw": "↖️", "n": "⬆️", "ne": "↗️", "w": "⬅️", "e": "➡️", "sw": "↙️", "s": "⬇️", "se": "↘️"}
+BIL_DIR_ADJ = {  # جهت‌های همسایه (۴۵ درجه فاصله) برای محاسبه‌ی احتمال
+    "nw": {"n", "w"}, "n": {"nw", "ne"}, "ne": {"n", "e"},
+    "w": {"nw", "sw"}, "e": {"ne", "se"}, "sw": {"w", "s"},
+    "s": {"sw", "se"}, "se": {"s", "e"},
+}
+BIL_POWER_LABEL = {1: "▂", 2: "▄", 3: "▆", 4: "█"}
+
+
+def _bil_job_name(gid):
+    return f"bil_turn:{gid}"
+
+
+def _bil_gen_solutions(seed):
+    rnd = random.Random(seed)
+    return {ball: {"dir": rnd.choice(BIL_DIRS), "power": rnd.randint(1, 4)} for ball in range(1, 9)}
 
 
 def _bil_lobby_markup(token):
     return InlineKeyboardMarkup([[InlineKeyboardButton("🙋 بپیوند به بازی", callback_data=f"lobby5:{token}")]])
 
 
-def _bil_markup(gid, state):
+def _bil_text(state, note=None, timer_left=None):
+    balls_left = "، ".join(str(b) for b in sorted(state["remaining"])) if state["remaining"] else "فقط ⚫ ۸"
+    lines = [
+        "🎱 GOTHAM BILLIARDS", "",
+        f"👤 {state['names'][state['players'][0]]}: {state['score'][state['players'][0]]} امتیاز | خطا: {state['fouls'][state['players'][0]]}",
+        f"👤 {state['names'][state['players'][1]]}: {state['score'][state['players'][1]]} امتیاز | خطا: {state['fouls'][state['players'][1]]}",
+        "", f"🎯 توپ‌های باقی‌مانده: {balls_left}",
+    ]
+    if note:
+        lines += ["", note]
+    lines += ["", f"🔔 نوبت: {state['names'][state['turn']]}"]
+    if state.get("target") is not None:
+        label = "⚫ ۸" if state["target"] == 8 else f"🎱 {state['target']}"
+        lines.append(f"🎯 هدف انتخاب‌شده: {label}")
+        lines.append(f"↔️ جهت: {BIL_DIR_LABEL[state['direction']]}   💪 قدرت: {BIL_POWER_LABEL[state['power']]}")
+    if timer_left is not None:
+        lines.append(f"⏳ زمان باقی‌مانده: {timer_left} ثانیه")
+    return "\n".join(lines)
+
+
+def _bil_ball_markup(gid, state):
     balls = sorted(state["remaining"]) if state["remaining"] else [8]
     rows, row = [], []
     for n in balls:
         label = "⚫ ۸" if n == 8 else f"🎱 {n}"
-        row.append(InlineKeyboardButton(label, callback_data=f"bil:hit:{gid}:{n}"))
+        row.append(InlineKeyboardButton(label, callback_data=f"bil:target:{gid}:{n}"))
         if len(row) == 4:
             rows.append(row); row = []
     if row:
@@ -664,23 +708,55 @@ def _bil_markup(gid, state):
     return InlineKeyboardMarkup(rows)
 
 
+def _bil_aim_markup(gid, state):
+    power_row = [InlineKeyboardButton(BIL_POWER_LABEL[p] + (" ✓" if p == state["power"] else ""), callback_data=f"bil:power:{gid}:{p}") for p in (1, 2, 3, 4)]
+    d = state["direction"]
+    grid = [
+        ["nw", "n", "ne"],
+        ["w", None, "e"],
+        ["sw", "s", "se"],
+    ]
+    dir_rows = []
+    for r in grid:
+        row = []
+        for cell in r:
+            if cell is None:
+                row.append(InlineKeyboardButton("🎱", callback_data=f"noop5"))
+            else:
+                label = BIL_DIR_LABEL[cell] + (" ✓" if cell == d else "")
+                row.append(InlineKeyboardButton(label, callback_data=f"bil:dir:{gid}:{cell}"))
+        dir_rows.append(row)
+    return InlineKeyboardMarkup([power_row] + dir_rows + [
+        [InlineKeyboardButton("💥 ضربه", callback_data=f"bil:strike:{gid}")],
+        [InlineKeyboardButton("🔙 تغییر هدف", callback_data=f"bil:retarget:{gid}"), InlineKeyboardButton("🏳️ خروج", callback_data=f"bil:leave:{gid}")],
+    ])
+
+
+def _bil_end_markup(gid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 بازی مجدد", callback_data=f"bil:rematch:{gid}"),
+        InlineKeyboardButton("🏠 بازگشت", callback_data=f"bil:home:{gid}"),
+    ]])
+
+
 async def _launch_billiards(target_msg, p1, p2, edit=False):
     gid = f"{target_msg.chat.id}_{p1.id}_{p2.id}_{random.randint(1000,9999)}"
-    BIL_GAMES[gid] = {
-        "players": {p1.id: 0, p2.id: 0},
-        "names": {p1.id: p1.first_name, p2.id: p2.first_name},
+    state = {
+        "chat_id": target_msg.chat.id, "message_id": None,
+        "players": [p1.id, p2.id], "names": {p1.id: p1.first_name, p2.id: p2.first_name},
+        "score": {p1.id: 0, p2.id: 0}, "fouls": {p1.id: 0, p2.id: 0},
         "remaining": set(range(1, 8)), "turn": p1.id,
+        "target": None, "direction": "n", "power": 2,
+        "solutions": _bil_gen_solutions(gid),
     }
-    text = (
-        f"🎱 بیلیارد: {p1.first_name} در برابر {p2.first_name}\n"
-        f"۷ توپ رو زمینه، آخرش باید ۸ سیاه رو بندازی (اگه زودتر بزنیش می‌بازی).\n\n"
-        f"🎯 نوبت: {p1.first_name}"
-    )
-    markup = _bil_markup(gid, BIL_GAMES[gid])
+    BIL_GAMES[gid] = state
     if edit:
-        await target_msg.edit_text(text, reply_markup=markup)
+        sent = await target_msg.edit_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_ball_markup(gid, state))
+        state["message_id"] = target_msg.message_id
     else:
-        await target_msg.reply_text(text, reply_markup=markup)
+        sent = await target_msg.reply_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_ball_markup(gid, state))
+        state["message_id"] = sent.message_id
+    return gid, state
 
 
 async def billiards_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,7 +764,8 @@ async def billiards_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     creator = update.effective_user
     if msg.reply_to_message and msg.reply_to_message.from_user and \
        not msg.reply_to_message.from_user.is_bot and msg.reply_to_message.from_user.id != creator.id:
-        await _launch_billiards(msg, creator, msg.reply_to_message.from_user)
+        gid, state = await _launch_billiards(msg, creator, msg.reply_to_message.from_user)
+        _bil_schedule_timer(context.application, gid)
         return
     token = f"{update.effective_chat.id}_{creator.id}_{random.randint(100000, 999999)}"
     BIL_LOBBIES[token] = {"creator": creator, "kind": "bil"}
@@ -708,98 +785,417 @@ async def bil_lobby_join_callback(update: Update, context: ContextTypes.DEFAULT_
     if joiner.id == creator.id:
         await query.answer("نمی‌تونی با خودت بازی کنی 🙂", show_alert=True); return
     del BIL_LOBBIES[token]
-    await _launch_billiards(query.message, creator, joiner, edit=True)
+    gid, state = await _launch_billiards(query.message, creator, joiner, edit=True)
+    _bil_schedule_timer(context.application, gid)
     await query.answer()
+
+
+def _bil_schedule_timer(app, gid):
+    _cancel_job(app, _bil_job_name(gid))
+    if getattr(app, "job_queue", None):
+        app.job_queue.run_once(_bil_turn_timeout, when=BIL_TURN_TIMEOUT_SEC, data={"gid": gid}, name=_bil_job_name(gid))
+
+
+async def _bil_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    state = BIL_GAMES.get(gid)
+    if not state:
+        return
+    uid = state["turn"]
+    if state["target"] is None:
+        state["target"] = min(state["remaining"]) if state["remaining"] else 8
+    await _bil_do_strike(context.application, context.bot, gid, state, uid, auto=True)
+
+
+def _bil_save_result(chat_id, winner_id, loser_id):
+    try:
+        import bot as _bot
+        _bot._record_game_result(chat_id, winner_id, loser_id)
+    except Exception as e:
+        log.info(f"billiards: could not save game record (harmless): {e}")
+
+
+async def _bil_do_strike(app, bot, gid, state, uid, auto=False):
+    other = next(p for p in state["players"] if p != uid)
+    ball = state["target"]
+    sol = state["solutions"][ball]
+    d, pw = state["direction"], state["power"]
+    prefix = "⏱️ زمان تمام شد — ربات به‌جای شما ضربه زد.\n\n" if auto else ""
+
+    dir_score = 1.0 if d == sol["dir"] else (0.5 if d in BIL_DIR_ADJ[sol["dir"]] else 0.15)
+    pow_diff = abs(pw - sol["power"])
+    pow_score = 1.0 if pow_diff == 0 else (0.7 if pow_diff == 1 else 0.35)
+    prob = dir_score * pow_score
+    hit = random.random() < prob
+    scratch = (not hit) and pw == 4 and dir_score < 0.5 and random.random() < 0.3
+
+    state["target"] = None
+    label = "⚫ ۸" if ball == 8 else f"🎱 {ball}"
+
+    if ball == 8:
+        if hit:
+            state["score"][uid] += 3
+            _cancel_job(app, _bil_job_name(gid))
+            _bil_save_result(state["chat_id"], uid, other)
+            text = (_bil_text(state) + f"\n\n{prefix}⚫🎉 {state['names'][uid]} توپ ۸ رو زد و برد!\n\n"
+                    f"🏆 برنده: {state['names'][uid]}")
+            await _safe_edit(bot, state["chat_id"], state["message_id"], text, _bil_end_markup(gid))
+            return
+        else:
+            note = prefix + f"😅 {state['names'][uid]} به {label} نخورد."
+            state["turn"] = other
+            _bil_schedule_timer(app, gid)
+            await _safe_edit(bot, state["chat_id"], state["message_id"], _bil_text(state, note=note, timer_left=BIL_TURN_TIMEOUT_SEC), _bil_ball_markup(gid, state))
+            return
+
+    if scratch:
+        state["fouls"][uid] += 1
+        note = prefix + f"❌ خطا! {state['names'][uid]} کیوی زد و توپ سفید هم رفت تو."
+        state["turn"] = other
+        _bil_schedule_timer(app, gid)
+        await _safe_edit(bot, state["chat_id"], state["message_id"], _bil_text(state, note=note, timer_left=BIL_TURN_TIMEOUT_SEC), _bil_ball_markup(gid, state))
+        return
+
+    if hit:
+        state["remaining"].discard(ball)
+        state["score"][uid] += 1
+        note = prefix + f"✅ {state['names'][uid]} {label} رو زد! ({state['score'][uid]} امتیاز) — نوبتش ادامه داره."
+        _bil_schedule_timer(app, gid)
+        await _safe_edit(bot, state["chat_id"], state["message_id"], _bil_text(state, note=note, timer_left=BIL_TURN_TIMEOUT_SEC), _bil_ball_markup(gid, state))
+        return
+    else:
+        note = prefix + f"❌ {state['names'][uid]} به {label} نخورد."
+        state["turn"] = other
+        _bil_schedule_timer(app, gid)
+        await _safe_edit(bot, state["chat_id"], state["message_id"], _bil_text(state, note=note, timer_left=BIL_TURN_TIMEOUT_SEC), _bil_ball_markup(gid, state))
+        return
 
 
 async def billiards_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
-    gid, n = parts[2], int(parts[3])
+    action, gid = parts[1], parts[2]
     state = BIL_GAMES.get(gid)
-    if not state:
-        await q.answer("این بازی تموم شده.", show_alert=True); return
     uid = update.effective_user.id
-    if uid not in state["players"]:
-        await q.answer("تو تو این بازی نیستی.", show_alert=True); return
-    if state["turn"] != uid:
-        await q.answer("نوبت تو نیست.", show_alert=True); return
-    other = [p for p in state["players"] if p != uid][0]
+    try:
+        if not state:
+            await q.answer("این بازی تموم شده.", show_alert=True); return
+        if uid not in state["players"]:
+            await q.answer("تو تو این بازی نیستی.", show_alert=True); return
 
-    if n == 8:
-        if state["remaining"]:
-            await q.edit_message_text(f"⚫ {state['names'][uid]} زودتر از موقع ۸ سیاه رو زد! باخت.\n🏆 برنده: {state['names'][other]}")
-            del BIL_GAMES[gid]; await q.answer(); return
-        if random.random() < 0.6:
-            await q.edit_message_text(f"⚫🎉 {state['names'][uid]} ۸ سیاه رو زد و برد!\n🏆 برنده: {state['names'][uid]}")
-            del BIL_GAMES[gid]; await q.answer(); return
-        state["turn"] = other
-        await q.edit_message_text(f"😅 {state['names'][uid]} به ۸ نزد.\n🎯 نوبت: {state['names'][other]}", reply_markup=_bil_markup(gid, state))
-        await q.answer(); return
+        if action == "leave":
+            _cancel_job(context.application, _bil_job_name(gid))
+            other = next(p for p in state["players"] if p != uid)
+            _bil_save_result(state["chat_id"], other, uid)
+            del BIL_GAMES[gid]
+            await q.edit_message_text(f"🏳️ {state['names'][uid]} از بازی خارج شد.\n🏆 برنده: {state['names'][other]}")
+            await q.answer(); return
 
-    if n not in state["remaining"]:
-        await q.answer("این توپ قبلاً رفته.", show_alert=True); return
+        if action == "rematch":
+            p1, p2 = state["players"]
+            new_gid = f"{state['chat_id']}_{p1}_{p2}_{random.randint(1000,9999)}"
+            new_state = {
+                "chat_id": state["chat_id"], "message_id": state["message_id"],
+                "players": [p1, p2], "names": dict(state["names"]),
+                "score": {p1: 0, p2: 0}, "fouls": {p1: 0, p2: 0},
+                "remaining": set(range(1, 8)), "turn": p1,
+                "target": None, "direction": "n", "power": 2,
+                "solutions": _bil_gen_solutions(new_gid),
+            }
+            BIL_GAMES[new_gid] = new_state
+            BIL_GAMES.pop(gid, None)
+            _bil_schedule_timer(context.application, new_gid)
+            await q.edit_message_text(_bil_text(new_state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_ball_markup(new_gid, new_state))
+            await q.answer("بازی جدید شروع شد!"); return
 
-    if random.random() < 0.65:
-        state["remaining"].discard(n)
-        state["players"][uid] += 1
-        text = f"🎱 {state['names'][uid]} توپ {n} رو زد! ({state['players'][uid]} امتیاز)\n🎯 نوبت: {state['names'][uid]} (ادامه)"
-        if not state["remaining"]:
-            text += "\n\n⚫ حالا باید ۸ سیاه رو بزنی!"
-        await q.edit_message_text(text, reply_markup=_bil_markup(gid, state))
-        await q.answer(); return
-    else:
-        state["turn"] = other
-        await q.edit_message_text(f"❌ {state['names'][uid]} به توپ {n} نخورد.\n🎯 نوبت: {state['names'][other]}", reply_markup=_bil_markup(gid, state))
-        await q.answer(); return
+        if action == "home":
+            BIL_GAMES.pop(gid, None)
+            await q.edit_message_text("🏠 از بازی بیلیارد خارج شدی.")
+            await q.answer(); return
+
+        if state["turn"] != uid:
+            await q.answer("نوبت تو نیست.", show_alert=True); return
+
+        _cancel_job(context.application, _bil_job_name(gid))
+
+        if action == "target":
+            n = int(parts[3])
+            if n not in state["remaining"] and not (n == 8 and not state["remaining"]):
+                await q.answer("این توپ در دسترس نیست.", show_alert=True)
+                _bil_schedule_timer(context.application, gid); return
+            state["target"] = n
+            _bil_schedule_timer(context.application, gid)
+            await q.edit_message_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_aim_markup(gid, state))
+            await q.answer(); return
+
+        if action == "retarget":
+            state["target"] = None
+            _bil_schedule_timer(context.application, gid)
+            await q.edit_message_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_ball_markup(gid, state))
+            await q.answer(); return
+
+        if state["target"] is None:
+            await q.answer("اول یه توپ رو به‌عنوان هدف انتخاب کن.", show_alert=True)
+            _bil_schedule_timer(context.application, gid); return
+
+        if action == "power":
+            state["power"] = int(parts[3])
+            _bil_schedule_timer(context.application, gid)
+            await q.edit_message_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_aim_markup(gid, state))
+            await q.answer(); return
+
+        if action == "dir":
+            state["direction"] = parts[3]
+            _bil_schedule_timer(context.application, gid)
+            await q.edit_message_text(_bil_text(state, timer_left=BIL_TURN_TIMEOUT_SEC), reply_markup=_bil_aim_markup(gid, state))
+            await q.answer(); return
+
+        if action == "strike":
+            await q.answer("💥")
+            await _bil_do_strike(context.application, context.bot, gid, state, uid, auto=False)
+            return
+
+        _bil_schedule_timer(context.application, gid)
+        await q.answer()
+    except Exception as e:
+        log.warning(f"billiards_callback error: {e}")
+        try:
+            await q.answer("⚠️ یک مشکل موقت پیش آمد، دوباره امتحان کن.", show_alert=True)
+        except Exception:
+            pass
 
 
 # =========================================================
-#  ۴. مسابقه ماشین — ۲ تا ۴ نفره، تاسی، بوست/لکه‌روغن
+#  ۴. مسابقه ماشین — GOTHAM RACING، دونفره‌ی حرفه‌ای
 # =========================================================
+# هر بازیکن یه ماشین با ۵ آمار داره: سرعت/شتاب/نیترو/دفاع/سلامت.
+# هر نوبت یکی از ۴ اکشن رو انتخاب می‌کنه: حرکت / نیترو / تغییر مسیر / دفاع.
+# مسیر دو لاینه (A/B) با موانع، پیچ، مسیر سریع، منطقه‌ی خطرناک و بوست که از
+# قبل (seed مخصوص هر بازی) تولید می‌شه؛ نتیجه‌ی هر اکشن منطقی و قابل پیش‌بینیه
+# (نه کاملاً شانسی)، چون سرعت/دفاع/نیترو واقعاً روی نتیجه اثر می‌ذارن.
 
 RACE_GAMES = {}
-RACE_LEN = 30
-RACE_ICONS = ["🚗", "🚙", "🚕", "🏎️"]
-RACE_BOOST = {5: 3, 12: 4, 22: 3}
-RACE_OIL = {8: -3, 17: -4, 25: -2}
+RACE_LEN = 40          # طول مسیر (٪ موقعیت = pos / RACE_LEN * 100)
+RACE_TURN_TIMEOUT_SEC = 30
+RACE_MAX_NITRO = 3
+RACE_ICONS = ["🏎️", "🚗"]
+
+# نوع خونه‌های هر لاین: "obstacle", "danger", "fast", "boost", "turn", None
+RACE_CELL_TYPES = ["obstacle", "danger", "fast", "boost", "turn"]
 
 
-def _race_text(game):
-    lines = [
-        "🏁 مسابقه ماشین گاتهام", "",
-        "🟢 بوست تو متر: " + "، ".join(str(k) for k in RACE_BOOST),
-        "🛢️ لکه‌روغن تو متر: " + "، ".join(str(k) for k in RACE_OIL), "",
-    ]
+def _race_job_name(gid):
+    return f"race_turn:{gid}"
+
+
+def _race_bar(pct, width=10):
+    filled = max(0, min(width, round(pct / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _race_gen_track(seed_gid):
+    """مسیر دو لاینه‌ی مسابقه رو با یه seed مخصوص همین بازی می‌سازه، تا هر بازی
+    مسیر خودش رو داشته باشه ولی در طول یک بازی همیشه ثابت و قابل پیش‌بینی بمونه."""
+    rnd = random.Random(seed_gid)
+    track = {0: [None, None], 1: [None, None]}
+    for lane in (0, 1):
+        used = set()
+        for _ in range(9):
+            cell = rnd.randint(4, RACE_LEN - 2)
+            if cell in used:
+                continue
+            used.add(cell)
+            track.setdefault(cell, [None, None])[lane] = rnd.choice(RACE_CELL_TYPES)
+    return track
+
+
+def _race_new_car(name):
+    return {
+        "name": name, "pos": 0, "lane": 0, "health": 100, "nitro": RACE_MAX_NITRO,
+        "speed": 50, "accel": 0, "defense": 20, "shield": False,
+    }
+
+
+def _race_text(game, note=None, timer_left=None):
+    lines = ["🏁 GOTHAM RACING", ""]
     for i, uid in enumerate(game["players"]):
+        car = game["cars"][uid]
+        pct = round(min(car["pos"], RACE_LEN) / RACE_LEN * 100)
         marker = "👉 " if game["started"] and game["players"][game["turn"]] == uid else "   "
-        pos = max(0, min(game["pos"][uid], RACE_LEN))
-        lines.append(f"{marker}{RACE_ICONS[i % 4]} {game['names'][uid]}: متر {pos}/{RACE_LEN}")
+        lane_label = "A" if car["lane"] == 0 else "B"
+        lines.append(f"{marker}👤 {game['names'][uid]}: {RACE_ICONS[i]}")
+        lines.append(f"   🏎 ماشین: {_race_bar(pct)}")
+        lines.append(f"   ⚡ نیترو: {'●' * car['nitro']}{'○' * (RACE_MAX_NITRO - car['nitro'])}")
+        lines.append(f"   ❤️ سلامت: {car['health']}٪   🛡 دفاع: {car['defense']}٪   🛣 لاین: {lane_label}")
+        lines.append(f"   📍 موقعیت: {pct}٪ ({min(car['pos'], RACE_LEN)}/{RACE_LEN})")
+        if car["shield"]:
+            lines.append("   🛡 سپر فعال")
+    if note:
+        lines.append("")
+        lines.append(note)
     if game["started"]:
-        lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+        turn_name = game["names"][game["players"][game["turn"]]]
+        lines.append("")
+        lines.append(f"🎯 نوبت: {turn_name}")
+        if timer_left is not None:
+            lines.append(f"⏳ زمان باقی‌مانده: {timer_left} ثانیه")
     return "\n".join(lines)
 
 
-def _race_markup(gid, game):
-    if not game["started"]:
-        return _join_markup5("race", gid)
+def _race_join_markup(gid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎲 گاز بده!", callback_data=f"race:go:{gid}")],
+        [InlineKeyboardButton("➕ پیوستن به مسابقه", callback_data=f"race:join:{gid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"race:cancel:{gid}")],
+    ])
+
+
+def _race_play_markup(gid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏎 حرکت", callback_data=f"race:move:{gid}"),
+         InlineKeyboardButton("⚡ نیترو", callback_data=f"race:nitro:{gid}")],
+        [InlineKeyboardButton("↔️ تغییر مسیر", callback_data=f"race:lane:{gid}"),
+         InlineKeyboardButton("🛡 دفاع", callback_data=f"race:defend:{gid}")],
         [InlineKeyboardButton("🏳️ خروج", callback_data=f"race:leave:{gid}")],
     ])
+
+
+def _race_end_markup(gid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 مسابقه‌ی مجدد", callback_data=f"race:rematch:{gid}"),
+        InlineKeyboardButton("🏠 بازگشت", callback_data=f"race:home:{gid}"),
+    ]])
 
 
 async def racing_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     gid = _gid5("rc")
-    RACE_GAMES[gid] = {
-        "chat_id": update.effective_chat.id, "players": [uid],
-        "names": {uid: _name5(update.effective_user)}, "pos": {uid: 0}, "turn": 0, "started": False,
+    game = {
+        "chat_id": update.effective_chat.id, "message_id": None,
+        "players": [uid], "names": {uid: _name5(update.effective_user)},
+        "cars": {uid: _race_new_car(_name5(update.effective_user))},
+        "turn": 0, "started": False, "creator": uid,
+        "track": _race_gen_track(gid),
     }
-    await update.effective_message.reply_text(
-        f"🏁 مسابقه ماشین گاتهام\n\n👤 {_name5(update.effective_user)}\n۲ تا ۴ نفر می‌تونن وارد بشن.",
-        reply_markup=_join_markup5("race", gid),
+    RACE_GAMES[gid] = game
+    sent = await update.effective_message.reply_text(
+        "🏁 GOTHAM RACING — دونفره\n\n"
+        f"👤 راننده ۱: {game['names'][uid]}\n"
+        "⏳ منتظر حریف دوم...\n\n"
+        "روی «پیوستن» بزن.",
+        reply_markup=_race_join_markup(gid),
     )
+    game["message_id"] = sent.message_id
+
+
+def _race_schedule_timer(app, gid):
+    _cancel_job(app, _race_job_name(gid))
+    if getattr(app, "job_queue", None):
+        app.job_queue.run_once(_race_turn_timeout, when=RACE_TURN_TIMEOUT_SEC, data={"gid": gid}, name=_race_job_name(gid))
+
+
+def _cancel_job(app, name):
+    if not getattr(app, "job_queue", None):
+        return
+    for job in app.job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+
+
+async def _race_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    game = RACE_GAMES.get(gid)
+    if not game or not game["started"]:
+        return
+    uid = game["players"][game["turn"]]
+    await _race_resolve_action(context.application, context.bot, gid, game, uid, "move",
+                                note_prefix="⏱️ زمان تمام شد — ربات به‌جای شما گاز داد.\n\n")
+
+
+def _race_save_result(chat_id, winner_id, loser_id):
+    try:
+        import bot as _bot
+        _bot._record_game_result(chat_id, winner_id, loser_id)
+    except Exception as e:
+        log.info(f"race: could not save game record (harmless): {e}")
+
+
+async def _race_resolve_action(app, bot, gid, game, uid, action, note_prefix=""):
+    car = game["cars"][uid]
+    opp_uid = next(p for p in game["players"] if p != uid)
+    note = note_prefix
+
+    if action == "lane":
+        car["lane"] = 1 - car["lane"]
+        note += f"↔️ {game['names'][uid]} به لاین {'B' if car['lane'] else 'A'} تغییر مسیر داد."
+    elif action == "defend":
+        car["shield"] = True
+        note += f"🛡 {game['names'][uid]} حالت دفاعی گرفت (ضربه‌ی بعدی کم‌اثرتره)."
+    else:  # move / nitro
+        using_nitro = action == "nitro" and car["nitro"] > 0
+        base = random.randint(2, 4) + car["speed"] // 25 + car["accel"]
+        if using_nitro:
+            car["nitro"] -= 1
+            base += random.randint(5, 8)
+            note += f"⚡ {game['names'][uid]} نیترو زد! "
+        else:
+            note += f"🏎 {game['names'][uid]} گاز داد. "
+        old = car["pos"]
+        new = min(old + base, RACE_LEN)
+        crossed = range(old + 1, new + 1)
+        crash_damage = 0
+        events = []
+        for cell in crossed:
+            ctype = game["track"].get(cell, [None, None])[car["lane"]]
+            if ctype == "fast":
+                new = min(new + 2, RACE_LEN); events.append("🟢 مسیر سریع (+2)")
+            elif ctype == "boost":
+                car["nitro"] = min(RACE_MAX_NITRO, car["nitro"] + 1); events.append("⛽ بوست نیترو گرفتی")
+            elif ctype == "turn":
+                new = max(old, new - 1); events.append("↩️ پیچ تند (-1)")
+            elif ctype == "obstacle":
+                crash_damage += 15; events.append("💥 برخورد با مانع")
+            elif ctype == "danger":
+                crash_damage += 25; events.append("⚠️ منطقه‌ی خطرناک")
+        if crash_damage:
+            reduced = crash_damage * (1 - car["defense"] / 100)
+            if car["shield"]:
+                reduced *= 0.4
+                car["shield"] = False
+            car["health"] = max(0, round(car["health"] - reduced))
+            car["accel"] = 0
+        else:
+            car["accel"] = min(3, car["accel"] + 1)
+        car["pos"] = new
+        if events:
+            note += " | ".join(events)
+
+    # --- بررسی پایان مسابقه ---
+    if car["health"] <= 0:
+        _cancel_job(app, _race_job_name(gid))
+        game["started"] = False
+        _race_save_result(game["chat_id"], opp_uid, uid)
+        text = (_race_text(game) + f"\n\n🏆 RACE FINISHED\n🥇 {game['names'][opp_uid]}\n🥈 {game['names'][uid]}\n\n"
+                f"💥 ماشین {game['names'][uid]} از حرکت افتاد!")
+        await _safe_edit(bot, game["chat_id"], game["message_id"], text, _race_end_markup(gid))
+        return
+    if car["pos"] >= RACE_LEN:
+        _cancel_job(app, _race_job_name(gid))
+        game["started"] = False
+        _race_save_result(game["chat_id"], uid, opp_uid)
+        text = (_race_text(game) + f"\n\n🏆 RACE FINISHED\n🥇 {game['names'][uid]}\n🥈 {game['names'][opp_uid]}")
+        await _safe_edit(bot, game["chat_id"], game["message_id"], text, _race_end_markup(gid))
+        return
+
+    game["turn"] = (game["turn"] + 1) % len(game["players"])
+    _race_schedule_timer(app, gid)
+    await _safe_edit(bot, game["chat_id"], game["message_id"],
+                      _race_text(game, note=note, timer_left=RACE_TURN_TIMEOUT_SEC), _race_play_markup(gid))
+
+
+async def _safe_edit(bot, chat_id, message_id, text, reply_markup=None):
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+    except Exception as e:
+        log.info(f"race: edit failed (harmless): {e}")
 
 
 async def racing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -807,74 +1203,91 @@ async def racing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = q.data.split(":")
     action, gid = parts[1], parts[2]
     game = RACE_GAMES.get(gid)
-    if not game:
-        await q.answer("این بازی تمام شده.", show_alert=True); return
     uid = update.effective_user.id
+    try:
+        if not game:
+            await q.answer("این مسابقه دیگر در دسترس نیست.", show_alert=True); return
 
-    if action == "join":
-        if uid in game["players"]:
-            await q.answer("قبلاً وارد شدی.", show_alert=True); return
-        if game["started"] or len(game["players"]) >= 4:
-            await q.answer("ورود ممکن نیست.", show_alert=True); return
-        game["players"].append(uid); game["names"][uid] = _name5(update.effective_user); game["pos"][uid] = 0
-        await q.edit_message_text(_race_text(game), reply_markup=_join_markup5("race", gid))
-        await q.answer(); return
+        if action == "join":
+            if game["started"]:
+                await q.answer("این مسابقه قبلاً شروع شده.", show_alert=True); return
+            if uid == game["creator"]:
+                await q.answer("نمی‌تونی به مسابقه‌ی خودت بپیوندی؛ منتظر حریف بمان.", show_alert=True); return
+            if uid in game["players"]:
+                await q.answer("قبلاً وارد شدی.", show_alert=True); return
+            game["players"].append(uid); game["names"][uid] = _name5(update.effective_user)
+            game["cars"][uid] = _race_new_car(_name5(update.effective_user))
+            game["started"] = True
+            _race_schedule_timer(context.application, gid)
+            await q.answer("وارد مسابقه شدی! 🏁")
+            await q.edit_message_text(_race_text(game, timer_left=RACE_TURN_TIMEOUT_SEC), reply_markup=_race_play_markup(gid))
+            return
 
-    if action == "beg":
-        if uid != game["players"][0] or len(game["players"]) < 2:
-            await q.answer("حداقل ۲ نفر لازمه و فقط سازنده شروع می‌کنه.", show_alert=True); return
-        game["started"] = True
-        await q.edit_message_text(_race_text(game), reply_markup=_race_markup(gid, game))
-        await q.answer(); return
-
-    if action == "cancel":
-        if uid == game["players"][0]:
+        if action == "cancel":
+            if uid != game["creator"]:
+                await q.answer("فقط سازنده می‌تواند لغو کند.", show_alert=True); return
+            _cancel_job(context.application, _race_job_name(gid))
             del RACE_GAMES[gid]
             await q.edit_message_text("🏁 مسابقه لغو شد.")
-        await q.answer(); return
+            return
 
-    if not game["started"]:
-        await q.answer(); return
+        if not game["started"]:
+            await q.answer("مسابقه هنوز شروع نشده.", show_alert=True); return
+        if uid not in game["players"]:
+            await q.answer("این مسابقه برای تو نیست.", show_alert=True); return
 
-    if action == "leave":
-        if len(game["players"]) <= 2:
+        if action == "leave":
+            _cancel_job(context.application, _race_job_name(gid))
+            opponent = next((x for x in game["players"] if x != uid), None)
+            game["started"] = False
+            if opponent:
+                _race_save_result(game["chat_id"], opponent, uid)
+                text = f"🏳️ {game['names'][uid]} از مسابقه انصراف داد.\n🏆 برنده: {game['names'][opponent]}"
+            else:
+                text = "🏁 مسابقه پایان یافت."
             del RACE_GAMES[gid]
-            await q.edit_message_text("🏁 مسابقه پایان یافت.")
+            await q.edit_message_text(text)
+            return
+
+        if action == "rematch":
+            if uid not in game["players"]:
+                await q.answer("این مسابقه برای تو نیست.", show_alert=True); return
+            new_gid = _gid5("rc")
+            new_game = {
+                "chat_id": game["chat_id"], "message_id": game["message_id"],
+                "players": list(game["players"]), "names": dict(game["names"]),
+                "cars": {p: _race_new_car(game["names"][p]) for p in game["players"]},
+                "turn": 0, "started": True, "creator": game["creator"],
+                "track": _race_gen_track(new_gid),
+            }
+            RACE_GAMES[new_gid] = new_game
+            RACE_GAMES.pop(gid, None)
+            _race_schedule_timer(context.application, new_gid)
+            await q.answer("مسابقه‌ی جدید شروع شد!")
+            await q.edit_message_text(_race_text(new_game, timer_left=RACE_TURN_TIMEOUT_SEC), reply_markup=_race_play_markup(new_gid))
+            return
+
+        if action == "home":
+            RACE_GAMES.pop(gid, None)
+            await q.edit_message_text("🏠 از مسابقه‌ی ماشین خارج شدی.")
+            return
+
+        if uid != game["players"][game["turn"]]:
+            await q.answer("نوبت تو نیست.", show_alert=True); return
+
+        if action not in ("move", "nitro", "lane", "defend"):
             await q.answer(); return
-        game["players"].remove(uid); game["names"].pop(uid, None); game["pos"].pop(uid, None)
-        game["turn"] %= len(game["players"])
-        await q.edit_message_text(_race_text(game), reply_markup=_race_markup(gid, game))
-        await q.answer(); return
+        if action == "nitro" and game["cars"][uid]["nitro"] <= 0:
+            await q.answer("نیترو نداری!", show_alert=True); return
 
-    if uid != game["players"][game["turn"]]:
-        await q.answer("نوبت تو نیست.", show_alert=True); return
-
-    if action == "go":
-        roll = random.randint(1, 6)
-        old = game["pos"][uid]
-        new = old + roll
-        extra = ""
-        if new >= RACE_LEN:
-            await q.edit_message_text(
-                f"🏁 {game['names'][uid]} با تاس {roll} خط پایان رو رد کرد!\n\n🏆 برنده: {game['names'][uid]}"
-            )
-            del RACE_GAMES[gid]; await q.answer(); return
-        if new in RACE_BOOST:
-            new += RACE_BOOST[new]; extra = " 🟢 بوست گرفتی!"
-        elif new in RACE_OIL:
-            new = max(0, new + RACE_OIL[new]); extra = " 🛢️ رو روغن سر خوردی!"
-        if new >= RACE_LEN:
-            await q.edit_message_text(
-                f"🏁 {game['names'][uid]} با تاس {roll}{extra} خط پایان رو رد کرد!\n\n🏆 برنده: {game['names'][uid]}"
-            )
-            del RACE_GAMES[gid]; await q.answer(); return
-        game["pos"][uid] = new
-        game["turn"] = (game["turn"] + 1) % len(game["players"])
-        await q.edit_message_text(
-            _race_text(game) + f"\n\n🎲 {game['names'][uid]} تاس {roll} آورد: {old} → {new}.{extra}",
-            reply_markup=_race_markup(gid, game),
-        )
-        await q.answer(); return
+        await q.answer()
+        await _race_resolve_action(context.application, context.bot, gid, game, uid, action)
+    except Exception as e:
+        log.warning(f"racing_callback error: {e}")
+        try:
+            await q.answer("⚠️ یک مشکل موقت پیش آمد، دوباره امتحان کن.", show_alert=True)
+        except Exception:
+            pass
 
 
 # =========================================================

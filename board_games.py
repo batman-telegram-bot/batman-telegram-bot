@@ -4,11 +4,16 @@
 Games:
 - Chess: real legal move validation via python-chess.
 - Ludo: 2-4 players, dice, four pieces, capture/safe squares and exact finish.
-- Snakes & Ladders: 2-4 players, 1-100 board, snakes/ladders and exact finish.
+- Snakes & Ladders: 2-player Dark Gotham board with real dice, step-by-step
+  movement, per-turn timers/timeout, and rematch — see the SNAKES & LADDERS
+  section below for the full implementation.
 
 All state is in memory for the current bot process. A restart ends active games.
 """
+import asyncio
+import logging
 import random
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -20,6 +25,8 @@ try:
     import chess
 except ImportError:  # helpful startup message if dependency was forgotten
     chess = None
+
+log = logging.getLogger(__name__)
 
 
 CHESS_GAMES: Dict[str, dict] = {}
@@ -33,6 +40,37 @@ LUDO_FINISH = 57
 
 SNAKES = {99: 54, 95: 75, 92: 88, 89: 68, 74: 53, 64: 60, 62: 19, 49: 11, 47: 26, 16: 6}
 LADDERS = {2: 38, 7: 14, 8: 31, 15: 26, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 78: 98}
+
+# ------------------------- shared small helpers -------------------------
+
+async def _safe_edit(bot, chat_id, message_id, text, reply_markup=None):
+    """Edit a message and swallow the (harmless) 'message not modified' /
+    already-deleted errors so a stray edit never crashes the whole bot."""
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+        )
+    except Exception as e:
+        log.info(f"board_games: edit failed (harmless): {e}")
+
+
+def _cancel_job(app, name):
+    if not getattr(app, "job_queue", None):
+        return
+    for job in app.job_queue.get_jobs_by_name(name):
+        job.schedule_removal()
+
+
+def _save_game_record(chat_id, winner_id, loser_id):
+    """رکورد برد/باخت رو تو سیستم امتیازی مشترک ربات (bot.py) ثبت می‌کنه —
+    همون سیستمی که بقیه‌ی بازی‌ها (games.py) هم استفاده می‌کنن، نه یک سیستم جدا.
+    ایمپورت داخل تابع نگه داشته شده تا با ایمپورت bot.py از board_games.py
+    توی بالای فایل، سیکل ایجاد نشه."""
+    try:
+        import bot as _bot
+        _bot._record_game_result(chat_id, winner_id, loser_id)
+    except Exception as e:
+        log.info(f"board_games: could not save game record (harmless): {e}")
 
 
 def _gid(prefix: str) -> str:
@@ -188,38 +226,83 @@ async def _chess_render(q, gid):
 
 
 # ============================== LUDO ==============================
+# 🎲 منچ — نسخه‌ی دونفره‌ی حرفه‌ای، Dark Gotham:
+#   - تاس واقعی، ۴ مهره‌ی اختصاصی هر بازیکن، خوردن مهره‌ی حریف، خانه‌ی امن
+#   - نوار پیشرفت گرافیکی برای هر مهره + تایمر نوبت + Timeout واقعی
+#   - جلوگیری از حرکت غیرقانونی، بازی مجدد، خروج از بازی
+
+LUDO_TURN_TIMEOUT_SEC = 30
+LUDO_JOIN_TIMEOUT_SEC = 90
+LUDO_BAR_WIDTH = 12
+
+
+def _ludo_turn_job_name(gid):
+    return f"ludo_turn:{gid}"
+
+
+def _ludo_join_job_name(gid):
+    return f"ludo_join:{gid}"
+
 
 def _ludo_abs(player_index, progress):
     if progress < 0 or progress >= 52: return None
     return (LUDO_START[player_index] + progress) % 52
 
 
-def _ludo_text(game):
-    lines = ["🎲 منچ گاتهام", ""]
+def _ludo_piece_bar(p):
+    if p < 0:
+        return "🏠" + "░" * LUDO_BAR_WIDTH
+    if p >= LUDO_FINISH:
+        return "🏆" + "█" * LUDO_BAR_WIDTH
+    filled = max(1, round((p / LUDO_FINISH) * LUDO_BAR_WIDTH))
+    return "🚩" + "█" * filled + "░" * (LUDO_BAR_WIDTH - filled)
+
+
+def _ludo_text(game, note=None, timer_left=None):
+    lines = ["🌑 🎲 منچ — GOTHAM BOARD", ""]
     for i, uid in enumerate(game["players"]):
-        pieces = game["pieces"][uid]
-        vals = ["🏠" if p < 0 else "🏆" if p >= LUDO_FINISH else str(p) for p in pieces]
-        lines.append(f"{COLORS[i]} {game['names'][uid]}: " + " | ".join(vals))
-    if game["started"]:
+        marker = "👉 " if game.get("started") and game["players"][game["turn"]] == uid else "   "
+        lines.append(f"{marker}{COLORS[i]} {game['names'][uid]}")
+        for j, p in enumerate(game["pieces"][uid]):
+            lines.append(f"   مهره {j+1}: {_ludo_piece_bar(p)}")
+    if note:
+        lines.append("")
+        lines.append(note)
+    if game.get("started"):
         uid = game["players"][game["turn"]]
-        lines += ["", f"🎯 نوبت: {game['names'][uid]}", f"🎲 تاس: {game['roll'] if game['roll'] else '—'}"]
+        lines.append("")
+        lines.append(f"🎯 نوبت: {game['names'][uid]}")
+        lines.append(f"🎲 تاس: {game['roll'] if game['roll'] else '—'}")
+        if timer_left is not None:
+            lines.append(f"⏳ زمان باقی‌مانده‌ی نوبت: {timer_left} ثانیه")
     return "\n".join(lines)
 
 
+def _ludo_join_markup(gid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ پیوستن به بازی", callback_data=f"ludo:join:{gid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"ludo:cancel:{gid}")],
+    ])
+
+
 def _ludo_markup(gid, game):
+    uid = game["players"][game["turn"]]
     rows = []
-    if not game["started"]:
-        rows = [[InlineKeyboardButton("➕ پیوستن", callback_data=f"ludo:join:{gid}")],
-                [InlineKeyboardButton("🚀 شروع بازی", callback_data=f"ludo:start:{gid}"), InlineKeyboardButton("❌ لغو", callback_data=f"ludo:cancel:{gid}")]]
+    if game["roll"] is None:
+        rows.append([InlineKeyboardButton("🎲 انداختن تاس", callback_data=f"ludo:roll:{gid}")])
     else:
-        uid = game["players"][game["turn"]]
-        if game["roll"] is None:
-            rows.append([InlineKeyboardButton("🎲 انداختن تاس", callback_data=f"ludo:roll:{gid}")])
-        else:
-            movable = [i for i in range(4) if _ludo_can_move(game, uid, i, game["roll"])]
-            rows.append([InlineKeyboardButton(f"مهره {i+1}", callback_data=f"ludo:move:{gid}:{i}") for i in movable] or [InlineKeyboardButton("⏭️ رد نوبت", callback_data=f"ludo:pass:{gid}")])
-        rows.append([InlineKeyboardButton("🏳️ خروج", callback_data=f"ludo:leave:{gid}")])
+        movable = [i for i in range(4) if _ludo_can_move(game, uid, i, game["roll"])]
+        rows.append([InlineKeyboardButton(f"مهره {i+1}", callback_data=f"ludo:move:{gid}:{i}") for i in movable]
+                    or [InlineKeyboardButton("⏭️ رد نوبت", callback_data=f"ludo:pass:{gid}")])
+    rows.append([InlineKeyboardButton("🏳️ خروج", callback_data=f"ludo:leave:{gid}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _ludo_end_markup(gid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 بازی مجدد", callback_data=f"ludo:rematch:{gid}"),
+        InlineKeyboardButton("🏠 بازگشت", callback_data=f"ludo:home:{gid}"),
+    ]])
 
 
 def _ludo_can_move(game, uid, idx, roll):
@@ -231,9 +314,9 @@ def _ludo_can_move(game, uid, idx, roll):
 
 def _ludo_move(game, uid, idx, roll):
     p = game["pieces"][uid][idx]
-    if p < 0: new = 0
-    else: new = p + roll
+    new = 0 if p < 0 else p + roll
     game["pieces"][uid][idx] = new
+    captured = False
     if 0 <= new < 52:
         absolute = _ludo_abs(game["players"].index(uid), new)
         if absolute not in LUDO_SAFE:
@@ -242,104 +325,506 @@ def _ludo_move(game, uid, idx, roll):
                 for j, op in enumerate(game["pieces"][other]):
                     if 0 <= op < 52 and _ludo_abs(game["players"].index(other), op) == absolute:
                         game["pieces"][other][j] = -1
+                        captured = True
+    return captured
 
 
 async def ludo_start(update, context):
-    uid = update.effective_user.id; gid = _gid("lu")
-    LUDO_GAMES[gid] = {"chat_id": update.effective_chat.id, "players": [uid], "names": {uid: _name(update.effective_user)}, "pieces": {uid: [-1]*4}, "turn": 0, "roll": None, "started": False}
-    await update.effective_message.reply_text(f"🎲 منچ گاتهام\n\n🔴 {_name(update.effective_user)}\n🟢 منتظر بازیکن‌های دیگر...\n\n۲ تا ۴ نفر می‌توانند وارد شوند.", reply_markup=_join_markup("ludo", gid))
+    uid = update.effective_user.id
+    gid = _gid("lu")
+    game = {
+        "chat_id": update.effective_chat.id, "message_id": None,
+        "players": [uid], "names": {uid: _name(update.effective_user)},
+        "pieces": {uid: [-1] * 4}, "turn": 0, "roll": None, "started": False, "creator": uid,
+    }
+    LUDO_GAMES[gid] = game
+    sent = await update.effective_message.reply_text(
+        "🌑 🎲 منچ گاتهام — دونفره\n\n"
+        f"{COLORS[0]} بازیکن ۱: {game['names'][uid]}\n"
+        "⏳ منتظر بازیکن دوم...\n\n"
+        f"روی «پیوستن» بزن (تا {LUDO_JOIN_TIMEOUT_SEC} ثانیه).",
+        reply_markup=_ludo_join_markup(gid),
+    )
+    game["message_id"] = sent.message_id
+    if context.application.job_queue:
+        context.application.job_queue.run_once(
+            _ludo_join_timeout_job, when=LUDO_JOIN_TIMEOUT_SEC, data={"gid": gid}, name=_ludo_join_job_name(gid)
+        )
+
+
+async def _ludo_join_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    game = LUDO_GAMES.get(gid)
+    if not game or game["started"]:
+        return
+    del LUDO_GAMES[gid]
+    await _safe_edit(context.bot, game["chat_id"], game["message_id"],
+                      "⏱️ زمان ورود بازیکن دوم تمام شد.\n🎲 بازی منچ لغو شد.")
+
+
+def _schedule_ludo_turn_timer(app, gid):
+    _cancel_job(app, _ludo_turn_job_name(gid))
+    if app.job_queue:
+        app.job_queue.run_once(
+            _ludo_turn_timeout_job, when=LUDO_TURN_TIMEOUT_SEC, data={"gid": gid}, name=_ludo_turn_job_name(gid)
+        )
+
+
+async def _ludo_turn_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    game = LUDO_GAMES.get(gid)
+    if not game or not game["started"]:
+        return
+    uid = game["players"][game["turn"]]
+    await _ludo_auto_play_turn(context.application, context.bot, gid, game, uid)
+
+
+async def _ludo_auto_play_turn(app, bot, gid, game, uid):
+    """اجرای خودکار نوبت وقتی بازیکن به‌موقع اقدام نکرده (تاس و/یا حرکت)."""
+    note = "⏱️ زمان تمام شد — ربات به‌جای شما بازی کرد.\n\n"
+    if game["roll"] is None:
+        roll = random.randint(1, 6)
+        game["roll"] = roll
+        note += f"🎲 تاس: {roll}"
+    else:
+        roll = game["roll"]
+    movable = [i for i in range(4) if _ludo_can_move(game, uid, i, roll)]
+    if movable:
+        await _ludo_finish_move(app, bot, gid, game, uid, movable[0], roll, note)
+    else:
+        game["roll"] = None
+        game["turn"] = (game["turn"] + (0 if roll == 6 else 1)) % len(game["players"])
+        _schedule_ludo_turn_timer(app, gid)
+        await _safe_edit(bot, game["chat_id"], game["message_id"],
+                          _ludo_text(game, note=note + "\n😅 حرکتی نبود؛ نوبت رد شد.", timer_left=LUDO_TURN_TIMEOUT_SEC),
+                          _ludo_markup(gid, game))
+
+
+async def _ludo_finish_move(app, bot, gid, game, uid, idx, roll, note=None):
+    captured = _ludo_move(game, uid, idx, roll)
+    won = all(x >= LUDO_FINISH for x in game["pieces"][uid])
+    extra_turn = roll == 6
+    game["roll"] = None
+    if won:
+        _cancel_job(app, _ludo_turn_job_name(gid))
+        game["started"] = False
+        loser = next((x for x in game["players"] if x != uid), None)
+        if loser:
+            _save_game_record(game["chat_id"], uid, loser)
+        text = _ludo_text(game) + f"\n\n🏆 برنده: {game['names'][uid]}!\n🔥 هر چهار مهره به خانه رسیدند."
+        await _safe_edit(bot, game["chat_id"], game["message_id"], text, _ludo_end_markup(gid))
+        return
+    if captured and note is None:
+        note = "💥 مهره‌ی حریف خورده شد!"
+    if not extra_turn:
+        game["turn"] = (game["turn"] + 1) % len(game["players"])
+    _schedule_ludo_turn_timer(app, gid)
+    await _safe_edit(bot, game["chat_id"], game["message_id"],
+                      _ludo_text(game, note=note, timer_left=LUDO_TURN_TIMEOUT_SEC), _ludo_markup(gid, game))
 
 
 async def _ludo_callback(update, context):
-    q = update.callback_query; await q.answer(); p = q.data.split(":"); action, gid = p[1], p[2]
+    q = update.callback_query
+    p = q.data.split(":")
+    action, gid = p[1], p[2]
     game = LUDO_GAMES.get(gid)
-    if not game: await q.answer("این بازی تمام شده.", show_alert=True); return
     uid = update.effective_user.id
-    if action == "join":
-        if uid in game["players"]: await q.answer("قبلاً وارد شدی.", show_alert=True); return
-        if game["started"] or len(game["players"]) >= 4: await q.answer("ورود ممکن نیست.", show_alert=True); return
-        game["players"].append(uid); game["names"][uid] = _name(update.effective_user); game["pieces"][uid] = [-1]*4
-        await q.edit_message_text(_ludo_text(game), reply_markup=_ludo_markup(gid, game)); return
-    if action == "start":
-        if uid != game["players"][0] or len(game["players"]) < 2: await q.answer("حداقل ۲ نفر لازم است و فقط سازنده شروع می‌کند.", show_alert=True); return
-        game["started"] = True; await q.edit_message_text(_ludo_text(game), reply_markup=_ludo_markup(gid, game)); return
-    if action == "cancel":
-        if uid != game["players"][0]: return
-        del LUDO_GAMES[gid]; await q.edit_message_text("🎲 منچ لغو شد."); return
-    if not game["started"]: return
-    if uid != game["players"][game["turn"]]: await q.answer("نوبت تو نیست.", show_alert=True); return
-    if action == "roll":
-        if game["roll"] is not None: await q.answer("اول مهره رو حرکت بده.", show_alert=True); return
-        roll = random.randint(1,6); game["roll"] = roll
-        movable = [i for i in range(4) if _ludo_can_move(game, uid, i, roll)]
-        if not movable:
-            game["roll"] = None; game["turn"] = (game["turn"] + (0 if roll == 6 else 1)) % len(game["players"])
-            await q.edit_message_text(_ludo_text(game) + f"\n\n😅 تاس {roll} آمد؛ حرکتی نداری.", reply_markup=_ludo_markup(gid, game)); return
-        await q.edit_message_text(_ludo_text(game) + f"\n\n🎲 عدد تاس: {roll}\nمهره‌ات را انتخاب کن.", reply_markup=_ludo_markup(gid, game)); return
-    if action == "move":
-        idx = int(p[3]); roll = game["roll"]
-        if roll is None or not _ludo_can_move(game, uid, idx, roll): await q.answer("حرکت مجاز نیست.", show_alert=True); return
-        _ludo_move(game, uid, idx, roll)
-        won = all(x >= LUDO_FINISH for x in game["pieces"][uid])
-        extra = roll == 6
-        game["roll"] = None
-        if won:
-            await q.edit_message_text(f"🎲 منچ تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🔥 هر چهار مهره به خانه رسیدند!")
-            del LUDO_GAMES[gid]; return
-        if not extra: game["turn"] = (game["turn"] + 1) % len(game["players"])
-        await q.edit_message_text(_ludo_text(game), reply_markup=_ludo_markup(gid, game)); return
-    if action == "pass":
-        game["roll"] = None; game["turn"] = (game["turn"] + 1) % len(game["players"]); await q.edit_message_text(_ludo_text(game), reply_markup=_ludo_markup(gid, game)); return
-    if action == "leave":
-        if len(game["players"]) <= 2: del LUDO_GAMES[gid]; await q.edit_message_text("🎲 بازی منچ پایان یافت."); return
-        idx = game["players"].index(uid); game["players"].remove(uid); del game["pieces"][uid]; game["names"].pop(uid, None); game["turn"] %= len(game["players"]); await q.edit_message_text(_ludo_text(game), reply_markup=_ludo_markup(gid, game))
+    try:
+        if not game:
+            await q.answer("این بازی دیگر در دسترس نیست.", show_alert=True)
+            return
+
+        if action == "join":
+            if game["started"]:
+                await q.answer("این بازی قبلاً شروع شده.", show_alert=True); return
+            if uid == game["creator"]:
+                await q.answer("نمی‌تونی به بازی خودت بپیوندی؛ منتظر حریف بمان.", show_alert=True); return
+            if uid in game["players"]:
+                await q.answer("قبلاً وارد شدی.", show_alert=True); return
+            game["players"].append(uid); game["names"][uid] = _name(update.effective_user); game["pieces"][uid] = [-1] * 4
+            game["started"] = True
+            _cancel_job(context.application, _ludo_join_job_name(gid))
+            _schedule_ludo_turn_timer(context.application, gid)
+            await q.answer("وارد بازی شدی! 🎲")
+            await q.edit_message_text(_ludo_text(game, timer_left=LUDO_TURN_TIMEOUT_SEC), reply_markup=_ludo_markup(gid, game))
+            return
+
+        if action == "cancel":
+            if uid != game["creator"]:
+                await q.answer("فقط سازنده می‌تواند لغو کند.", show_alert=True); return
+            _cancel_job(context.application, _ludo_join_job_name(gid))
+            _cancel_job(context.application, _ludo_turn_job_name(gid))
+            del LUDO_GAMES[gid]
+            await q.edit_message_text("🎲 منچ لغو شد.")
+            return
+
+        if not game["started"]:
+            await q.answer("بازی هنوز شروع نشده.", show_alert=True); return
+        if uid not in game["players"]:
+            await q.answer("این بازی برای تو نیست.", show_alert=True); return
+
+        if action == "leave":
+            _cancel_job(context.application, _ludo_turn_job_name(gid))
+            opponent = next((x for x in game["players"] if x != uid), None)
+            game["started"] = False
+            if opponent:
+                text = f"🏳️ {game['names'][uid]} از بازی خارج شد.\n🏆 برنده: {game['names'][opponent]}"
+                _save_game_record(game["chat_id"], opponent, uid)
+            else:
+                text = "🎲 بازی منچ پایان یافت."
+            del LUDO_GAMES[gid]
+            await q.edit_message_text(text)
+            return
+
+        if action == "rematch":
+            if uid not in game["players"]:
+                await q.answer("این بازی برای تو نیست.", show_alert=True); return
+            new_gid = _gid("lu")
+            new_game = {
+                "chat_id": game["chat_id"], "message_id": game["message_id"],
+                "players": list(game["players"]), "names": dict(game["names"]),
+                "pieces": {pl: [-1] * 4 for pl in game["players"]}, "turn": 0,
+                "roll": None, "started": True, "creator": game["creator"],
+            }
+            LUDO_GAMES[new_gid] = new_game
+            LUDO_GAMES.pop(gid, None)
+            _schedule_ludo_turn_timer(context.application, new_gid)
+            await q.answer("دور جدید شروع شد!")
+            await q.edit_message_text(_ludo_text(new_game, timer_left=LUDO_TURN_TIMEOUT_SEC), reply_markup=_ludo_markup(new_gid, new_game))
+            return
+
+        if action == "home":
+            LUDO_GAMES.pop(gid, None)
+            await q.edit_message_text("🏠 از بازی منچ خارج شدی.")
+            return
+
+        # از این‌جا به بعد فقط نوبت بازیکن فعلی می‌تواند عمل کند
+        if uid != game["players"][game["turn"]]:
+            await q.answer("نوبت تو نیست.", show_alert=True); return
+
+        _cancel_job(context.application, _ludo_turn_job_name(gid))
+
+        if action == "roll":
+            if game["roll"] is not None:
+                await q.answer("اول مهره رو حرکت بده.", show_alert=True)
+                _schedule_ludo_turn_timer(context.application, gid); return
+            roll = random.randint(1, 6); game["roll"] = roll
+            await q.answer(f"🎲 {roll}")
+            movable = [i for i in range(4) if _ludo_can_move(game, uid, i, roll)]
+            if not movable:
+                game["roll"] = None
+                game["turn"] = (game["turn"] + (0 if roll == 6 else 1)) % len(game["players"])
+                _schedule_ludo_turn_timer(context.application, gid)
+                await q.edit_message_text(_ludo_text(game, note=f"😅 تاس {roll} آمد؛ حرکتی نداری.", timer_left=LUDO_TURN_TIMEOUT_SEC), reply_markup=_ludo_markup(gid, game))
+                return
+            _schedule_ludo_turn_timer(context.application, gid)
+            await q.edit_message_text(_ludo_text(game, note=f"🎲 عدد تاس: {roll} — مهره‌ات را انتخاب کن.", timer_left=LUDO_TURN_TIMEOUT_SEC), reply_markup=_ludo_markup(gid, game))
+            return
+
+        if action == "move":
+            idx = int(p[3]); roll = game["roll"]
+            if roll is None or not _ludo_can_move(game, uid, idx, roll):
+                await q.answer("این حرکت مجاز نیست.", show_alert=True)
+                _schedule_ludo_turn_timer(context.application, gid); return
+            await q.answer()
+            await _ludo_finish_move(context.application, context.bot, gid, game, uid, idx, roll)
+            return
+
+        if action == "pass":
+            game["roll"] = None
+            game["turn"] = (game["turn"] + 1) % len(game["players"])
+            _schedule_ludo_turn_timer(context.application, gid)
+            await q.edit_message_text(_ludo_text(game, timer_left=LUDO_TURN_TIMEOUT_SEC), reply_markup=_ludo_markup(gid, game))
+            return
+
+        _schedule_ludo_turn_timer(context.application, gid)
+        await q.answer()
+    except Exception as e:
+        log.warning(f"ludo_callback error: {e}")
+        try:
+            await q.answer("⚠️ یک مشکل موقت پیش آمد، دوباره امتحان کن.", show_alert=True)
+        except Exception:
+            pass
 
 
 # ========================== SNAKES & LADDERS ==========================
+# 🐍 مار و پله — نسخه‌ی دونفره‌ی حرفه‌ای، Dark Gotham Board:
+#   - تاس واقعی + حرکت مرحله‌به‌مرحله‌ی مهره (انیمیشن خانه به خانه)
+#   - صفحه‌ی تصویری متنی ۱۰×۱۰ با مهره‌ی اختصاصی هر بازیکن
+#   - تایمر نوبت + Timeout واقعی (اگر بازیکن تاس نیندازد، ربات خودکار می‌اندازد)
+#   - جلوگیری از حرکت غیرمجاز، بازی مجدد، خروج از بازی
+#   - چند بازی همزمان، هرکدام کاملاً مستقل (Game ID یکتا)
 
-def _snakes_text(game):
-    lines = ["🐍 مار و پله گاتهام", "", "نردبان‌ها: " + "، ".join(f"{a}→{b}" for a,b in LADDERS.items()), "مارها: " + "، ".join(f"{a}→{b}" for a,b in SNAKES.items()), ""]
-    for i, uid in enumerate(game["players"]): lines.append(f"{COLORS[i]} {game['names'][uid]}: خانه {game['pos'][uid]}")
-    if game["started"]: lines.append(f"\n🎯 نوبت: {game['names'][game['players'][game['turn']]]}")
+SNAKE_PIECE = ["🟠", "🔵"]  # مهره‌ی اختصاصی بازیکن ۱ و ۲
+SNAKE_TURN_TIMEOUT_SEC = 30
+SNAKE_JOIN_TIMEOUT_SEC = 90
+SNAKE_STEP_DELAY = 0.35  # فاصله‌ی هر گام در انیمیشن حرکت مهره
+
+
+def _snake_turn_job_name(gid):
+    return f"snake_turn:{gid}"
+
+
+def _snake_join_job_name(gid):
+    return f"snake_join:{gid}"
+
+
+def _snakes_cell_rows():
+    """شماره‌ی خانه‌های تخته به ترتیب مارپیچ (Boustrophedon)، از خانه‌ی ۱۰۰ (بالا) تا ۱ (پایین)."""
+    rows = []
+    for r in range(9, -1, -1):
+        row = list(range(r * 10 + 1, r * 10 + 11))
+        if r % 2 == 1:
+            row.reverse()
+        rows.append(row)
+    return rows
+
+
+_SNAKE_ROWS = _snakes_cell_rows()
+
+
+def _snakes_board_text(game):
+    pos_map = {}
+    for i, uid in enumerate(game["players"]):
+        p = game["pos"][uid]
+        if p > 0:
+            pos_map.setdefault(p, []).append(SNAKE_PIECE[i])
+    lines = []
+    for row in _SNAKE_ROWS:
+        cells = []
+        for n in row:
+            if n in pos_map:
+                cells.append(pos_map[n][-1])
+            elif n == 100:
+                cells.append("🏁")
+            elif n in SNAKES:
+                cells.append("🐍")
+            elif n in LADDERS:
+                cells.append("🪜")
+            else:
+                cells.append("▪️")
+        lines.append("".join(cells))
     return "\n".join(lines)
 
 
-def _snakes_markup(gid, game):
-    if not game["started"]:
-        return _join_markup("snake", gid)
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🎲 تاس", callback_data=f"snake:roll:{gid}")], [InlineKeyboardButton("🏳️ خروج", callback_data=f"snake:leave:{gid}")]])
+def _snakes_text(game, note=None, timer_left=None):
+    lines = ["🌑 🐍 مار و پله — GOTHAM BOARD 🪜", ""]
+    lines.append(_snakes_board_text(game))
+    lines.append("")
+    for i, uid in enumerate(game["players"]):
+        marker = "👉 " if game.get("started") and game["players"][game["turn"]] == uid else "   "
+        lines.append(f"{marker}{SNAKE_PIECE[i]} {game['names'][uid]}: خانه {game['pos'][uid]}")
+    if note:
+        lines.append("")
+        lines.append(note)
+    if game.get("started"):
+        turn_name = game["names"][game["players"][game["turn"]]]
+        lines.append("")
+        lines.append(f"🎯 نوبت: {turn_name}")
+        if timer_left is not None:
+            lines.append(f"⏳ زمان باقی‌مانده‌ی نوبت: {timer_left} ثانیه")
+    return "\n".join(lines)
+
+
+def _snakes_join_markup(gid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ پیوستن به بازی", callback_data=f"snake:join:{gid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"snake:cancel:{gid}")],
+    ])
+
+
+def _snakes_play_markup(gid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 انداختن تاس", callback_data=f"snake:roll:{gid}")],
+        [InlineKeyboardButton("🏳️ خروج از بازی", callback_data=f"snake:leave:{gid}")],
+    ])
+
+
+def _snakes_end_markup(gid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 بازی مجدد", callback_data=f"snake:rematch:{gid}"),
+        InlineKeyboardButton("🏠 بازگشت", callback_data=f"snake:home:{gid}"),
+    ]])
 
 
 async def snakes_start(update, context):
-    uid = update.effective_user.id; gid = _gid("sn")
-    SNAKES_GAMES[gid] = {"chat_id": update.effective_chat.id, "players": [uid], "names": {uid:_name(update.effective_user)}, "pos": {uid:0}, "turn":0, "started":False}
-    await update.effective_message.reply_text("🐍 مار و پله گاتهام\n\n۲ تا ۴ نفره\nنفرات با «پیوستن» وارد شوند.", reply_markup=_join_markup("snake", gid))
+    uid = update.effective_user.id
+    gid = _gid("sn")
+    game = {
+        "chat_id": update.effective_chat.id, "message_id": None,
+        "players": [uid], "names": {uid: _name(update.effective_user)},
+        "pos": {uid: 0}, "turn": 0, "started": False, "creator": uid,
+    }
+    SNAKES_GAMES[gid] = game
+    sent = await update.effective_message.reply_text(
+        "🌑 🐍 مار و پله گاتهام — دونفره\n\n"
+        f"👤 بازیکن ۱: {game['names'][uid]}\n"
+        "⏳ منتظر بازیکن دوم...\n\n"
+        f"روی «پیوستن» بزن (تا {SNAKE_JOIN_TIMEOUT_SEC} ثانیه).",
+        reply_markup=_snakes_join_markup(gid),
+    )
+    game["message_id"] = sent.message_id
+    if context.application.job_queue:
+        context.application.job_queue.run_once(
+            _snake_join_timeout_job, when=SNAKE_JOIN_TIMEOUT_SEC, data={"gid": gid}, name=_snake_join_job_name(gid)
+        )
+
+
+async def _snake_join_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    game = SNAKES_GAMES.get(gid)
+    if not game or game["started"]:
+        return
+    del SNAKES_GAMES[gid]
+    await _safe_edit(context.bot, game["chat_id"], game["message_id"],
+                      "⏱️ زمان ورود بازیکن دوم تمام شد.\n🐍 بازی مار و پله لغو شد.")
+
+
+def _schedule_snake_turn_timer(app, gid):
+    _cancel_job(app, _snake_turn_job_name(gid))
+    if app.job_queue:
+        app.job_queue.run_once(
+            _snake_turn_timeout_job, when=SNAKE_TURN_TIMEOUT_SEC, data={"gid": gid}, name=_snake_turn_job_name(gid)
+        )
+
+
+async def _snake_turn_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    gid = context.job.data["gid"]
+    game = SNAKES_GAMES.get(gid)
+    if not game or not game["started"]:
+        return
+    uid = game["players"][game["turn"]]
+    await _snake_do_roll(context.application, context.bot, gid, game, uid, auto=True)
+
+
+async def _snake_do_roll(app, bot, gid, game, uid, auto=False):
+    """منطق مشترک انداختن تاس — هم از دکمه صدا زده می‌شود، هم از Timeout خودکار."""
+    idx = game["players"].index(uid)
+    roll = random.randint(1, 6)
+    old = game["pos"][uid]
+    landing = old + roll if old + roll <= 100 else old
+    prefix = "⏱️ زمان تمام شد — تاس به‌صورت خودکار انداخته شد.\n\n" if auto else ""
+
+    # حرکت مرحله‌به‌مرحله‌ی مهره، خانه به خانه
+    for step in range(1, landing - old + 1):
+        game["pos"][uid] = old + step
+        await _safe_edit(bot, game["chat_id"], game["message_id"],
+                          _snakes_text(game, note=f"{prefix}🎲 {game['names'][uid]} عدد {roll} آورد..." if step == 1 else None))
+        await asyncio.sleep(SNAKE_STEP_DELAY)
+
+    final = LADDERS.get(landing, SNAKES.get(landing, landing))
+    game["pos"][uid] = final
+    if final != landing:
+        slide_note = f"🪜 نردبان گرفت! {landing} → {final}" if final > landing else f"🐍 مار قورتش داد! {landing} → {final}"
+        await _safe_edit(bot, game["chat_id"], game["message_id"], _snakes_text(game, note=slide_note))
+        await asyncio.sleep(SNAKE_STEP_DELAY)
+
+    if final == 100:
+        _cancel_job(app, _snake_turn_job_name(gid))
+        game["started"] = False
+        loser = next((x for x in game["players"] if x != uid), None)
+        if loser:
+            _save_game_record(game["chat_id"], uid, loser)
+        text = (_snakes_text(game) + f"\n\n🏆 برنده: {game['names'][uid]}!\n🐍 مار و پله تمام شد.")
+        await _safe_edit(bot, game["chat_id"], game["message_id"], text, _snakes_end_markup(gid))
+        return
+
+    game["turn"] = (game["turn"] + 1) % len(game["players"])
+    _schedule_snake_turn_timer(app, gid)
+    await _safe_edit(bot, game["chat_id"], game["message_id"],
+                      _snakes_text(game, timer_left=SNAKE_TURN_TIMEOUT_SEC), _snakes_play_markup(gid))
 
 
 async def _snake_callback(update, context):
-    q=update.callback_query; await q.answer(); p=q.data.split(":"); action,gid=p[1],p[2]; game=SNAKES_GAMES.get(gid)
-    if not game: await q.answer("این بازی تمام شده.", show_alert=True); return
-    uid=update.effective_user.id
-    if action=="join":
-        if uid in game["players"] or game["started"] or len(game["players"])>=4: return
-        game["players"].append(uid); game["names"][uid]=_name(update.effective_user); game["pos"][uid]=0; await q.edit_message_text(_snakes_text(game), reply_markup=_snakes_markup(gid,game)); return
-    if action=="start":
-        if uid!=game["players"][0] or len(game["players"])<2: await q.answer("حداقل ۲ نفر لازم است.",show_alert=True); return
-        game["started"]=True; await q.edit_message_text(_snakes_text(game), reply_markup=_snakes_markup(gid,game)); return
-    if action=="cancel":
-        if uid==game["players"][0]: del SNAKES_GAMES[gid]; await q.edit_message_text("🐍 بازی لغو شد."); return
-    if not game["started"] or uid!=game["players"][game["turn"]]: await q.answer("نوبت تو نیست.",show_alert=True); return
-    if action=="roll":
-        roll=random.randint(1,6); old=game["pos"][uid]; new=old+roll
-        if new<=100:
-            new=LADDERS.get(new,SNAKES.get(new,new)); game["pos"][uid]=new
-        if new==100:
-            await q.edit_message_text(f"🐍 مار و پله تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🎲 تاس: {roll}\n📍 {old} → {new}"); del SNAKES_GAMES[gid]; return
-        game["turn"]=(game["turn"]+1)%len(game["players"])
-        await q.edit_message_text(_snakes_text(game)+f"\n\n🎲 {game['names'][uid]} عدد {roll} آورد: {old} → {new}", reply_markup=_snakes_markup(gid,game)); return
-    if action=="leave":
-        if len(game["players"])<=2: del SNAKES_GAMES[gid]; await q.edit_message_text("🐍 بازی پایان یافت."); return
-        game["players"].remove(uid); game["names"].pop(uid,None); game["pos"].pop(uid,None); game["turn"]%=len(game["players"]); await q.edit_message_text(_snakes_text(game), reply_markup=_snakes_markup(gid,game))
+    q = update.callback_query
+    p = q.data.split(":")
+    action, gid = p[1], p[2]
+    game = SNAKES_GAMES.get(gid)
+    uid = update.effective_user.id
+    try:
+        if not game:
+            await q.answer("این بازی دیگر در دسترس نیست.", show_alert=True)
+            return
+
+        if action == "join":
+            if game["started"]:
+                await q.answer("این بازی قبلاً شروع شده.", show_alert=True); return
+            if uid == game["creator"]:
+                await q.answer("نمی‌تونی به بازی خودت بپیوندی؛ منتظر حریف بمان.", show_alert=True); return
+            if uid in game["players"]:
+                await q.answer("قبلاً وارد شدی.", show_alert=True); return
+            game["players"].append(uid); game["names"][uid] = _name(update.effective_user); game["pos"][uid] = 0
+            game["started"] = True
+            _cancel_job(context.application, _snake_join_job_name(gid))
+            _schedule_snake_turn_timer(context.application, gid)
+            await q.answer("وارد بازی شدی! 🎲")
+            await q.edit_message_text(_snakes_text(game, timer_left=SNAKE_TURN_TIMEOUT_SEC), reply_markup=_snakes_play_markup(gid))
+            return
+
+        if action == "cancel":
+            if uid != game["creator"]:
+                await q.answer("فقط سازنده می‌تواند لغو کند.", show_alert=True); return
+            _cancel_job(context.application, _snake_join_job_name(gid))
+            _cancel_job(context.application, _snake_turn_job_name(gid))
+            del SNAKES_GAMES[gid]
+            await q.edit_message_text("🐍 بازی مار و پله لغو شد.")
+            return
+
+        if not game["started"]:
+            await q.answer("بازی هنوز شروع نشده.", show_alert=True); return
+        if uid not in game["players"]:
+            await q.answer("این بازی برای تو نیست.", show_alert=True); return
+
+        if action == "roll":
+            if uid != game["players"][game["turn"]]:
+                await q.answer("نوبت تو نیست.", show_alert=True); return
+            _cancel_job(context.application, _snake_turn_job_name(gid))
+            await q.answer("🎲")
+            await _snake_do_roll(context.application, context.bot, gid, game, uid, auto=False)
+            return
+
+        if action == "leave":
+            _cancel_job(context.application, _snake_turn_job_name(gid))
+            opponent = next((x for x in game["players"] if x != uid), None)
+            game["started"] = False
+            if opponent:
+                text = f"🏳️ {game['names'][uid]} از بازی خارج شد.\n🏆 برنده: {game['names'][opponent]}"
+                _save_game_record(game["chat_id"], opponent, uid)
+            else:
+                text = "🐍 بازی مار و پله پایان یافت."
+            del SNAKES_GAMES[gid]
+            await q.edit_message_text(text)
+            return
+
+        if action == "rematch":
+            if uid not in game["players"]:
+                await q.answer("این بازی برای تو نیست.", show_alert=True); return
+            new_gid = _gid("sn")
+            new_game = {
+                "chat_id": game["chat_id"], "message_id": game["message_id"],
+                "players": list(game["players"]), "names": dict(game["names"]),
+                "pos": {p: 0 for p in game["players"]}, "turn": 0,
+                "started": True, "creator": game["creator"],
+            }
+            SNAKES_GAMES[new_gid] = new_game
+            SNAKES_GAMES.pop(gid, None)
+            _schedule_snake_turn_timer(context.application, new_gid)
+            await q.answer("دور جدید شروع شد!")
+            await q.edit_message_text(_snakes_text(new_game, timer_left=SNAKE_TURN_TIMEOUT_SEC), reply_markup=_snakes_play_markup(new_gid))
+            return
+
+        if action == "home":
+            SNAKES_GAMES.pop(gid, None)
+            await q.edit_message_text("🏠 از بازی مار و پله خارج شدی.")
+            return
+
+        await q.answer()
+    except Exception as e:
+        log.warning(f"snake_callback error: {e}")
+        try:
+            await q.answer("⚠️ یک مشکل موقت پیش آمد، دوباره امتحان کن.", show_alert=True)
+        except Exception:
+            pass
 
 
 # ============================== ROUTER ==============================
