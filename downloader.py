@@ -294,17 +294,41 @@ async def _pinterest_extract(url: str):
     return None
 
 
-async def _download_direct_url(media_url: str, outdir: str, is_video: bool) -> str:
+async def _download_direct_url(media_url: str, outdir: str, is_video: bool, progress_state=None) -> str:
+    """استریم مستقیم روی دیسک (نه تو RAM) — با فایل موقت + rename نهایی، تا اگه
+    دانلود وسط راه قطع شد، یه فایل ناقص هیچ‌وقت به‌عنوان فایل کامل شناخته نشه."""
     ext = ".mp4" if is_video else (os.path.splitext(media_url.split("?")[0])[1] or ".jpg")
     filepath = os.path.join(outdir, f"pin{ext}")
-    async with httpx.AsyncClient() as client:
-        async with client.stream(
-            "GET", media_url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=60
-        ) as resp:
-            resp.raise_for_status()
-            with open(filepath, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
-                    f.write(chunk)
+    tmp_path = filepath + ".part"
+    downloaded = 0
+    try:
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "GET", media_url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=60
+            ) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0) or None
+                if progress_state is not None:
+                    progress_state["status"] = "downloading"
+                    progress_state["total"] = total or 0
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_state is not None:
+                            progress_state["downloaded"] = downloaded
+        if downloaded == 0:
+            raise RuntimeError("empty response body (0 bytes downloaded)")
+        os.replace(tmp_path, filepath)  # rename نهایی فقط بعد از موفقیت کامل
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise
+    if progress_state is not None:
+        progress_state["status"] = "processing"
     return filepath
 
 
@@ -326,10 +350,29 @@ async def downloader_pick_callback(update: Update, context: ContextTypes.DEFAULT
     await q.answer()
 
 
+_FFMPEG_BIN = shutil.which("ffmpeg")
+
+# 🐛 باگ اصلی که پیدا شد: فرمت "best[ext=mp4]/best" فقط دنبال یه فرمت
+# progressive (صدا+تصویر از قبل توی یه فایل) می‌گرده. یوتیوب برای اکثر
+# ویدیوهای بالای ۳۶۰p دیگه همچین فرمتی نداره (صدا و تصویر جدا سرو می‌شن)،
+# پس این selector یا کیفیت خیلی پایین برمی‌گردوند یا اصلاً هیچ فرمتی پیدا
+# نمی‌کرد → دقیقاً همون «یوتیوب اصلاً کار نمی‌کنه». Fix: به yt-dlp اجازه
+# می‌دیم بهترین ویدیو + بهترین صدا رو جدا بگیره و با ffmpeg merge کنه
+# (merge_output_format=mp4)، با چند سطح Fallback تا هیچ‌وقت درخواست فرمتی
+# که اصلاً وجود نداره باعث شکست کامل نشه.
+_YOUTUBE_FORMAT = (
+    "bestvideo[ext=mp4][filesize<{cap}]+bestaudio[ext=m4a]/"
+    "bestvideo+bestaudio/"
+    "best[ext=mp4]/best"
+).format(cap=MAX_TELEGRAM_UPLOAD_BYTES)
+
+_DEFAULT_FORMAT = "best[ext=mp4]/best"
+
+
 def _base_ydl_opts(outdir: str, platform: str) -> dict:
     opts = {
         "outtmpl": os.path.join(outdir, "%(id)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
+        "format": _YOUTUBE_FORMAT if platform == "youtube" else _DEFAULT_FORMAT,
         "quiet": True,
         "no_warnings": True,
         # noplaylist=True یعنی «فقط یه آیتم رو بگیر، نه کل لیست». برای یوتیوب لازمه
@@ -345,6 +388,13 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
         "http_headers": {"User-Agent": USER_AGENT},
         "geo_bypass": True,
     }
+    if platform == "youtube":
+        # وقتی صدا/تصویر جدان، باید merge بشن؛ merge بدون ffmpeg خطای واضح می‌ده
+        # نه فایل خراب (چون بدون این خط، yt-dlp خودش merge رو سایلنت skip می‌کنه
+        # و یه فایل فقط-تصویر یا فقط-صدا می‌مونه که تلگرام یا رد می‌کنه یا صداش قطعه).
+        opts["merge_output_format"] = "mp4"
+        if _FFMPEG_BIN:
+            opts["ffmpeg_location"] = _FFMPEG_BIN
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -402,6 +452,31 @@ def _video_meta(probe):
                     pass
             break
     return duration, width, height
+
+
+def _validate_media_file(filepath: str):
+    """بلاک‌کننده — تو asyncio.to_thread صدا زده بشه.
+
+    آیتم ۵ چک‌لیست: هیچ فایلی نباید بدون اعتبارسنجی به تلگرام فرستاده بشه.
+    بررسی می‌کنه: فایل وجود داره؟ zero-byte نیست؟ (برای ویدیو/صدا) ffprobe
+    stream سالم پیدا می‌کنه؟ خروجی: (ok: bool, دلیل_فارسی_یا_None)."""
+    if not filepath or not os.path.exists(filepath):
+        return False, "فایل خروجی روی دیسک پیدا نشد."
+    size = os.path.getsize(filepath)
+    if size == 0:
+        return False, "فایل خروجی صفر بایت است (دانلود ناقص)."
+    ext = os.path.splitext(filepath)[1].lower()
+    is_av = ext in _VIDEO_EXTS or ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav")
+    if is_av and _FFPROBE_OK:
+        probe = _ffprobe_json(filepath)
+        if probe is None:
+            return False, "container فایل توسط ffprobe قابل‌خواندن نیست."
+        streams = probe.get("streams", [])
+        if not streams:
+            return False, "هیچ stream صوتی/تصویری در فایل پیدا نشد."
+        if ext in _VIDEO_EXTS and not any(s.get("codec_type") == "video" for s in streams):
+            return False, "فایل ویدیویی فاقد stream تصویری است."
+    return True, None
 
 
 def _remux_faststart(filepath: str):
@@ -494,33 +569,61 @@ def _fix_video_for_telegram(filepath: str):
     return filepath, duration, width, height
 
 
-def _yt_dlp_download(url: str, outdir: str, platform: str):
+def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
     """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
 
     برای یوتیوب چند تا player_client رو پشت‌سرهم امتحان می‌کنیم، چون بعضی‌هاشون
     (مثل android/ios) گاهی قفل «Sign in to confirm you're not a bot» رو دور
     می‌زنن حتی بدون کوکی، ولی تضمینی نیست — اگه یوتیوب واقعاً لینک رو قفل کرده
     باشه، تنها راه قطعی فایل کوکیِ یه اکانت لاگین‌شده‌ست (YT_COOKIES_FILE).
+    آخرین تلاش هیچ extractor_args ای نمی‌ذاره (رفتار پیش‌فرض خودِ yt-dlp، که
+    خودش داخلی بین clientها و PO-token هماهنگ می‌کنه) — چون قفل کردن به سه
+    client ثابت باعث می‌شد اگه هر سه با نسخه‌ی نصب‌شده‌ی yt-dlp ناسازگار بودن،
+    دانلود کلاً شکست بخوره بدون این‌که راه‌حل پیش‌فرض/جدیدتر امتحان بشه.
     """
     base = _base_ydl_opts(outdir, platform)
     attempts = [{}]
     if platform == "youtube":
         attempts = [
-            {"extractor_args": {"youtube": {"player_client": ["android"]}}},
+            {"extractor_args": {"youtube": {"player_client": ["android", "web"]}}},
             {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
-            {"extractor_args": {"youtube": {"player_client": ["web"]}}},
+            {},  # پیش‌فرض کامل yt-dlp، بدون هیچ محدودیت client
         ]
     if platform == "soundcloud":
         # ساندکلاود صوتیه؛ فرمت ویدیویی معنی نداره، بهترین فایل صوتی رو می‌گیریم
         base = {**base, "format": "bestaudio/best"}
 
+    def _hook(d):
+        if progress_state is None:
+            return
+        try:
+            if d.get("status") == "downloading":
+                progress_state["status"] = "downloading"
+                progress_state["downloaded"] = d.get("downloaded_bytes") or 0
+                progress_state["total"] = (
+                    d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                )
+                progress_state["speed"] = d.get("speed") or 0
+                progress_state["eta"] = d.get("eta")
+            elif d.get("status") == "finished":
+                progress_state["status"] = "processing"
+        except Exception:
+            pass
+
     last_err = None
     for extra in attempts:
-        opts = {**base, **extra}
+        opts = {**base, **extra, "progress_hooks": [_hook]}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filepath = ydl.prepare_filename(info)
+                # وقتی merge اتفاق افتاده (صدا+تصویر جدا بودن)، پسوند خروجی نهایی
+                # طبق merge_output_format عوض می‌شه؛ prepare_filename گاهی پسوند
+                # منبع رو برمی‌گردونه نه پسوند merge‌شده — این‌جا تصحیحش می‌کنیم.
+                if opts.get("merge_output_format") and not os.path.exists(filepath):
+                    alt = os.path.splitext(filepath)[0] + "." + opts["merge_output_format"]
+                    if os.path.exists(alt):
+                        filepath = alt
             return filepath, info
         except Exception as e:
             last_err = e
@@ -599,7 +702,7 @@ def _classify_download_error(err_text: str):
     return ("❌ خطای نامشخص در دانلود؛ جزئیاتش تو لاگ ربات ثبت شد.", False)
 
 
-async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str):
+async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str, progress_state=None):
     """دور _yt_dlp_download رو با Timeout و Retry-با-Backoff (فقط برای خطاهای
     موقت) می‌پیچه. خطاهای دائمی (Private/Deleted/Invalid/...) بدون تلف‌کردن وقت
     فوراً بالا پرتاب می‌شن."""
@@ -608,7 +711,7 @@ async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str
         attempt += 1
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform),
+                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform, progress_state),
                 timeout=JOB_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
@@ -623,6 +726,56 @@ async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str
                 await asyncio.sleep(delay)
                 continue
             raise
+
+
+# 🩺 رفع باگ «تایمر/حجم روی 00:00 و اطلاعات اشتباه گیر می‌کنه»: قبلاً پیام
+# وضعیت فقط یه‌بار قبل از دانلود ست می‌شد و تا پایان کار دیگه هیچ‌وقت آپدیت
+# نمی‌شد — یعنی در طول کل دانلود (که ممکنه چند ده ثانیه طول بکشه) کاربر همون
+# پیام اولیه‌ی ثابت رو می‌دید. این تابع هر ۱.۵ ثانیه (نه هر chunk — طبق قانون
+# ضدکندی/race condition) پیام رو با درصد/حجم/سرعت/ETA واقعیِ progress_state
+# (که از progress_hooks یوتیوب/ساندکلاود یا از _download_direct_url پینترست پر
+# می‌شه) آپدیت می‌کنه. تا وقتی metadata واقعی نیومده، صریحاً «در حال دریافت
+# اطلاعات...» نشون می‌ده — هیچ‌وقت 00:00 یا حجم جعلی نمی‌سازه.
+async def _progress_ticker(status_msg, progress_state: dict, header: str, stop_event: asyncio.Event):
+    last_text = None
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=1.5)
+            break  # stop_event ست شد
+        except asyncio.TimeoutError:
+            pass  # وقت tick رسید، ادامه بده و یه‌بار دیگه آپدیت کن
+
+        status = progress_state.get("status")
+        lines = [header]
+        if status == "downloading" and progress_state.get("total"):
+            downloaded = progress_state.get("downloaded", 0)
+            total = progress_state["total"]
+            pct = min(100, downloaded / total * 100) if total else 0
+            lines.append("⬇️ در حال دانلود...")
+            lines.append(f"📦 حجم: {_human_size(downloaded)} / {_human_size(total)}")
+            lines.append(f"📊 پیشرفت: {pct:.0f}%")
+            speed = progress_state.get("speed")
+            if speed:
+                lines.append(f"⚡ سرعت: {_human_size(speed)}/s")
+            eta = progress_state.get("eta")
+            if eta is not None:
+                m, s = divmod(int(eta), 60)
+                lines.append(f"⏱ زمان باقی‌مانده: {m:02d}:{s:02d}")
+        elif status == "downloading":
+            lines.append("⬇️ در حال دانلود...")
+            lines.append("📦 در حال دریافت اطلاعات حجم...")
+        elif status == "processing":
+            lines.append("⚙️ در حال پردازش نهایی فایل...")
+        else:
+            lines.append("⏳ در حال دریافت اطلاعات...")
+
+        text = "\n".join(lines)
+        if text != last_text:
+            try:
+                await status_msg.edit_text(text)
+                last_text = text
+            except Exception:
+                pass  # (مثلاً "message not modified") — بی‌اهمیت، tick بعدی درستش می‌کنه
 
 
 async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -729,44 +882,120 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                 log.info(f"[dl:{job_id}] pinterest direct extract error: {e}")
                 media = None
             if media:
+                # 🐛 باگ پیدا‌شده: این مسیر (روش مستقیم Pinterest) فایل رو مستقیم
+                # می‌فرستاد بدون هیچ progress، بدون ffprobe validation و بدون
+                # remux/faststart fix — دقیقاً همون مسیری که کاربر می‌گفت
+                # «Preview سیاه می‌شه / تایمر 00:00 می‌مونه». الان همون validation
+                # + fix + progress واقعی که برای مسیر yt-dlp هست، این‌جا هم اجرا می‌شه.
+                progress_state = {"status": "downloading", "total": 0, "downloaded": 0}
+                stop_event = asyncio.Event()
+                ticker = asyncio.create_task(
+                    _progress_ticker(status, progress_state, "📌 Pinterest", stop_event)
+                )
                 try:
-                    filepath = await _download_direct_url(media["url"], tmpdir, media["is_video"])
-                    caption = media.get("title") or None
-                    with open(filepath, "rb") as f:
-                        if media["is_video"]:
-                            await msg.reply_video(f, caption=caption, supports_streaming=True)
-                        else:
-                            await msg.reply_photo(f, caption=caption)
-                    _log_job(job_id, platform=platform, url=url, stage="sent",
-                              output_path=filepath, file_size=os.path.getsize(filepath))
+                    filepath = await _download_direct_url(
+                        media["url"], tmpdir, media["is_video"], progress_state
+                    )
+                except Exception as e:
+                    stop_event.set()
                     try:
-                        await status.delete()
+                        await ticker
                     except Exception:
                         pass
-                    return
-                except Exception as e:
-                    log.info(f"[dl:{job_id}] pinterest direct download/send failed, falling back to yt-dlp: {e}")
-                    # می‌افته پایین، سراغ yt-dlp
+                    log.info(f"[dl:{job_id}] pinterest direct download failed, falling back to yt-dlp: {e}")
+                    filepath = None
+                else:
+                    stop_event.set()
+                    try:
+                        await ticker
+                    except Exception:
+                        pass
+
+                if filepath:
+                    caption = media.get("title") or None
+                    send_path = filepath
+                    v_duration = v_width = v_height = None
+                    if media["is_video"]:
+                        try:
+                            send_path, v_duration, v_width, v_height = await asyncio.to_thread(
+                                _fix_video_for_telegram, filepath
+                            )
+                        except Exception as e:
+                            log.warning(f"[dl:{job_id}] pinterest video fixup failed: {e}")
+                            send_path = filepath
+                    ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+                    if not ok:
+                        log.error(f"[dl:{job_id}] pinterest output failed validation: {reason} path={send_path!r}")
+                        await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی خراب بود ({reason})")
+                        return
+                    try:
+                        with open(send_path, "rb") as f:
+                            if media["is_video"]:
+                                await msg.reply_video(
+                                    f, caption=caption, supports_streaming=True,
+                                    duration=int(v_duration) if v_duration else None,
+                                    width=v_width or None, height=v_height or None,
+                                )
+                            else:
+                                await msg.reply_photo(f, caption=caption)
+                        _log_job(job_id, platform=platform, url=url, stage="sent",
+                                  output_path=send_path, file_size=os.path.getsize(send_path))
+                        try:
+                            await status.delete()
+                        except Exception:
+                            pass
+                        return
+                    except Exception as e:
+                        log.warning(f"[dl:{job_id}] pinterest send failed: {e}")
+                        await status.edit_text(
+                            "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
+                        )
+                        return
             if yt_dlp is None:
                 await status.edit_text(
                     "❌ دانلود انجام نشد\nعلت: دانلود مستقیم از پینترست شکست خورد و yt-dlp هم نصب نیست تا Fallback بشه."
                 )
                 return
 
+        header = {
+            "youtube": "▶️ YouTube", "instagram": "📸 Instagram", "pinterest": "📌 Pinterest",
+            "tiktok": "🎵 TikTok", "twitter": "🐦 X/Twitter", "soundcloud": "🎧 SoundCloud",
+        }.get(platform, PLATFORM_LABELS.get(platform, ""))
+        progress_state = {"status": "downloading", "total": 0, "downloaded": 0}
+        stop_event = asyncio.Event()
+        ticker = asyncio.create_task(_progress_ticker(status, progress_state, header, stop_event))
+
         start_ts = time.monotonic()
         try:
-            filepath, info = await _download_with_retry(url, tmpdir, platform, job_id)
+            filepath, info = await _download_with_retry(url, tmpdir, platform, job_id, progress_state)
         except asyncio.TimeoutError:
             log.warning(f"[dl:{job_id}] timeout platform={platform} url={url} user_id={uid} "
                         f"after={time.monotonic() - start_ts:.1f}s")
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
             await status.edit_text("❌ دانلود انجام نشد\nعلت: ⏱ زمان دانلود تمام شد.")
             return
         except Exception as e:
             # Traceback کامل فقط تو Log — هرگز به کاربر نشون داده نمی‌شه.
             log.exception(f"[dl:{job_id}] download failed platform={platform} url={url} user_id={uid}")
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
             reason, _ = _classify_download_error(str(e))
             await status.edit_text(f"❌ دانلود انجام نشد\nعلت: {reason}")
             return
+        finally:
+            stop_event.set()
+
+        try:
+            await ticker
+        except Exception:
+            pass
 
         download_duration = time.monotonic() - start_ts
 
@@ -795,18 +1024,37 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
 
             if len(media_files) > 1:
                 _log_job(job_id, platform=platform, url=url, stage="carousel", count=len(media_files))
-                await status.edit_text(f"📦 {len(media_files)} فایل پیدا شد\n⚡ در حال ارسال...")
+                await status.edit_text(f"📦 {len(media_files)} فایل پیدا شد\n⚡ در حال پردازش و ارسال...")
                 group = []
                 opened = []
                 try:
                     for epath in media_files[:10]:  # سقف Media Group تلگرام = ۱۰
                         eext = os.path.splitext(epath)[1].lower()
-                        f = open(epath, "rb")
+                        send_epath = epath
+                        # 🐛 همون باگ «صفحه سیاه» تو مسیر Carousel هم وجود داشت:
+                        # این‌جا هم قبلاً هیچ remux/faststart fix و هیچ validation
+                        # اجرا نمی‌شد، برخلاف مسیر تک‌فایل زیر که داشت. الان یکسان شد.
+                        if eext in _VIDEO_EXTS:
+                            try:
+                                send_epath, _, _, _ = await asyncio.to_thread(_fix_video_for_telegram, epath)
+                            except Exception as e:
+                                log.warning(f"[dl:{job_id}] carousel entry fixup failed: {e}")
+                                send_epath = epath
+                        ok, reason = await asyncio.to_thread(_validate_media_file, send_epath)
+                        if not ok:
+                            log.warning(f"[dl:{job_id}] carousel entry skipped, invalid: {reason} path={send_epath!r}")
+                            continue  # آیتم خراب رد می‌شه، بقیه‌ی گالری ارسال می‌شه
+                        f = open(send_epath, "rb")
                         opened.append(f)
                         if eext in (".jpg", ".jpeg", ".png", ".webp"):
                             group.append(InputMediaPhoto(f))
                         else:
                             group.append(InputMediaVideo(f, supports_streaming=True))
+                    if not group:
+                        await status.edit_text(
+                            "❌ ارسال انجام نشد\nعلت: 🩹 هیچ‌کدام از فایل‌های این پست معتبر/سالم نبودند."
+                        )
+                        return
                     await msg.reply_media_group(media=group)
                     _log_job(job_id, platform=platform, url=url, stage="sent",
                               count=len(group), download_duration=round(download_duration, 1))
@@ -878,6 +1126,14 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 log.warning(f"[dl:{job_id}] video fixup failed, sending raw file: {e}")
                 send_path = filepath
+
+        # ✅ آیتم ۵ چک‌لیست: قبل از ارسال، فایل نهایی حتماً اعتبارسنجی می‌شه —
+        # نه zero-byte، نه container خراب، نه فقط‌صدا/فقط‌تصویر ناقص.
+        ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+        if not ok:
+            log.error(f"[dl:{job_id}] final output failed validation: {reason} path={send_path!r}")
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی سالم نبود ({reason})")
+            return
         try:
             with open(send_path, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
