@@ -707,6 +707,7 @@ def _track_group_chat(chat_id, title, chat_type):
 
 USERS_PER_PAGE = 10
 GROUPS_PER_PAGE = 10
+PHONES_PER_PAGE = 10
 
 
 def _get_users_page(offset, limit):
@@ -748,6 +749,26 @@ def _count_real_groups():
     n = c.fetchone()["n"]
     conn.close()
     return n
+
+
+def _get_phones_page(offset, limit):
+    """شماره‌های واقعی از جدول verified_users، به‌همراه Username/First Name از
+    bot_starters (LEFT JOIN — اگه کاربر تو bot_starters نبود، همچنان شماره‌ش
+    نمایش داده می‌شه، فقط بدون یوزرنیم/نام). صفحه‌بندی با LIMIT/OFFSET واقعی
+    دیتابیس، نه بارگذاری همه‌ی ردیف‌ها تو RAM."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        SELECT v.user_id, v.phone_number, v.verified_at,
+               b.username, b.first_name
+        FROM verified_users v
+        LEFT JOIN bot_starters b ON b.user_id = v.user_id
+        ORDER BY v.verified_at DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 
 def _set_phone_verified(user_id, phone_number):
@@ -2453,6 +2474,105 @@ async def list_pagination_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
 
+# =========================================================
+#  🦇 GOTHAM CONTROL PANEL — پنل خصوصی Owner (شماره‌ها/کاربران/گروه‌ها)
+# =========================================================
+# فقط تو پیوی و فقط برای OWNER_ID فعاله. شماره‌ی تلفن هیچ‌جای دیگه‌ای (گروه،
+# لاگ، پیام کاربر عادی) چاپ نمی‌شه — طبق همون قانونی که _set_phone_verified
+# رعایتش می‌کنه، این پنل هم تنها مصرف‌کننده‌ی phone_number از دیتابیسه.
+
+OWNER_PANEL_TEXT = (
+    "🦇 *GOTHAM CONTROL PANEL*\n\n"
+    "یکی از بخش‌ها رو انتخاب کن:"
+)
+
+
+def build_owner_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 تمام شماره‌ها", callback_data="ownerinfo:phones:0")],
+        [InlineKeyboardButton("👥 تمام کسانی که Start کردند", callback_data="ulist:0")],
+        [InlineKeyboardButton("🏠 تمام گروه‌ها و کانال‌هایی که ربات توشه", callback_data="glist:0")],
+    ])
+
+
+def _build_phones_list_page(page: int):
+    """صفحه‌ی شماره‌ها؛ مستقیم از verified_users خونده می‌شه، فقط همون تعداد
+    ردیف لازم برای این صفحه (LIMIT/OFFSET)، نه کل جدول تو RAM."""
+    total = _count_phone_verified()
+    total_pages = max(1, (total + PHONES_PER_PAGE - 1) // PHONES_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    rows = _get_phones_page(page * PHONES_PER_PAGE, PHONES_PER_PAGE)
+
+    lines = [f"📱 *شماره‌های ثبت‌شده*\n\n🔢 مجموع: {total}\n"]
+    start_num = page * PHONES_PER_PAGE + 1
+    if rows:
+        for i, r in enumerate(rows):
+            name = r["first_name"] or "بی‌نام"
+            uname = f"@{r['username']}" if r["username"] else "بدون یوزرنیم"
+            verified_dt = (
+                datetime.fromtimestamp(r["verified_at"]).strftime("%Y-%m-%d %H:%M")
+                if r["verified_at"] else "-"
+            )
+            lines.append(
+                f"{start_num + i}️⃣ {name} ({uname})\n"
+                f"🆔 `{r['user_id']}`\n"
+                f"📱 {r['phone_number'] or '-'}\n"
+                f"🕒 تایید: {verified_dt}\n"
+            )
+    else:
+        lines.append("(هیچ شماره‌ای هنوز ثبت نشده)")
+
+    text = "\n".join(lines)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"ownerinfo:phones:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 صفحه {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"ownerinfo:phones:{page + 1}"))
+
+    kb = InlineKeyboardMarkup([nav_row, [InlineKeyboardButton("🔙 بازگشت", callback_data="ownerinfo:panel")]])
+    return text, kb
+
+
+async def owner_control_panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """با فرستادن «شماره» یا «لیست کامل» تو پیوی، فقط برای Owner. چک Owner
+    اینجا هم انجام می‌شه (علاوه بر جایی که این تابع صدا زده می‌شه) تا این
+    Entry Point به‌تنهایی هم امن باشه."""
+    if not _is_owner(update):
+        return
+    await update.message.reply_text(
+        OWNER_PANEL_TEXT, reply_markup=build_owner_panel_keyboard(), parse_mode="Markdown"
+    )
+
+
+async def owner_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback Handler اختصاصی پنل Owner. Permission Check دوباره اینجا هم
+    انجام می‌شه — حتی اگه یه Non-owner دستی callback_data بسازه و بفرسته
+    (مثلاً ownerinfo:phones:0)، چون چک روی نمایش پنل به‌تنهایی کافی نیست."""
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("🔒 این بخش فقط برای Owner فعاله.", show_alert=True)
+        return
+    data = query.data
+
+    if data == "ownerinfo:panel":
+        await query.answer()
+        await query.edit_message_text(
+            OWNER_PANEL_TEXT, reply_markup=build_owner_panel_keyboard(), parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("ownerinfo:phones:"):
+        page = int(data.split(":")[2])
+        text, kb = await db_run(_build_phones_list_page, page)
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    await query.answer()
+
+
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """اعلامیه‌ی GCPD — فقط اونر می‌تونه به همه‌ی گروه‌ها پیام بفرسته. /broadcast <متن>"""
     if not _is_owner(update):
@@ -2948,6 +3068,9 @@ _FOREIGN_CALLBACK_PREFIXES = (
     # 🎬 تشخیص رسانه (media_recognition.py) — همون کلاس باگ؛ دکمه‌های "تشخیص
     # فیلم/سریال" و "تشخیص آهنگ" هم قبلاً تو این لیست نبودن.
     "mr:",
+    # 🦇 پنل کنترل Owner (شماره‌ها/کاربران/گروه‌ها) — هندلر مخصوص خودش
+    # (owner_control_callback) با pattern جدا ثبت می‌شه؛ دفاع دوم اینجا.
+    "ownerinfo:",
 )
 
 
@@ -3843,6 +3966,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     player = collect_points(player)
     player = update_activity(player)
 
+    # --- کلیدواژه "شماره"/"لیست کامل" برای پنل خصوصی Owner (فقط پیوی) ---
+    # عمداً فقط برای Owner واکنش نشون می‌ده و برای بقیه بی‌صدا رد می‌شه (نه پیام
+    # خطا، نه هیچ نشونه‌ای)؛ این‌جوری وجود این پنل برای کاربرای عادی لو نمی‌ره.
+    if update.effective_chat.type == ChatType.PRIVATE and stripped in ("شماره", "لیست کامل") and _is_owner(update):
+        await owner_control_panel_cmd(update, context)
+        await db_run(_save_player, player)
+        return
+
     # --- کلیدواژه "تنظیمات"/"پنل" برای باز کردن پنل تنظیمات، حتی بدون منشن ---
     if stripped in ("تنظیمات", "پنل"):
         await update.message.reply_text(
@@ -4410,6 +4541,7 @@ def main():
     app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
     app.add_handler(CallbackQueryHandler(checkjoin_callback, pattern=r"^checkjoin$"))
     app.add_handler(CallbackQueryHandler(list_pagination_callback, pattern=r"^(ulist:|glist:|noop)"))
+    app.add_handler(CallbackQueryHandler(owner_control_callback, pattern=r"^ownerinfo:"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
