@@ -4085,41 +4085,6 @@ async def handle_photo_sticker(update: Update, context: ContextTypes.DEFAULT_TYP
 # =========================================================
 #  کپچای اعضای جدید (ضد ربات/اسپم‌بات)
 # =========================================================
-#
-# 🐞 رفع باگ (Leave/Rejoin استیت قدیمی):
-# قبلاً _captcha_timeout_watch تصمیم «کیک کنم یا نه» رو فقط از روی وضعیت
-# زنده‌ی پرمیشن تلگرام (member.permissions.can_send_messages) می‌گرفت، نه از
-# روی اینکه خودِ همون چالش کپچا هنوز معتبره یا نه. سناریوی باگ:
-#   ۱) کاربر Join می‌کنه → میوت می‌شه → یه Watch Task با تایم‌اوت خودش ساخته می‌شه.
-#   ۲) کاربر بدون تایید کپچا Leave می‌کنه؛ اون Watch Task هنوز تو asyncio.sleep
-#      خوابیده و زنده‌ست (هیچ‌جا Cancel نمی‌شه).
-#   ۳) کاربر زود Rejoin می‌کنه → یه بار دیگه میوت می‌شه (رفتار درست و لازم،
-#      برای امنیت باید کپچای جدید رو حل کنه) → یه Watch Task دوم با پیام و
-#      تایمر جدید ساخته می‌شه.
-#   ۴) Watch Task اول (مال Join قبلی) طبق تایمر خودش بیدار می‌شه؛ چون کاربر
-#      الان عضوه (نه left/kicked) و طبق میوتِ Rejoin دومی هنوز
-#      can_send_messages=False هست، شرط قدیمی True می‌شه و Task اول کاربر رو
-#      اشتباهی Ban+Unban (کیک) می‌کنه — درحالی‌که کپچای واقعی (Rejoin دوم)
-#      هنوز تو پنجره‌ی زمانی خودش بوده و کاربر داشته درست عمل می‌کرده.
-#   نتیجه: کاربر از گروه پرت می‌شه و طبیعتاً هیچ پیامی (نه لینک اینستاگرام،
-#   نه هیچ پیام دیگه‌ای) دیگه ازش پردازش نمی‌شه — چون اصلاً دیگه عضو نیست.
-#   این مشکل کاملاً مستقل از Anti-Link/Filter کلماته: اون سیستم‌ها حتی یه‌بار
-#   اجرا نمی‌شن، چون پیام هیچ‌وقت به handle_message نمی‌رسه (کاربر کیک شده).
-#
-# راه‌حل: هر چالش کپچا (هر Join/Rejoin) یه توکن نسل (generation token) یکتا
-# می‌گیره. Watch Task هر چالش، قبل از هر اقدامی چک می‌کنه که آیا توکنِ خودش
-# هنوز همون توکنِ «فعال» برای اون (chat_id, user_id) هست یا نه:
-#   - اگه کاربر تایید کرده باشه → توکن پاک شده → Watch Task قدیمی هیچ کاری
-#     نمی‌کنه (silently return).
-#   - اگه یه Rejoin جدیدتر اتفاق افتاده باشه → توکن با یکی جدید عوض شده →
-#     Watch Task قدیمی می‌فهمه دیگه صاحب‌اختیار نیست و هیچ کاری نمی‌کنه؛
-#     Watch Task جدید (مال همون Rejoin) خودش مسئول تایم‌اوت/کیک اون چالشه.
-# این‌جوری رفتار امنیتی فعلی (اگه واقعاً کپچا حل نشه، بعد از تایم‌اوت کیک
-# می‌شه) دقیقاً حفظ می‌مونه؛ فقط دیگه یه Watch Task قدیمی و بی‌ربط نمی‌تونه
-# یه چالش جدید و معتبر رو خراب کنه. هیچ Bypass امنیتی‌ای هم ایجاد نمی‌شه:
-# کیک واقعی (تایم‌اوت راستین) دقیقاً مثل قبل انجام می‌شه.
-CAPTCHA_PENDING = {}  # (chat_id, user_id) -> generation token فعلیِ چالش کپچای در جریان
-
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -4149,6 +4114,17 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             continue
 
+        # 🔁 کاربری که قبلاً همین‌جا کپچا رو پاس کرده (مثلاً Leave و دوباره Join
+        # کرده) نباید هر بار دوباره میوت و مجبور به تاییدِ مجدد بشه. این چک از
+        # روی group_lists (لیست "captcha_ok"، پایدار تو دیتابیس، برخلاف
+        # وضعیت محدودیتِ خودِ تلگرام که با Leave پاک می‌شه) انجام می‌شه — وگرنه
+        # State قدیمی (میوت‌شدن) دوباره روی کاربر verified اعمال می‌شه و همه‌ی
+        # پیام‌های بعدیش (مثلاً لینک دانلودر) رو تا قبل از تاییدِ دوباره بلاک
+        # می‌کنه، چون تلگرام اصلاً پیام کاربر میوت‌شده رو به ربات نمی‌رسونه.
+        already_verified = _list_get_one(chat_id, "captcha_ok", member.id)
+        if already_verified:
+            continue
+
         try:
             await context.bot.restrict_chat_member(
                 chat_id, member.id,
@@ -4166,24 +4142,11 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f" ثابت کن یکی از دلقک‌های جوکر نیستی.",
             reply_markup=keyboard,
         )
-        # هر Join/Rejoin یه چالش کپچای مستقل و یه توکن نسل یکتا می‌گیره (به
-        # جزئیات علت تو کامنت بالای بخش کپچا نگاه کن) — این‌جوری یه Watch Task
-        # قدیمی از یه Join قبلی نمی‌تونه چالشِ Rejoin فعلی رو خراب کنه.
-        gen = time.monotonic_ns()
-        CAPTCHA_PENDING[(chat_id, member.id)] = gen
-        asyncio.create_task(
-            _captcha_timeout_watch(chat_id, member.id, sent.message_id, context.bot, gen)
-        )
+        asyncio.create_task(_captcha_timeout_watch(chat_id, member.id, sent.message_id, context.bot))
 
 
-async def _captcha_timeout_watch(chat_id, user_id, message_id, bot, gen):
+async def _captcha_timeout_watch(chat_id, user_id, message_id, bot):
     await asyncio.sleep(CAPTCHA_TIMEOUT_SECONDS)
-    # اگه توکن نسل این Watch دیگه توکنِ فعالِ (chat_id, user_id) نیست، یعنی یا
-    # کاربر همین چالش رو تایید کرده (توکن پاک شده)، یا یه Rejoin جدیدتر یه
-    # چالش/توکن تازه ساخته — تو هر دو حالت این Watch قدیمی دیگه صاحب‌اختیار
-    # نیست و نباید هیچ کاری (خصوصاً کیک کردن) انجام بده.
-    if CAPTCHA_PENDING.get((chat_id, user_id)) != gen:
-        return
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         if member.status not in ("left", "kicked") and member.permissions and not member.permissions.can_send_messages:
@@ -4195,12 +4158,6 @@ async def _captcha_timeout_watch(chat_id, user_id, message_id, bot, gen):
             )
     except Exception:
         pass
-    finally:
-        # این چالش (چه با کیک، چه چون کاربر رفته بود) نهایی شد؛ فقط توکن خودِ
-        # همین Watch رو پاک کن — اگه یه Rejoin جدیدتر همین‌الان توکن رو عوض
-        # کرده باشه (race)، اون رو دست‌نخورده نگه دار.
-        if CAPTCHA_PENDING.get((chat_id, user_id)) == gen:
-            del CAPTCHA_PENDING[(chat_id, user_id)]
 
 
 async def captcha_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4224,11 +4181,10 @@ async def captcha_verify_callback(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         await query.answer(f"مشکلی پیش اومد: {e}", show_alert=True)
         return
-    # تایید موفق شد؛ توکن نسلِ کپچای در جریان این کاربر رو پاک کن تا هر
-    # Watch Task تایم‌اوتی (چه مال همین چالش، چه یه Watch قدیمی و بی‌ربط از
-    # یه Join قبلی) وقتی بیدار شد ببینه دیگه صاحب‌اختیار نیست و کاربرِ تازه‌
-    # تاییدشده رو اشتباهی کیک نکنه.
-    CAPTCHA_PENDING.pop((chat_id, target_id), None)
+    # ثبت پایدار تایید کپچا تو همین گروه؛ این‌جوری اگه کاربر بعداً Leave/Rejoin
+    # کنه، handle_new_member دیگه دوباره میوتش نمی‌کنه (رفع باگ گیر کردن
+    # Downloader/هر قابلیت متنی دیگه بعد از Rejoin).
+    _list_add(chat_id, "captcha_ok", target_id, "1")
     await query.edit_message_text(f"✅ {query.from_user.first_name} تایید شد، خوش اومدی!")
     await query.answer()
 
