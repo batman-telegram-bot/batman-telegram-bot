@@ -64,6 +64,20 @@ PLATFORM_DOMAINS = {
     "soundcloud": ("soundcloud.com", "snd.sc"),
 }
 
+def _detect_platform_from_url(url: str):
+    """اگه کاربر بدون انتخاب پلتفرم (بدون زدن «دانلودر» و بدون کلیک دکمه) مستقیم
+    یه لینک پشتیبانی‌شده بفرسته، از روی دامنه‌ش پلتفرم رو خودکار تشخیص بده.
+    این دقیقاً همون چیزیه که تو Group لازمه: کاربر لینک می‌فرسته، ربات خودش
+    Platform رو تشخیص می‌ده و بدون نیاز به مرحله‌ی انتخاب منو دانلود می‌کنه.
+    اگه دامنه به هیچ پلتفرمی نخوره، None برمی‌گرده (پیام بی‌سروصدا به بقیه‌ی
+    هندلرها سپرده می‌شه، همون رفتار قبلی برای لینک‌های غیرمرتبط)."""
+    u = url.lower()
+    for platform, domains in PLATFORM_DOMAINS.items():
+        if any(d in u for d in domains):
+            return platform
+    return None
+
+
 # فایل کوکی اختیاری برای هر پلتفرم — بعضی لینک‌های یوتیوب/اینستاگرام پشت قفل
 # ضد-ربات‌ان («Sign in to confirm you're not a bot» / «empty media response»)
 # و بدون کوکیِ یه اکانت لاگین‌شده اصلاً قابل دانلود نیستن؛ این یه محدودیت سمت
@@ -499,18 +513,28 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
     if not match:
         return  # این پیام لینک نیست، به بقیه‌ی هندلرها بسپار
 
-    if uid not in PENDING_DL:
-        return  # کسی پلتفرم انتخاب نکرده، این لینک مال دانلودر نیست
-
-    platform = PENDING_DL.pop(uid)
     url = match.group(0)
 
-    allowed_domains = PLATFORM_DOMAINS[platform]
-    if not any(d in url.lower() for d in allowed_domains):
-        await msg.reply_text(
-            f"⚠️ این لینک برای {PLATFORM_LABELS[platform]} نیست. دوباره «دانلودر» رو بزن و پلتفرم درست رو انتخاب کن."
-        )
-        return
+    # 🔧 رفع باگ Downloader داخل Group/Private: قبلاً این هندلر فقط وقتی کار
+    # می‌کرد که کاربر اول «دانلودر» رو می‌زد و از منو پلتفرم رو دستی انتخاب
+    # می‌کرد (PENDING_DL). اگه کاربر مستقیم لینک می‌فرستاد (دقیقاً کاری که تو
+    # گروه انجام می‌شه)، uid تو PENDING_DL نبود و کل پیام بی‌صدا نادیده گرفته
+    # می‌شد — چه تو گروه، چه تو پیوی. حالا اگه پلتفرم از قبل انتخاب نشده باشه،
+    # از روی خودِ دامنه‌ی لینک تشخیص داده می‌شه تا نیازی به مرحله‌ی انتخاب منو
+    # نباشه؛ اگه از قبل انتخاب شده باشه (PENDING_DL)، همون رفتار قبلی (با چک
+    # تطبیق دامنه) دست‌نخورده می‌مونه.
+    if uid in PENDING_DL:
+        platform = PENDING_DL.pop(uid)
+        allowed_domains = PLATFORM_DOMAINS[platform]
+        if not any(d in url.lower() for d in allowed_domains):
+            await msg.reply_text(
+                f"⚠️ این لینک برای {PLATFORM_LABELS[platform]} نیست. دوباره «دانلودر» رو بزن و پلتفرم درست رو انتخاب کن."
+            )
+            return
+    else:
+        platform = _detect_platform_from_url(url)
+        if platform is None:
+            return  # لینک به هیچ‌کدوم از پلتفرم‌های پشتیبانی‌شده نمی‌خوره؛ به بقیه‌ی هندلرها سپرده می‌شه
 
     # برای پینترست به yt-dlp نیازی نیست (روش مستقیم پایین‌تر کارو انجام می‌ده)،
     # فقط برای یوتیوب/اینستاگرام (و fallback خود پینترست) لازمه.

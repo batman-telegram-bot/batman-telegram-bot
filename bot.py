@@ -2482,17 +2482,128 @@ async def list_pagination_callback(update: Update, context: ContextTypes.DEFAULT
 # رعایتش می‌کنه، این پنل هم تنها مصرف‌کننده‌ی phone_number از دیتابیسه.
 
 OWNER_PANEL_TEXT = (
-    "🦇 *GOTHAM CONTROL PANEL*\n\n"
+    "🦇 *GOTHAM OWNER PANEL*\n\n"
+    "📱 شماره‌ها\n"
+    "👥 اعضای Start کرده\n"
+    "🏠 گروه‌ها و کانال‌ها\n\n"
     "یکی از بخش‌ها رو انتخاب کن:"
 )
 
 
 def build_owner_panel_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 تمام شماره‌ها", callback_data="ownerinfo:phones:0")],
-        [InlineKeyboardButton("👥 تمام کسانی که Start کردند", callback_data="ulist:0")],
-        [InlineKeyboardButton("🏠 تمام گروه‌ها و کانال‌هایی که ربات توشه", callback_data="glist:0")],
+        [InlineKeyboardButton("📱 شماره‌ها", callback_data="ownerinfo:phones:0")],
+        [InlineKeyboardButton("👥 اعضای Start کرده", callback_data="ownerinfo:users:0")],
+        [InlineKeyboardButton("🏠 گروه‌ها و کانال‌ها", callback_data="ownerinfo:chats:0")],
     ])
+
+
+def _count_chats_by_type():
+    """آمار واقعی گروه/سوپرگروه/کانال از جدول chats (chat_id<0)، برای هدر
+    صفحه‌ی «گروه‌ها و کانال‌ها» تو پنل Owner."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT chat_type, COUNT(*) as n FROM chats WHERE chat_id < 0 GROUP BY chat_type")
+    rows = c.fetchall()
+    conn.close()
+    stats = {"group": 0, "supergroup": 0, "channel": 0}
+    total = 0
+    for r in rows:
+        n = r["n"]
+        total += n
+        t = (r["chat_type"] or "").lower()
+        if t in stats:
+            stats[t] += n
+    stats["total"] = total
+    return stats
+
+
+def _build_ownerinfo_users_page(page: int):
+    """صفحه‌ی «اعضای Start کرده» — از جدول bot_starters (LIMIT/OFFSET واقعی)،
+    شامل همه‌ی کسانی که حداقل یک‌بار /start زدن، چه شماره‌شون تایید شده باشه
+    چه نه؛ هر کاربر چون user_id کلید اصلیه، دوباره شمرده نمی‌شه."""
+    total = _count_bot_starters()
+    total_pages = max(1, (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    rows = _get_users_page(page * USERS_PER_PAGE, USERS_PER_PAGE)
+
+    lines = [f"👥 *اعضای Start کرده*\n\n🔢 مجموع: {total}\n"]
+    start_num = page * USERS_PER_PAGE + 1
+    if rows:
+        for i, r in enumerate(rows):
+            name = r["first_name"] or "بی‌نام"
+            uname = f"@{r['username']}" if r["username"] else "بدون یوزرنیم"
+            dt = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d %H:%M") if r["started_at"] else "-"
+            lines.append(
+                f"{start_num + i}️⃣ {name}\n"
+                f"🆔 `{r['user_id']}`\n"
+                f"🔗 {uname}\n"
+                f"🕐 {dt}\n"
+            )
+    else:
+        lines.append("(هنوز کسی ربات رو استارت نکرده)")
+
+    text = "\n".join(lines)
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"ownerinfo:users:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 صفحه {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"ownerinfo:users:{page + 1}"))
+
+    kb = InlineKeyboardMarkup([nav_row, [InlineKeyboardButton("🔙 بازگشت", callback_data="ownerinfo:back")]])
+    return text, kb
+
+
+def _build_ownerinfo_chats_page(page: int):
+    """صفحه‌ی «گروه‌ها و کانال‌ها» — از جدول chats (فقط chat_id<0، LIMIT/OFFSET
+    واقعی)، به‌همراه آمار تفکیکی گروه/سوپرگروه/کانال/مجموع."""
+    stats = _count_chats_by_type()
+    total = stats["total"]
+    total_pages = max(1, (total + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    rows = _get_groups_page(page * GROUPS_PER_PAGE, GROUPS_PER_PAGE)
+
+    lines = [
+        "🏠 *گروه‌ها و کانال‌ها*\n",
+        f"👥 Groups: {stats['group']}",
+        f"🏙️ Supergroups: {stats['supergroup']}",
+        f"📢 Channels: {stats['channel']}",
+        f"📊 Total: {total}\n",
+    ]
+    start_num = page * GROUPS_PER_PAGE + 1
+    if rows:
+        for i, r in enumerate(rows):
+            title = r["title"] or "(بدون عنوان)"
+            ctype = r["chat_type"] or "-"
+            first_seen = (
+                datetime.fromtimestamp(r["first_seen_ts"]).strftime("%Y-%m-%d %H:%M")
+                if r["first_seen_ts"] else "-"
+            )
+            last_seen = (
+                datetime.fromtimestamp(r["last_seen_ts"]).strftime("%Y-%m-%d %H:%M")
+                if r["last_seen_ts"] else "-"
+            )
+            lines.append(
+                f"{start_num + i}️⃣ 🏠 {title}\n"
+                f"🆔 `{r['chat_id']}`\n"
+                f"📌 {ctype}\n"
+                f"🕐 اولین بار: {first_seen}\n"
+                f"🕐 آخرین فعالیت: {last_seen}\n"
+            )
+    else:
+        lines.append("(هیچ گروه/کانالی ثبت نشده)")
+
+    text = "\n".join(lines)
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"ownerinfo:chats:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 صفحه {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"ownerinfo:chats:{page + 1}"))
+
+    kb = InlineKeyboardMarkup([nav_row, [InlineKeyboardButton("🔙 بازگشت", callback_data="ownerinfo:back")]])
+    return text, kb
 
 
 def _build_phones_list_page(page: int):
@@ -2531,7 +2642,7 @@ def _build_phones_list_page(page: int):
     if page < total_pages - 1:
         nav_row.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"ownerinfo:phones:{page + 1}"))
 
-    kb = InlineKeyboardMarkup([nav_row, [InlineKeyboardButton("🔙 بازگشت", callback_data="ownerinfo:panel")]])
+    kb = InlineKeyboardMarkup([nav_row, [InlineKeyboardButton("🔙 بازگشت", callback_data="ownerinfo:back")]])
     return text, kb
 
 
@@ -2556,7 +2667,7 @@ async def owner_control_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     data = query.data
 
-    if data == "ownerinfo:panel":
+    if data in ("ownerinfo:panel", "ownerinfo:main", "ownerinfo:back"):
         await query.answer()
         await query.edit_message_text(
             OWNER_PANEL_TEXT, reply_markup=build_owner_panel_keyboard(), parse_mode="Markdown"
@@ -2566,6 +2677,20 @@ async def owner_control_callback(update: Update, context: ContextTypes.DEFAULT_T
     if data.startswith("ownerinfo:phones:"):
         page = int(data.split(":")[2])
         text, kb = await db_run(_build_phones_list_page, page)
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("ownerinfo:users:"):
+        page = int(data.split(":")[2])
+        text, kb = await db_run(_build_ownerinfo_users_page, page)
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("ownerinfo:chats:"):
+        page = int(data.split(":")[2])
+        text, kb = await db_run(_build_ownerinfo_chats_page, page)
         await query.answer()
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
         return
@@ -3969,7 +4094,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- کلیدواژه "شماره"/"لیست کامل" برای پنل خصوصی Owner (فقط پیوی) ---
     # عمداً فقط برای Owner واکنش نشون می‌ده و برای بقیه بی‌صدا رد می‌شه (نه پیام
     # خطا، نه هیچ نشونه‌ای)؛ این‌جوری وجود این پنل برای کاربرای عادی لو نمی‌ره.
-    if update.effective_chat.type == ChatType.PRIVATE and stripped in ("شماره", "لیست کامل") and _is_owner(update):
+    if update.effective_chat.type == ChatType.PRIVATE and stripped in ("شماره", "لیست کامل", "لیست") and _is_owner(update):
         await owner_control_panel_cmd(update, context)
         await db_run(_save_player, player)
         return
