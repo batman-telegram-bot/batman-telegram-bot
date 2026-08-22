@@ -731,7 +731,7 @@ def _reencode_video(filepath: str, expected_duration=None):
     return None
 
 
-def _make_thumbnail(filepath: str, duration=None):
+def _make_thumbnail(filepath: str, duration=None, job_id: str = None):
     """بلاک‌کننده‌ست — تو asyncio.to_thread صدا زده بشه.
 
     🚨 رفع باگ آیتم ۵۲ چک‌لیست («صفحه سیاه» در همه‌ی پلتفرم‌ها، مخصوصاً
@@ -745,24 +745,85 @@ def _make_thumbnail(filepath: str, duration=None):
     این تابع دقیقاً طبق پایپ‌لاین چک‌لیست (FINAL FILE → FFPROBE PASS →
     EXTRACT FRAME → THUMBNAIL) فقط از فایلِ نهاییِ VALIDATED یه فریم از وسط
     ویدیو می‌گیره (نه فریم اول که ممکنه مشکی/فید‌این باشه، نه از فایل موقت).
-    اگه شکست بخوره None برمی‌گردونه — نباید خودِ ویدیو رو خراب کنه."""
+    اگه شکست بخوره None برمی‌گردونه — نباید خودِ ویدیو رو خراب کنه.
+
+    🔴 بعد از گزارش «Duration/پخش سالمه ولی پیش‌نمایش مشکیه» (یعنی فایل خودش
+    سالمه، فقط این مرحله مشکوکه)، دو تا نقطه‌ضعف احتمالی رفع شد:
+      ۱. `-ss` قبل از `-i` روی بعضی فایل‌ها (مخصوصاً remux‌شده با keyframe کم یا
+         intra-refresh) می‌تونه دقیقاً رو یه فریم غیرکامل/گذار (نه یه keyframe
+         واقعی) بشینه و یه عکس مشکی/خاکستریِ تقریباً تک‌رنگ بده — بدون این‌که
+         ffmpeg exit code غیرصفر بده (یعنی از دید کد قبلی «موفق» بود ولی
+         عملاً تصویر بی‌ارزش بود). حالا اگه فایل خروجی مشکوک کوچیکه (کمتر از
+         ۱۵۰۰ بایت — نشونه‌ی قوی یه JPEG تقریباً تک‌رنگ/خالی)، به‌جای قبول
+         کردنش، یه‌بار دیگه از ثانیه‌ی ۱ (که معمولاً فریم واقعی و decode‌شده‌ست)
+         با seek دقیق‌تر (بعد از -i) امتحان می‌شه.
+      ۲. `-pix_fmt yuvj420p` صریح اضافه شد تا انکودر MJPEG/image2 (خروجی .jpg)
+         روی فایل‌هایی با pixel format نامتعارف (مثلاً yuv420p10le یا profile
+         عجیب بعد از remux) به‌جای warning/تبدیل ضمنی مشکوک، صریحاً رنج رنگ
+         درست رو بگیره.
+    هر دو تلاش (و نتیجه‌ی نهایی: مسیر/حجم فایل موفق، یا None) صریح لاگ می‌شه
+    تا تو تلاش بعدی از روی لاگ واقعی مشخص باشه کدوم مسیر اجرا شده، نه حدس."""
     if not _FFMPEG_OK:
+        log.info(f"[dl:{job_id}] thumbnail: ffmpeg not available, skipped")
         return None
     out_path = filepath + "_thumb.jpg"
-    seek = 1.0
+    prefix = f"[dl:{job_id}] " if job_id else ""
+
+    def _try_extract(seek_s: float, fast_seek: bool) -> bool:
+        """یه تلاش فریم‌گیری. fast_seek=True یعنی -ss قبل از -i (سریع ولی گاهی
+        نادقیق روی keyframe)؛ fast_seek=False یعنی -ss بعد از -i (کندتر ولی
+        دقیقاً همون فریمِ decode‌شده رو می‌ده — برای Fallback مطمئن‌تره)."""
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+        cmd = ["ffmpeg", "-y"]
+        if fast_seek:
+            cmd += ["-ss", f"{seek_s:.2f}", "-i", filepath]
+        else:
+            cmd += ["-i", filepath, "-ss", f"{seek_s:.2f}"]
+        cmd += ["-frames:v", "1", "-vf", "scale=320:-2", "-pix_fmt", "yuvj420p", out_path]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            _log_ffmpeg_failure("thumbnail", filepath, exc=e, timeout=30)
+            return False
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            _log_ffmpeg_failure("thumbnail", filepath, proc=proc, timeout=30)
+            return False
+        size = os.path.getsize(out_path)
+        # فایل خیلی کوچیک (< 1500 بایت) برای یه JPEG واقعیِ 320px عملاً یعنی
+        # تصویر تقریباً تک‌رنگ/خالی (مشکی محض بیشتر از این فشرده می‌شه) —
+        # به‌عنوان شکست حساب می‌شه تا Fallback بعدی امتحان بشه.
+        if size < 1500:
+            log.info(f"{prefix}thumbnail: extracted frame suspiciously tiny "
+                      f"(size={size}B, seek={seek_s:.2f}, fast_seek={fast_seek}) -> treating as failed")
+            return False
+        log.info(f"{prefix}thumbnail: extracted OK (path={out_path!r} size={size}B "
+                  f"seek={seek_s:.2f} fast_seek={fast_seek})")
+        return True
+
+    mid_seek = 1.0
     if duration and duration > 4:
-        seek = min(duration / 2.0, duration - 1)
-    try:
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-ss", f"{seek:.2f}", "-i", filepath,
-             "-frames:v", "1", "-vf", "scale=320:-2", out_path],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            return out_path
-        _log_ffmpeg_failure("thumbnail", filepath, proc=proc, timeout=30)
-    except Exception as e:
-        _log_ffmpeg_failure("thumbnail", filepath, exc=e, timeout=30)
+        mid_seek = min(duration / 2.0, duration - 1)
+
+    # تلاش ۱: fast-seek از وسط ویدیو (رفتار قبلی)
+    if _try_extract(mid_seek, fast_seek=True):
+        return out_path
+
+    # تلاش ۲: seek دقیق (بعد از -i) از همون نقطه — کندتره ولی روی keyframeهای
+    # کم/intra-refresh معمولاً درست‌کار می‌کنه.
+    if _try_extract(mid_seek, fast_seek=False):
+        return out_path
+
+    # تلاش ۳: ثانیه‌ی ۱ با seek دقیق — برای ویدیوهای خیلی کوتاه یا فایل‌های
+    # عجیب که حتی seek دقیق روی نقطه‌ی وسط هم جواب نداد.
+    if mid_seek != 1.0 and _try_extract(1.0, fast_seek=False):
+        return out_path
+
+    log.warning(f"{prefix}thumbnail: all extraction attempts failed for {filepath!r} "
+                f"(duration={duration}); sending without explicit thumbnail")
     if os.path.exists(out_path):
         try:
             os.remove(out_path)
@@ -1224,13 +1285,15 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                     v_thumb = None
                     if media["is_video"]:
                         try:
-                            v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration)
+                            v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration, job_id)
                         except Exception as e:
                             log.info(f"[dl:{job_id}] pinterest thumbnail step failed: {e}")
                     thumb_f = None
                     try:
                         if v_thumb and os.path.exists(v_thumb):
                             thumb_f = open(v_thumb, "rb")
+                        log.info(f"[dl:{job_id}] pinterest send: thumbnail_attached={thumb_f is not None} "
+                                  f"v_thumb_path={v_thumb!r}")
                         with open(send_path, "rb") as f:
                             if media["is_video"]:
                                 await msg.reply_video(
@@ -1361,7 +1424,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         e_thumb = None
                         if eext in _VIDEO_EXTS:
                             try:
-                                e_thumb = await asyncio.to_thread(_make_thumbnail, send_epath)
+                                e_thumb = await asyncio.to_thread(_make_thumbnail, send_epath, None, job_id)
                             except Exception as e:
                                 log.info(f"[dl:{job_id}] carousel thumbnail step failed: {e}")
                         f = open(send_epath, "rb")
@@ -1373,6 +1436,8 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                             if e_thumb and os.path.exists(e_thumb):
                                 thumb_f = open(e_thumb, "rb")
                                 opened.append(thumb_f)
+                            log.info(f"[dl:{job_id}] carousel entry thumbnail_attached={thumb_f is not None} "
+                                      f"e_thumb_path={e_thumb!r}")
                             group.append(InputMediaVideo(f, supports_streaming=True, thumbnail=thumb_f))
                     if not group:
                         await status.edit_text(
@@ -1466,7 +1531,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         v_thumb = None
         if ext in _VIDEO_EXTS and platform != "soundcloud":
             try:
-                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration)
+                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration, job_id)
             except Exception as e:
                 log.info(f"[dl:{job_id}] thumbnail step failed: {e}")
 
@@ -1474,6 +1539,9 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         try:
             if v_thumb and os.path.exists(v_thumb):
                 thumb_f = open(v_thumb, "rb")
+            if ext in _VIDEO_EXTS and platform != "soundcloud":
+                log.info(f"[dl:{job_id}] main send: thumbnail_attached={thumb_f is not None} "
+                          f"v_thumb_path={v_thumb!r}")
             with open(send_path, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
                     await msg.reply_photo(f, caption=caption or None)
