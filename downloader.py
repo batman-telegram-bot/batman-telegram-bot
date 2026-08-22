@@ -139,7 +139,14 @@ URL_RE = re.compile(r"https?://\S+")
 #     داده می‌شه؛ برای چک زودهنگام حجم (قبل از شروع دانلود واقعی) هم استفاده می‌شه.
 #   - NETWORK_RETRY_DELAYS: فقط برای خطاهای واقعاً موقت (شبکه/Timeout/۵xx) Retry
 #     با Backoff انجام می‌شه؛ خطاهای دائمی (Private/Deleted/Invalid) هرگز Retry نمی‌شن.
-JOB_TIMEOUT_SEC = 240
+# 🚨 رفع باگ «ویدیوهای طولانی/حجیم سیاه و 00:00 می‌شوند»: قبلاً این عدد ثابت
+# ۲۴۰ ثانیه بود که برای فایل‌های حجیم (چند صدمگابایتی/چندگیگابایتی) روی شبکه‌ی
+# متوسط به‌راحتی کم میاد؛ وقتی دانلود واقعی هنوز تموم نشده و Timeout می‌خوره،
+# Job لغو می‌شه ولی Thread پس‌زمینه (yt-dlp) هنوز داره می‌نویسه — دقیقاً منشأ
+# فایل‌های ناقص/نیمه‌نوشته که بعداً (تو تلاش بعدی یا از قبل موجود در دیسک)
+# باعث duration=00:00 و Preview سیاه می‌شن. عدد رو بزرگ‌تر کردیم (نه بی‌نهایت)
+# تا فایل‌های حجیم/طولانی هم فرصت کامل‌شدن داشته باشن.
+JOB_TIMEOUT_SEC = 600
 MAX_TELEGRAM_UPLOAD_BYTES = 49 * 1024 * 1024
 NETWORK_RETRY_DELAYS = (2, 5)
 
@@ -454,48 +461,197 @@ def _video_meta(probe):
     return duration, width, height
 
 
+def _probe_diagnostics(filepath: str, probe=None) -> dict:
+    """طبق چک‌لیست (آیتم ۴۵): برای هر مرحله از Pipeline خلاصه‌ی کامل تشخیصی
+    می‌سازه — file size, duration, width, height, video codec, audio codec,
+    container, pixel format, stream count, و این‌که ffprobe اصلاً موفق بود یا نه.
+    این تابع فقط dict رو می‌سازه (بدون خودِ ffprobe زدن، مگر probe داده نشده
+    باشه) تا بشه یه probe رو هم برای duration/width/height و هم برای لاگ
+    استفاده کرد — بدون این‌که برای هر مرحله دوبار ffprobe صدا زده بشه."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = None
+    if probe is None:
+        probe = _ffprobe_json(filepath)
+    diag = {
+        "file": os.path.basename(filepath), "size": size,
+        "ffprobe_ok": probe is not None,
+        "duration": None, "width": None, "height": None,
+        "container": None, "vcodec": None, "acodec": None,
+        "pix_fmt": None, "stream_count": None, "has_audio": None,
+    }
+    if probe is None:
+        return diag
+    fmt = probe.get("format") or {}
+    diag["container"] = fmt.get("format_name")
+    try:
+        diag["duration"] = float(fmt["duration"]) if fmt.get("duration") else None
+    except (TypeError, ValueError):
+        pass
+    streams = probe.get("streams", []) or []
+    diag["stream_count"] = len(streams)
+    diag["has_audio"] = any(s.get("codec_type") == "audio" for s in streams)
+    for s in streams:
+        if s.get("codec_type") == "video" and diag["vcodec"] is None:
+            diag["vcodec"] = s.get("codec_name")
+            diag["pix_fmt"] = s.get("pix_fmt")
+            diag["width"], diag["height"] = s.get("width"), s.get("height")
+            if not diag["duration"] and s.get("duration"):
+                try:
+                    diag["duration"] = float(s["duration"])
+                except (TypeError, ValueError):
+                    pass
+        elif s.get("codec_type") == "audio" and diag["acodec"] is None:
+            diag["acodec"] = s.get("codec_name")
+    return diag
+
+
+def _log_stage(stage: str, filepath: str, job_id: str = None):
+    """بلاک‌کننده — تو asyncio.to_thread صدا زده بشه (از داخل توابع بلاک‌کننده‌ی
+    دیگه صدا زده می‌شه، خودش asyncio نمی‌شناسه).
+
+    پیاده‌سازی مستقیم درخواست Audit: قبل/بعد هر مرحله‌ی Pipeline
+    (RAW DOWNLOAD → REMUX → RE-ENCODE → FINAL) دقیقاً همون فیلدهایی که خواسته
+    شده (file size, duration, width, height, video codec, audio codec,
+    container, pixel format, stream count, ffprobe exit/readability) رو لاگ
+    می‌کنه — تا اگه باگ دوباره رخ داد، از روی لاگ Job دقیقاً مشخص باشه کدوم
+    مرحله مقصره، نه حدس زدن.
+    خروجی: (diag_dict, raw_probe_dict_یا_None) — probe خام هم برمی‌گرده تا
+    فراخوان مجبور نباشه دوباره ffprobe بزنه."""
+    probe = _ffprobe_json(filepath)
+    diag = _probe_diagnostics(filepath, probe)
+    prefix = f"[dl:{job_id}] " if job_id else ""
+    log.info(f"{prefix}STAGE={stage} {diag}")
+    return diag, probe
+
+
 def _validate_media_file(filepath: str):
     """بلاک‌کننده — تو asyncio.to_thread صدا زده بشه.
 
-    آیتم ۵ چک‌لیست: هیچ فایلی نباید بدون اعتبارسنجی به تلگرام فرستاده بشه.
-    بررسی می‌کنه: فایل وجود داره؟ zero-byte نیست؟ (برای ویدیو/صدا) ffprobe
-    stream سالم پیدا می‌کنه؟ خروجی: (ok: bool, دلیل_فارسی_یا_None)."""
+    🔴 این تابع تنها Gate واقعی قبل از ارسال به تلگرامه (نه thumbnail، نه
+    هیچ‌چیز دیگه). طبق چک‌لیست آیتم‌های ۷ تا ۱۰:
+        - فایل باید وجود داشته باشه و zero-byte نباشه.
+        - ffprobe باید container رو با موفقیت بخونه.
+        - برای ویدیو: حتماً یه video stream با codec مشخص، width/height
+          معتبر (>0)، و duration > 0 داشته باشه — دقیقاً همون سه چیزی که
+          نبودشون باعث «۰۰:۰۰ / صفحه سیاه» می‌شه.
+        - اگه audio stream هم وجود داره، باید codec آن مشخص/سالم باشه
+          (stream صوتی با codec نامشخص یعنی merge/demux ناقص بوده).
+    اگه هرکدوم fail بشه، فایل INVALID اعلام می‌شه — و هیچ‌جای این ماژول
+    اجازه نداره به‌جای فایل رد‌شده، فایل خامِ اصلاح‌نشده رو «سالم» فرض کنه؛
+    قبلاً duration=None از این گیت رد می‌شد چون فقط readability چک می‌شد،
+    نه خودِ duration/ابعاد — این دقیقاً همون سوراخی بود که فایل خراب از توش
+    به تلگرام می‌رفت.
+    خروجی: (ok: bool, دلیل_فارسی_یا_None)"""
     if not filepath or not os.path.exists(filepath):
         return False, "فایل خروجی روی دیسک پیدا نشد."
     size = os.path.getsize(filepath)
     if size == 0:
         return False, "فایل خروجی صفر بایت است (دانلود ناقص)."
+
     ext = os.path.splitext(filepath)[1].lower()
-    is_av = ext in _VIDEO_EXTS or ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav")
-    if is_av and _FFPROBE_OK:
-        probe = _ffprobe_json(filepath)
-        if probe is None:
-            return False, "container فایل توسط ffprobe قابل‌خواندن نیست."
-        streams = probe.get("streams", [])
-        if not streams:
-            return False, "هیچ stream صوتی/تصویری در فایل پیدا نشد."
-        if ext in _VIDEO_EXTS and not any(s.get("codec_type") == "video" for s in streams):
+    is_video = ext in _VIDEO_EXTS
+    is_audio_only = ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav")
+    if not (is_video or is_audio_only):
+        return True, None  # عکس و مشابه — نیاز به ffprobe نداره
+
+    if not _FFPROBE_OK:
+        # بدون ffprobe نصب‌شده نمی‌شه duration/stream رو تضمین کرد. این حالت
+        # از قبل تو لاگِ startup هشدار داده شده (ffmpeg/ffprobe پیدا نشد)؛
+        # این‌جا فقط اجازه می‌دیم رد بشه تا کل دانلودر بی‌دلیل از کار نیفته —
+        # ولی این یعنی محافظت در برابر باگ ۰۰:۰۰ عملاً غیرفعاله.
+        log.warning(f"validate: ffprobe not installed, skipping strict checks for {filepath!r}")
+        return True, None
+
+    probe = _ffprobe_json(filepath)
+    if probe is None:
+        return False, "container فایل توسط ffprobe قابل‌خواندن نیست."
+    streams = probe.get("streams", []) or []
+    if not streams:
+        return False, "هیچ stream صوتی/تصویری در فایل پیدا نشد."
+
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+
+    if is_video:
+        if not video_streams:
             return False, "فایل ویدیویی فاقد stream تصویری است."
+        vs = video_streams[0]
+        if not vs.get("codec_name"):
+            return False, "codec ویدیو نامشخص/خراب است."
+        width, height = vs.get("width"), vs.get("height")
+        if not width or not height or width <= 0 or height <= 0:
+            return False, "ابعاد ویدیو (width/height) نامعتبر است."
+        duration, _, _ = _video_meta(probe)
+        if not duration or duration <= 0:
+            return False, "duration ویدیو صفر/نامعتبر است (همون باگ ۰۰:۰۰)."
+        for a in audio_streams:
+            if not a.get("codec_name"):
+                return False, "stream صوتی موجود ولی codec آن خراب/نامشخص است."
+    else:  # صوتی محض (ساندکلاود و مشابه)
+        if not audio_streams:
+            return False, "فایل صوتی فاقد stream صوتی سالم است."
+        if not audio_streams[0].get("codec_name"):
+            return False, "codec صوتی نامشخص/خراب است."
+
     return True, None
+
+
+def _log_ffmpeg_failure(op: str, filepath: str, proc=None, exc=None, timeout=None):
+    """چک‌لیست آیتم ۴۷: هر شکست FFmpeg باید با exit code/stderr واقعی لاگ بشه،
+    نه سایلنت. قبلاً وقتی FFmpeg با returncode != 0 (نه Exception) شکست
+    می‌خورد، هیچ لاگی ثبت نمی‌شد و علت شکست غیرقابل‌ردیابی بود — دقیقاً همون
+    چیزی که برای ریشه‌یابی باگ ۰۰:۰۰/سیاه لازمه."""
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = "N/A"
+    if exc is not None:
+        log.warning(f"{op} EXCEPTION file={filepath!r} size={size} timeout={timeout} err={exc}")
+    elif proc is not None:
+        log.warning(
+            f"{op} FAILED file={filepath!r} size={size} timeout={timeout} "
+            f"rc={proc.returncode} stderr_tail={(proc.stderr or '')[-800:]!r}"
+        )
 
 
 def _remux_faststart(filepath: str):
     """بلاک‌کننده‌ست. Remux سریع (بدون Re-encode، فقط -c copy) با +faststart تا
     moov atom بیاد اول فایل و duration/metadata درست تشخیص داده بشه. اگه موفق
-    نشد None برمی‌گردونه (نه Exception) تا فراخوان بره سراغ Re-encode."""
+    نشد None برمی‌گردونه (نه Exception) تا فراخوان بره سراغ Re-encode.
+
+    🚨 رفع باگ ویدیوهای «طولانی/حجیم»: قبلاً Timeout این مرحله ثابت روی ۱۲۰
+    ثانیه بود. Remux با -c copy تقریباً کاملاً I/O-bound‌ه (فقط بایت‌ها رو
+    کپی می‌کنه، نه Re-encode)، پس زمان لازمش با حجم فایل رشد می‌کنه — روی
+    دیسک/شبکه‌ی کند یه فایل چندصدمگابایتی/چندگیگابایتی به‌راحتی از ۱۲۰ ثانیه
+    بیشتر طول می‌کشه. وقتی Timeout می‌خورد، فراخوان (بی‌خبر از علت واقعی) به
+    فایل خام (با moov atom خراب) سقوط می‌کرد — دقیقاً همون Root Cause ۰۰:۰۰/
+    سیاه برای فایل‌های حجیم. حالا Timeout متناسب با حجم فایل محاسبه می‌شه."""
     if not _FFMPEG_OK:
         return None
     base, _ = os.path.splitext(filepath)
     out_path = base + "_fx.mp4"
     try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        size = 0
+    # حداقل ۱۸۰ ثانیه، به‌علاوه‌ی زمان کپی با فرض حداقل ۲ مگابایت/ثانیه throughput
+    # دیسک (خیلی محافظه‌کارانه برای هاست‌های کم‌منبع)، با سقف بالا برای جلوگیری
+    # از Job که هیچ‌وقت تموم نشه.
+    timeout = min(1800, max(180, int(size / (2 * 1024 * 1024))))
+    try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-i", filepath, "-c", "copy", "-movflags", "+faststart", out_path],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
+        _log_ffmpeg_failure("faststart-remux", filepath, proc=proc, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        _log_ffmpeg_failure("faststart-remux", filepath, exc=e, timeout=timeout)
     except Exception as e:
-        log.info(f"faststart remux failed for {filepath}: {e}")
+        _log_ffmpeg_failure("faststart-remux", filepath, exc=e, timeout=timeout)
     if os.path.exists(out_path):
         try:
             os.remove(out_path)
@@ -504,69 +660,175 @@ def _remux_faststart(filepath: str):
     return None
 
 
-def _reencode_video(filepath: str):
+def _reencode_video(filepath: str, expected_duration=None):
     """بلاک‌کننده‌ست. فقط وقتی صدا زده می‌شه که remux ساده کافی نبوده (نادر —
     مثلاً استریم‌های ناجور/خراب منبع). کیفیت رو تا حد امکان حفظ می‌کنه
-    (CRF ثابت به‌جای بیت‌ریت پایین‌ی ثابت) تا حجم و کیفیت بی‌دلیل بد نشه."""
+    (CRF ثابت به‌جای بیت‌ریت پایین‌ی ثابت) تا حجم و کیفیت بی‌دلیل بد نشه.
+
+    🚨 رفع باگ ویدیوهای «طولانی»: Re-encode برخلاف Remux به‌شدت CPU-bound‌ه.
+    Timeout ثابت قبلی (۳۰۰ ثانیه) برای یه ویدیوی طولانی (مثلاً ۲۰-۳۰ دقیقه‌ای)
+    روی CPU مشترک/ضعیفِ هاست (حالت رایج Railway/سرورهای کوچیک) به‌راحتی کافی
+    نیست، حتی با preset=veryfast. وقتی Timeout می‌خورد، خروجی duration=None
+    برمی‌گشت و همون فایل خام (بدون fix) با ۰۰:۰۰ به تلگرام می‌رفت. حالا
+    Timeout بر اساس مدت‌زمان واقعی ویدیو (اگه از ffprobe موجود باشه) محاسبه
+    می‌شه، با ضریب امنیت بالا برای CPUهای ضعیف."""
     if not _FFMPEG_OK:
         return None
     base, _ = os.path.splitext(filepath)
     out_path = base + "_enc.mp4"
+    if expected_duration and expected_duration > 0:
+        # فرض بدبینانه: حتی با veryfast ممکنه رمزگذاری تا ۶ برابر کندتر از
+        # real-time روی CPU ضعیف/مشترک طول بکشه.
+        timeout = min(3600, max(300, int(expected_duration * 6)))
+    else:
+        timeout = 300
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-i", filepath,
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
              "-c:a", "aac", "-b:a", "128k",
              "-movflags", "+faststart", out_path],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
+        _log_ffmpeg_failure("re-encode", filepath, proc=proc, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        _log_ffmpeg_failure("re-encode", filepath, exc=e, timeout=timeout)
     except Exception as e:
-        log.info(f"re-encode fallback failed for {filepath}: {e}")
+        _log_ffmpeg_failure("re-encode", filepath, exc=e, timeout=timeout)
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
     return None
 
 
-def _fix_video_for_telegram(filepath: str):
+def _make_thumbnail(filepath: str, duration=None):
+    """بلاک‌کننده‌ست — تو asyncio.to_thread صدا زده بشه.
+
+    🚨 رفع باگ آیتم ۵۲ چک‌لیست («صفحه سیاه» در همه‌ی پلتفرم‌ها، مخصوصاً
+    فایل‌های حجیم/طولانی): قبلاً این ربات هیچ‌وقت thumbnail صریح به تلگرام
+    نمی‌داد — پارامتر thumbnail هیچ‌جا ست نمی‌شد. برای فایل‌های کوچیک تلگرام
+    خودش سریع کل فایل رو می‌گیره و thumbnail می‌سازه، ولی برای فایل‌های
+    حجیم/طولانی، سرور تلگرام preview رو قبل از این‌که کل فایل از سمت ربات
+    Upload بشه (یا قبل از این‌که کلاینت کاربر کامل دانلودش کنه) نشون می‌ده —
+    و چون thumbnail صریحی نداشت، دقیقاً همون Preview سیاه رخ می‌داد.
+
+    این تابع دقیقاً طبق پایپ‌لاین چک‌لیست (FINAL FILE → FFPROBE PASS →
+    EXTRACT FRAME → THUMBNAIL) فقط از فایلِ نهاییِ VALIDATED یه فریم از وسط
+    ویدیو می‌گیره (نه فریم اول که ممکنه مشکی/فید‌این باشه، نه از فایل موقت).
+    اگه شکست بخوره None برمی‌گردونه — نباید خودِ ویدیو رو خراب کنه."""
+    if not _FFMPEG_OK:
+        return None
+    out_path = filepath + "_thumb.jpg"
+    seek = 1.0
+    if duration and duration > 4:
+        seek = min(duration / 2.0, duration - 1)
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{seek:.2f}", "-i", filepath,
+             "-frames:v", "1", "-vf", "scale=320:-2", out_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+        _log_ffmpeg_failure("thumbnail", filepath, proc=proc, timeout=30)
+    except Exception as e:
+        _log_ffmpeg_failure("thumbnail", filepath, exc=e, timeout=30)
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+    return None
+
+
+def _fix_video_for_telegram(filepath: str, job_id: str = None):
     """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
 
-    مشکل: بعضی ویدیوهای دانلودی (مخصوصاً از اینستاگرام، ویدیوهای نسبتاً طولانی)
-    moov atom‌شون آخر فایل‌ه یا duration/metadata‌شون کامل نیست؛ تلگرام قبل از
+    مشکل: بعضی ویدیوهای دانلودی (مخصوصاً ویدیوهای نسبتاً طولانی/حجیم) moov
+    atom‌شون آخر فایل‌ه یا duration/metadata‌شون کامل نیست؛ تلگرام قبل از
     کامل شدن دانلودِ کاربر، پلیر رو با 00:00 و صفحه‌ی سیاه نشون می‌ده.
 
-    راه‌حل: اول یه Remux سریع و بدون افت کیفیت (-c copy) با +faststart امتحان
-    می‌کنیم (تقریباً رایگان از نظر CPU). فقط اگه بعد از remux هم duration درست
-    تشخیص داده نشد (یعنی خودِ remux کافی نبود)، می‌ریم سراغ Re-encode واقعی —
-    نه به‌صورت پیش‌فرض برای همه‌ی ویدیوها.
+    🔴 تغییر مهم بعد از Audit: قبلاً موفقیت remux/re-encode فقط با «آیا
+    duration خونده شد؟» (`if d2: ...`) سنجیده می‌شد — که سطحی بود و ممکن بود
+    فایلی با duration درست ولی width/height=0 یا audio stream خراب رو
+    «موفق» حساب کنه. حالا هر خروجی (raw/remux/reencode) با همون Gate
+    سخت‌گیرانه‌ای که قبل از Upload هم اجرا می‌شه (`_validate_media_file`)
+    سنجیده می‌شه — یعنی معیار «فایل خوبه یا نه» دقیقاً یکیه، نه دو تا معیار
+    جدا که ممکنه با هم فرق کنن.
+
+    راه‌حل: اول خودِ فایل خام رو با Gate چک می‌کنیم (بعضی وقتا از اول سالمه
+    و اصلاً نیازی به remux نیست). اگه رد شد، Remux سریع (-c copy) با
+    +faststart امتحان می‌کنیم. اگه خروجی remux هم رد شد، Re-encode واقعی رو
+    امتحان می‌کنیم. هر مرحله با file size/duration/width/height/codecs/
+    container/pixel format/stream count لاگ می‌شه (چک‌لیست آیتم ۴۵).
+
+    اگه هیچ‌کدوم جواب نداد، همون فایل خام (نامعتبر) برگردونده می‌شه — ولی
+    این‌جا آخرش نیست: فراخوان دوباره همین Gate رو صدا می‌زنه و اگه رد بشه،
+    فایل خام هرگز به‌عنوان «سالم» به تلگرام فرستاده نمی‌شه، طبق قانون صریح
+    «اگر FFmpeg fail شد، فایل خام به‌عنوان فایل سالم ارسال نشود».
+
+    توجه: این تابع دیگه thumbnail نمی‌سازه — طبق ترتیب صحیح Pipeline
+    (FIX → FINAL FILE → FFPROBE/VALIDATE → THUMBNAIL → UPLOAD)، ساخت
+    thumbnail باید فقط بعد از اینکه فراخوان با _validate_media_file فایل
+    نهایی رو Pass کرد انجام بشه، نه قبلش.
 
     خروجی: (مسیر_نهایی_فایل, duration_یا_None, width_یا_None, height_یا_None)
     """
-    probe = _ffprobe_json(filepath)
-    duration, width, height = _video_meta(probe)
+    diag, probe = _log_stage("raw-download", filepath, job_id)
+    duration, width, height = diag["duration"], diag["width"], diag["height"]
 
     if probe is None:
-        # فایل با ffprobe اصلاً قابل‌خوندن نبود (یا ffprobe نصب نیست) — همون فایل
-        # خام رو برمی‌گردونیم؛ بهتره تلگرام خودش امتحان کنه تا اصلاً نفرستیم.
+        log.warning(f"[dl:{job_id}] ffprobe نتونست فایل خام رو اصلاً بخونه: {filepath!r}")
         return filepath, None, None, None
 
+    final_path = filepath
+    final_duration, final_width, final_height = duration, width, height
+
+    raw_ok, raw_reason = _validate_media_file(filepath)
+    if raw_ok:
+        log.info(f"[dl:{job_id}] فایل خام از قبل Gate رو Pass کرد — نیازی به remux/reencode نیست")
+        return final_path, final_duration, final_width, final_height
+
+    log.info(f"[dl:{job_id}] فایل خام Gate رو رد شد ({raw_reason}) -> تلاش برای remux")
     remuxed = _remux_faststart(filepath)
     if remuxed:
-        d2, w2, h2 = _video_meta(_ffprobe_json(remuxed))
-        if d2:
-            return remuxed, d2, w2, h2
-        try:
-            os.remove(remuxed)
-        except Exception:
-            pass
+        rdiag, _ = _log_stage("after-remux", remuxed, job_id)
+        ok, reason = _validate_media_file(remuxed)
+        if ok:
+            final_path = remuxed
+            final_duration, final_width, final_height = rdiag["duration"], rdiag["width"], rdiag["height"]
+        else:
+            log.info(f"[dl:{job_id}] خروجی remux هم Gate رو رد شد ({reason}) -> تلاش برای re-encode")
+            try:
+                os.remove(remuxed)
+            except Exception:
+                pass
 
-    reencoded = _reencode_video(filepath)
-    if reencoded:
-        d3, w3, h3 = _video_meta(_ffprobe_json(reencoded))
-        return reencoded, d3, w3, h3
+    if final_path == filepath:  # یعنی remux کافی نبود یا انجام نشد
+        reencoded = _reencode_video(filepath, expected_duration=duration)
+        if reencoded:
+            ediag, _ = _log_stage("after-reencode", reencoded, job_id)
+            ok, reason = _validate_media_file(reencoded)
+            if ok:
+                final_path = reencoded
+                final_duration, final_width, final_height = ediag["duration"], ediag["width"], ediag["height"]
+            else:
+                log.error(
+                    f"[dl:{job_id}] خروجی re-encode هم Gate رو رد شد ({reason}) — "
+                    f"Pipeline تمام گزینه‌هاش تموم شد؛ فایل نهایی توسط فراخوان دوباره "
+                    f"Validate و در صورت نامعتبر بودن رد می‌شه (نه ارسال به‌عنوان سالم)."
+                )
+                try:
+                    os.remove(reencoded)
+                except Exception:
+                    pass
 
-    # نه remux و نه re-encode جواب نداد — فایل اصلی رو با هر متادیتایی که از اول
-    # پیدا شده بود می‌فرستیم؛ حداقل چیزی که فرستادیم می‌شه بهتر از هیچی نیست.
-    return filepath, duration, width, height
+    _log_stage("fix-pipeline-final", final_path, job_id)
+    return final_path, final_duration, final_width, final_height
 
 
 def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
@@ -918,23 +1180,38 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                     if media["is_video"]:
                         try:
                             send_path, v_duration, v_width, v_height = await asyncio.to_thread(
-                                _fix_video_for_telegram, filepath
+                                _fix_video_for_telegram, filepath, job_id
                             )
                         except Exception as e:
                             log.warning(f"[dl:{job_id}] pinterest video fixup failed: {e}")
                             send_path = filepath
+                    # 🔴 Gate واقعی: اگه فایل (چه خام، چه بعد از remux/reencode)
+                    # duration/stream سالم نداشته باشه، همین‌جا رد می‌شه — هرگز
+                    # به‌عنوان «سالم» به تلگرام فرستاده نمی‌شه.
                     ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
                     if not ok:
                         log.error(f"[dl:{job_id}] pinterest output failed validation: {reason} path={send_path!r}")
                         await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی خراب بود ({reason})")
                         return
+                    # 🖼️ آیتم ۵۲/۱۱: thumbnail فقط از فایل نهاییِ Gate-Passed ساخته
+                    # می‌شه — نه قبل از Validate، نه از فایل موقت.
+                    v_thumb = None
+                    if media["is_video"]:
+                        try:
+                            v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration)
+                        except Exception as e:
+                            log.info(f"[dl:{job_id}] pinterest thumbnail step failed: {e}")
+                    thumb_f = None
                     try:
+                        if v_thumb and os.path.exists(v_thumb):
+                            thumb_f = open(v_thumb, "rb")
                         with open(send_path, "rb") as f:
                             if media["is_video"]:
                                 await msg.reply_video(
                                     f, caption=caption, supports_streaming=True,
                                     duration=int(v_duration) if v_duration else None,
                                     width=v_width or None, height=v_height or None,
+                                    thumbnail=thumb_f,
                                 )
                             else:
                                 await msg.reply_photo(f, caption=caption)
@@ -951,6 +1228,12 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                             "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
                         )
                         return
+                    finally:
+                        if thumb_f:
+                            try:
+                                thumb_f.close()
+                            except Exception:
+                                pass
             if yt_dlp is None:
                 await status.edit_text(
                     "❌ دانلود انجام نشد\nعلت: دانلود مستقیم از پینترست شکست خورد و yt-dlp هم نصب نیست تا Fallback بشه."
@@ -1036,20 +1319,35 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         # اجرا نمی‌شد، برخلاف مسیر تک‌فایل زیر که داشت. الان یکسان شد.
                         if eext in _VIDEO_EXTS:
                             try:
-                                send_epath, _, _, _ = await asyncio.to_thread(_fix_video_for_telegram, epath)
+                                send_epath, _, _, _ = await asyncio.to_thread(
+                                    _fix_video_for_telegram, epath, job_id
+                                )
                             except Exception as e:
                                 log.warning(f"[dl:{job_id}] carousel entry fixup failed: {e}")
                                 send_epath = epath
+                        # 🔴 همون Gate سخت‌گیرانه: آیتم خراب/بدون duration معتبر رد
+                        # می‌شه (و بقیه‌ی گالری ارسال می‌شه)، نه اینکه به‌عنوان سالم بره.
                         ok, reason = await asyncio.to_thread(_validate_media_file, send_epath)
                         if not ok:
                             log.warning(f"[dl:{job_id}] carousel entry skipped, invalid: {reason} path={send_epath!r}")
                             continue  # آیتم خراب رد می‌شه، بقیه‌ی گالری ارسال می‌شه
+                        # 🖼️ آیتم ۵۲/۱۱: thumbnail فقط بعد از Gate و فقط برای ویدیو.
+                        e_thumb = None
+                        if eext in _VIDEO_EXTS:
+                            try:
+                                e_thumb = await asyncio.to_thread(_make_thumbnail, send_epath)
+                            except Exception as e:
+                                log.info(f"[dl:{job_id}] carousel thumbnail step failed: {e}")
                         f = open(send_epath, "rb")
                         opened.append(f)
                         if eext in (".jpg", ".jpeg", ".png", ".webp"):
                             group.append(InputMediaPhoto(f))
                         else:
-                            group.append(InputMediaVideo(f, supports_streaming=True))
+                            thumb_f = None
+                            if e_thumb and os.path.exists(e_thumb):
+                                thumb_f = open(e_thumb, "rb")
+                                opened.append(thumb_f)
+                            group.append(InputMediaVideo(f, supports_streaming=True, thumbnail=thumb_f))
                     if not group:
                         await status.edit_text(
                             "❌ ارسال انجام نشد\nعلت: 🩹 هیچ‌کدام از فایل‌های این پست معتبر/سالم نبودند."
@@ -1115,26 +1413,41 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         send_path = filepath
         v_duration = v_width = v_height = None
         if ext in _VIDEO_EXTS and platform != "soundcloud":
-            # رفع باگ «۰۰:۰۰ / صفحه سیاه»: قبل از ارسال، duration و metadata رو
-            # با ffprobe چک و در صورت نیاز با ffmpeg (remux سریع، نه لزوماً
-            # re-encode) درست می‌کنیم. این کار تو ترد جدا انجام می‌شه تا event
-            # loop ربات قفل نشه.
+            # رفع باگ «۰۰:۰۰ / صفحه سیاه»: قبل از ارسال، duration/width/height/
+            # codec/container رو با ffprobe چک و در صورت نیاز با ffmpeg
+            # (remux سریع، یا در آخرین حالت re-encode) درست می‌کنیم. این کار
+            # تو ترد جدا انجام می‌شه تا event loop ربات قفل نشه.
             try:
                 send_path, v_duration, v_width, v_height = await asyncio.to_thread(
-                    _fix_video_for_telegram, filepath
+                    _fix_video_for_telegram, filepath, job_id
                 )
             except Exception as e:
                 log.warning(f"[dl:{job_id}] video fixup failed, sending raw file: {e}")
                 send_path = filepath
 
-        # ✅ آیتم ۵ چک‌لیست: قبل از ارسال، فایل نهایی حتماً اعتبارسنجی می‌شه —
-        # نه zero-byte، نه container خراب، نه فقط‌صدا/فقط‌تصویر ناقص.
+        # 🔴 Gate واقعی و نهایی: چه فایل خام باشه، چه بعد از remux/reencode —
+        # اگه duration/stream/ابعاد سالم نباشه، همین‌جا رد می‌شه و هیچ‌وقت
+        # به‌عنوان «سالم» به تلگرام نمی‌ره (آیتم‌های ۷-۱۰ چک‌لیست).
         ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
         if not ok:
             log.error(f"[dl:{job_id}] final output failed validation: {reason} path={send_path!r}")
             await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی سالم نبود ({reason})")
             return
+
+        # 🖼️ آیتم ۵۲/۱۱: thumbnail صریح فقط از فایلِ نهاییِ Gate-Passed ساخته
+        # می‌شه (نه قبل از Validate، نه از فایل موقت) — مخصوصاً برای فایل‌های
+        # حجیم/طولانی که تلگرام خودش نمی‌تونه زود thumbnail بسازه.
+        v_thumb = None
+        if ext in _VIDEO_EXTS and platform != "soundcloud":
+            try:
+                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration)
+            except Exception as e:
+                log.info(f"[dl:{job_id}] thumbnail step failed: {e}")
+
+        thumb_f = None
         try:
+            if v_thumb and os.path.exists(v_thumb):
+                thumb_f = open(v_thumb, "rb")
             with open(send_path, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
                     await msg.reply_photo(f, caption=caption or None)
@@ -1145,6 +1458,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         f, caption=caption or None, supports_streaming=True,
                         duration=int(v_duration) if v_duration else None,
                         width=v_width or None, height=v_height or None,
+                        thumbnail=thumb_f,
                     )
             _log_job(job_id, platform=platform, url=url, stage="sent")
         except Exception as e:
@@ -1160,6 +1474,12 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                     "موقتاً پاسخ نداد."
                 )
                 return
+        finally:
+            if thumb_f:
+                try:
+                    thumb_f.close()
+                except Exception:
+                    pass
 
         # 🧹 Cleanup: فقط بعد از ارسال موفق فایل حذف می‌شه؛ چون فایل داخل
         # TemporaryDirectory هست، خروج از بلوک with همین‌جا کل پوشه‌ی Job رو
