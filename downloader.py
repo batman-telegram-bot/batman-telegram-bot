@@ -150,6 +150,16 @@ JOB_TIMEOUT_SEC = 600
 MAX_TELEGRAM_UPLOAD_BYTES = 49 * 1024 * 1024
 NETWORK_RETRY_DELAYS = (2, 5)
 
+# 🧪 آیتم ۳ چک‌لیست («تست بسیار مهم Telegram»): وقتی این env var روی "1" ست
+# بشه، بعد از ارسال موفق FINAL FILE به‌صورت send_video، دقیقاً همون فایل
+# یک‌بار دیگه هم به‌صورت send_document فرستاده می‌شه — تا خودِ توسعه‌دهنده
+# بتونه موقع دیباگ زنده مقایسه کنه: اگه Document سالمه ولی Video سیاه/۰۰:۰۰
+# بود، مشکل از send_video/thumbnail/metadata تلگرامه نه از خودِ فایل؛ اگه
+# Document هم خراب بود، مشکل از خودِ Pipeline دانلود/FFmpeg است.
+# پیش‌فرض خاموشه (کاربر عادی هیچ فایل تکراری نمی‌بینه)؛ فقط برای دیباگ دستی
+# با ست‌کردن env var DL_DEBUG_COMPARE_UPLOAD=1 روشن می‌شه.
+DEBUG_COMPARE_UPLOAD = os.getenv("DL_DEBUG_COMPARE_UPLOAD") == "1"
+
 DOWNLOADER_HELP_TEXT = (
     "📥 دانلودر — بنویس «دانلودر»، پلتفرم (اینستاگرام / یوتیوب / تیک‌تاک / ایکس / "
     "پینترست / ساندکلاود) رو با دکمه انتخاب کن، بعد لینک رو همونجا بفرست.\n"
@@ -420,20 +430,32 @@ if not (_FFMPEG_OK and _FFPROBE_OK):
     )
 
 
-def _ffprobe_json(filepath: str):
+def _ffprobe_json(filepath: str, _rc_out: dict = None):
     """بلاک‌کننده‌ست — با asyncio.to_thread صدا زده می‌شه.
-    خروجی ffprobe رو به‌صورت dict برمی‌گردونه، یا None اگه فایل اصلاً قابل‌خوندن نبود."""
+    خروجی ffprobe رو به‌صورت dict برمی‌گردونه، یا None اگه فایل اصلاً قابل‌خوندن نبود.
+
+    🩺 چک‌لیست آیتم ۱ (Diagnostic): تا قبل از این، exit code واقعیِ ffprobe
+    هیچ‌جا ثبت نمی‌شد — فقط "موفق شد یا نه" (True/False) لاگ می‌شد. اگه
+    _rc_out (یه dict خالی) داده بشه، exit code واقعی (یا شرح Exception، اگه
+    ffprobe اصلاً اجرا نشد) توش پر می‌شه تا فراخوان بتونه دقیقاً همون رو تو
+    لاگ هر Stage ثبت کنه — نه فقط true/false."""
     if not _FFPROBE_OK:
+        if _rc_out is not None:
+            _rc_out["returncode"] = "ffprobe-not-installed"
         return None
     try:
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", filepath],
             capture_output=True, text=True, timeout=30,
         )
+        if _rc_out is not None:
+            _rc_out["returncode"] = proc.returncode
         if proc.returncode != 0 or not proc.stdout:
             return None
         return json.loads(proc.stdout)
     except Exception as e:
+        if _rc_out is not None:
+            _rc_out["returncode"] = f"exception:{e}"
         log.info(f"ffprobe failed for {filepath}: {e}")
         return None
 
@@ -461,7 +483,7 @@ def _video_meta(probe):
     return duration, width, height
 
 
-def _probe_diagnostics(filepath: str, probe=None) -> dict:
+def _probe_diagnostics(filepath: str, probe=None, ffprobe_rc=None) -> dict:
     """طبق چک‌لیست (آیتم ۴۵): برای هر مرحله از Pipeline خلاصه‌ی کامل تشخیصی
     می‌سازه — file size, duration, width, height, video codec, audio codec,
     container, pixel format, stream count, و این‌که ffprobe اصلاً موفق بود یا نه.
@@ -473,10 +495,13 @@ def _probe_diagnostics(filepath: str, probe=None) -> dict:
     except OSError:
         size = None
     if probe is None:
-        probe = _ffprobe_json(filepath)
+        rc_holder = {}
+        probe = _ffprobe_json(filepath, _rc_out=rc_holder)
+        ffprobe_rc = rc_holder.get("returncode")
     diag = {
         "file": os.path.basename(filepath), "size": size,
         "ffprobe_ok": probe is not None,
+        "ffprobe_exit_code": ffprobe_rc,
         "duration": None, "width": None, "height": None,
         "container": None, "vcodec": None, "acodec": None,
         "pix_fmt": None, "stream_count": None, "has_audio": None,
@@ -519,8 +544,9 @@ def _log_stage(stage: str, filepath: str, job_id: str = None):
     مرحله مقصره، نه حدس زدن.
     خروجی: (diag_dict, raw_probe_dict_یا_None) — probe خام هم برمی‌گرده تا
     فراخوان مجبور نباشه دوباره ffprobe بزنه."""
-    probe = _ffprobe_json(filepath)
-    diag = _probe_diagnostics(filepath, probe)
+    rc_holder = {}
+    probe = _ffprobe_json(filepath, _rc_out=rc_holder)
+    diag = _probe_diagnostics(filepath, probe, ffprobe_rc=rc_holder.get("returncode"))
     prefix = f"[dl:{job_id}] " if job_id else ""
     log.info(f"{prefix}STAGE={stage} {diag}")
     return diag, probe
@@ -1461,6 +1487,19 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         thumbnail=thumb_f,
                     )
             _log_job(job_id, platform=platform, url=url, stage="sent")
+            # 🧪 آیتم ۳ چک‌لیست — فقط وقتی DL_DEBUG_COMPARE_UPLOAD=1 باشه، و فقط
+            # برای ویدیو (نه عکس/صدا): همون FINAL FILE رو یه‌بار دیگه هم با
+            # send_document می‌فرستیم تا مقایسه‌ی Video در مقابل Document انجام
+            # بشه. خطای این بخش هرگز نباید ارسال اصلی (که موفق شده) رو خراب کنه.
+            if DEBUG_COMPARE_UPLOAD and ext in _VIDEO_EXTS and platform != "soundcloud":
+                try:
+                    with open(send_path, "rb") as fdoc:
+                        await msg.reply_document(
+                            fdoc, caption="🧪 DEBUG: همین فایل به‌صورت Document (برای مقایسه با Video بالا)"
+                        )
+                    _log_job(job_id, platform=platform, url=url, stage="debug-document-compare-sent")
+                except Exception as e:
+                    log.warning(f"[dl:{job_id}] debug compare-upload (document) failed: {e}")
         except Exception as e:
             log.warning(f"[dl:{job_id}] send failed, fallback to document: {e}")
             try:
