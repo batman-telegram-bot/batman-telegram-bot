@@ -23,14 +23,20 @@ downloader.py
 import os
 import re
 import json
+import time
+import uuid
 import shutil
 import asyncio
 import logging
+import mimetypes
 import tempfile
 import subprocess
 
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputMediaPhoto, InputMediaVideo,
+)
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 log = logging.getLogger(__name__)
@@ -124,6 +130,18 @@ USER_AGENT = (
 )
 
 URL_RE = re.compile(r"https?://\S+")
+
+# 🩺 Production-hardening (بازبینی کامل دانلودر):
+#   - JOB_TIMEOUT_SEC: هر Job حداکثر این‌قدر وقت داره؛ اگه دانلود گیر کرد (نه
+#     Exception بده، نه تموم بشه)، به‌جای اینکه برای همیشه یه Thread رو اشغال
+#     کنه، با Timeout واضح قطع می‌شه و کاربر پیام روشن می‌گیره.
+#   - MAX_TELEGRAM_UPLOAD_BYTES: همون سقفی که تو _base_ydl_opts هم به yt-dlp
+#     داده می‌شه؛ برای چک زودهنگام حجم (قبل از شروع دانلود واقعی) هم استفاده می‌شه.
+#   - NETWORK_RETRY_DELAYS: فقط برای خطاهای واقعاً موقت (شبکه/Timeout/۵xx) Retry
+#     با Backoff انجام می‌شه؛ خطاهای دائمی (Private/Deleted/Invalid) هرگز Retry نمی‌شن.
+JOB_TIMEOUT_SEC = 240
+MAX_TELEGRAM_UPLOAD_BYTES = 49 * 1024 * 1024
+NETWORK_RETRY_DELAYS = (2, 5)
 
 DOWNLOADER_HELP_TEXT = (
     "📥 دانلودر — بنویس «دانلودر»، پلتفرم (اینستاگرام / یوتیوب / تیک‌تاک / ایکس / "
@@ -314,8 +332,14 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
         "format": "best[ext=mp4]/best",
         "quiet": True,
         "no_warnings": True,
-        "noplaylist": True,
-        "max_filesize": 49 * 1024 * 1024,  # سقف ۴۹ مگابایت — محدودیت آپلود بات‌های تلگرام
+        # noplaylist=True یعنی «فقط یه آیتم رو بگیر، نه کل لیست». برای یوتیوب لازمه
+        # (وگرنه لینکِ یه ویدیوی داخل Playlist ممکنه کل Playlist رو دانلود کنه)، ولی
+        # همین تنظیم رو اینستاگرام/توییتر باعث می‌شد Carousel (چند عکس/ویدیو تو یه
+        # پست) یا چند-مدیای یه توییت فقط اسلاید/مدیای اول دانلود بشه. این‌جا فقط
+        # برای instagram/twitter noplaylist رو False می‌ذاریم تا همه‌ی entryهای یه
+        # پست/توییت دانلود بشن؛ روی یه پست تک‌مدیا این تنظیم هیچ اثری نداره.
+        "noplaylist": platform not in ("instagram", "twitter"),
+        "max_filesize": MAX_TELEGRAM_UPLOAD_BYTES,  # سقف آپلود بات‌های تلگرام
         "retries": 3,
         "fragment_retries": 3,
         "http_headers": {"User-Agent": USER_AGENT},
@@ -504,9 +528,107 @@ def _yt_dlp_download(url: str, outdir: str, platform: str):
     raise last_err
 
 
+def _yt_dlp_probe(url: str, platform: str):
+    """بلاک‌کننده — باید تو asyncio.to_thread صدا زده بشه. فقط Metadata (عنوان/
+    مدت/حجم تقریبی) رو بدون دانلود واقعی می‌گیره (download=False)، تا قبل از
+    شروع دانلود واقعی بشه به کاربر نشون داد. اگه شکست خورد، None برمی‌گردونه —
+    این یه مسیر Best-effort‌ه و نباید جلوی دانلود اصلی رو بگیره."""
+    if yt_dlp is None:
+        return None
+    opts = {**_base_ydl_opts(tempfile.gettempdir(), platform), "skip_download": True}
+    opts.pop("max_filesize", None)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        log.info(f"metadata probe failed for {platform} ({url}): {e}")
+        return None
+
+
+def _log_job(job_id: str, **fields):
+    """لاگ ساخت‌یافته‌ی هر مرحله‌ی یه Job دانلود — platform/url/user_id/job_id/
+    output path/file size/duration/exit status و... طبق چک‌لیست موردنیاز، ولی
+    هیچ‌وقت این جزئیات مستقیم به کاربر نشون داده نمی‌شه، فقط تو Log می‌مونه."""
+    parts = " ".join(f"{k}={v!r}" for k, v in fields.items())
+    log.info(f"[dl:{job_id}] {parts}")
+
+
+def _classify_download_error(err_text: str):
+    """متن خام Exception (yt-dlp/httpx) رو به یه پیام فارسیِ دقیق و بدون جزئیات
+    فنی تبدیل می‌کنه، به‌علاوه‌ی این‌که آیا این خطا موقتیه و ارزش Retry داره.
+    هیچ‌وقت به‌جای این‌ها پیام عمومی «فایل پیدا نشد» برنمی‌گردونه — طبق قانون
+    اصلی دانلودر، هر خطا باید علت واقعی خودش رو نشون بده."""
+    t = (err_text or "").lower()
+
+    if "sign in to confirm" in t or "not a bot" in t:
+        return (
+            "🔐 نیاز به ورود/احراز هویت — یوتیوب این لینک رو پشت قفل ضد-ربات "
+            "گذاشته و بدون کوکیِ یه اکانت لاگین‌شده قابل دانلود نیست.",
+            False,
+        )
+    if "empty media response" in t or ("login" in t and "instagram" in t):
+        return ("🔒 محتوای خصوصی است یا پلتفرم بدون لاگین اجازه‌ی دسترسی نمی‌ده.", False)
+    if "private video" in t or "private account" in t or "this profile is private" in t:
+        return ("🔒 محتوای خصوصی است.", False)
+    if ("video unavailable" in t or "has been removed" in t or "no longer available" in t
+            or "content isn't available" in t or "post unavailable" in t):
+        return ("🚫 محتوا حذف شده یا در دسترس نیست.", False)
+    if "not available in your country" in t or ("geo" in t and "restrict" in t):
+        return ("🌍 این محتوا در منطقه‌ی سرور ربات قابل دسترسی نیست.", False)
+    if "requires authentication" in t or "join this channel" in t or "subscribers only" in t:
+        return ("🔐 این محتوا نیاز به ورود/احراز هویت یا عضویت ویژه داره.", False)
+    if "max_filesize" in t or "max-filesize" in t or "file is larger than" in t:
+        return ("📦 حجم فایل بیشتر از محدودیت مجاز ارسال است.", False)
+    if ("unsupported url" in t or "no video formats found" in t
+            or "requested format is not available" in t or "no formats found" in t):
+        return ("⚠️ فرمت این رسانه توسط ربات پشتیبانی نمی‌شود.", False)
+    if "invalid url" in t or "is not a valid url" in t or "unable to extract" in t:
+        return ("⚠️ لینک نامعتبر است یا محتوایی داخلش پیدا نشد.", False)
+    if "403" in t or "forbidden" in t:
+        return ("🛑 دانلود توسط پلتفرم مسدود شد.", False)
+    if any(k in t for k in (
+        "connecterror", "connect error", "connection reset", "temporary failure",
+        "name or service not known", "network is unreachable", "connectionerror",
+    )):
+        return ("🌐 خطای شبکه هنگام دانلود پیش اومد.", True)
+    if "timed out" in t or "timeout" in t:
+        return ("⏱ زمان دانلود تمام شد.", True)
+    if any(k in t for k in ("502", "503", "504", "server error", "internal error")):
+        return ("⚙️ خطای موقت سرویس؛ کمی دیگه دوباره امتحان کن.", True)
+
+    return ("❌ خطای نامشخص در دانلود؛ جزئیاتش تو لاگ ربات ثبت شد.", False)
+
+
+async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str):
+    """دور _yt_dlp_download رو با Timeout و Retry-با-Backoff (فقط برای خطاهای
+    موقت) می‌پیچه. خطاهای دائمی (Private/Deleted/Invalid/...) بدون تلف‌کردن وقت
+    فوراً بالا پرتاب می‌شن."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform),
+                timeout=JOB_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            _log_job(job_id, platform=platform, url=url, stage="timeout", attempt=attempt)
+            raise
+        except Exception as e:
+            _, retryable = _classify_download_error(str(e))
+            if retryable and attempt <= len(NETWORK_RETRY_DELAYS):
+                delay = NETWORK_RETRY_DELAYS[attempt - 1]
+                _log_job(job_id, platform=platform, url=url, stage="retry",
+                          attempt=attempt, delay=delay, error=str(e)[:200])
+                await asyncio.sleep(delay)
+                continue
+            raise
+
+
 async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     uid = update.effective_user.id
+    chat_id = update.effective_chat.id
     text = (msg.text or "").strip()
 
     match = URL_RE.search(text)
@@ -514,6 +636,10 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         return  # این پیام لینک نیست، به بقیه‌ی هندلرها بسپار
 
     url = match.group(0)
+    # 🆔 هر درخواست یه Job ID مستقل داره — فقط برای رهگیری تو Logها (چک‌لیست
+    # Persistence/Debug)، نه برای مسیر فایل (اون یه TemporaryDirectory جدا و
+    # منحصربه‌فرده که خودِ tempfile می‌سازه، پس هر دانلود کاملاً مستقله).
+    job_id = uuid.uuid4().hex[:10]
 
     # 🔧 رفع باگ Downloader داخل Group/Private: قبلاً این هندلر فقط وقتی کار
     # می‌کرد که کاربر اول «دانلودر» رو می‌زد و از منو پلتفرم رو دستی انتخاب
@@ -536,13 +662,61 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         if platform is None:
             return  # لینک به هیچ‌کدوم از پلتفرم‌های پشتیبانی‌شده نمی‌خوره؛ به بقیه‌ی هندلرها سپرده می‌شه
 
+    _log_job(job_id, platform=platform, url=url, user_id=uid, chat_id=chat_id, stage="start")
+
     # برای پینترست به yt-dlp نیازی نیست (روش مستقیم پایین‌تر کارو انجام می‌ده)،
     # فقط برای یوتیوب/اینستاگرام (و fallback خود پینترست) لازمه.
     if yt_dlp is None and platform != "pinterest":
         await msg.reply_text("⚠️ ماژول دانلود نصب نشده. باید yt-dlp تو requirements.txt باشه (اضافه شده، فقط دیپلوی دوباره لازمه).")
         return
 
+    # ⚠️ لینک Playlist کاملِ یوتیوب (نه یه ویدیوی مشخص، نه Shorts) رو عمداً رد
+    # می‌کنیم به‌جای این‌که بی‌صدا فقط یه ویدیوی اول رو بفرستیم — طبق قانون
+    # «هیچ خطایی نباید با پیام گمراه‌کننده پوشونده بشه»، سکوت هم همون‌قدر
+    # گمراه‌کننده‌ست.
+    if platform == "youtube" and "list=" in url.lower() and "v=" not in url.lower() and "youtu.be" not in url.lower() and "/shorts/" not in url.lower():
+        await msg.reply_text(
+            "⚠️ این یه لینک Playlist کامل یوتیوبه. برای جلوگیری از دانلود ناخواسته‌ی حجم زیاد، فعلاً "
+            "فقط دانلود تک‌ویدیو/Shorts پشتیبانی می‌شه — لینک مستقیم همون ویدیویی که می‌خوای رو بفرست."
+        )
+        return
+
     status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
+
+    # 📊 پیش‌نمایش Metadata (عنوان/مدت/حجم تقریبی) قبل از شروع دانلود واقعی —
+    # فقط برای یوتیوب/ساندکلاود که extract_info(download=False) سریع و قابل‌اتکاست.
+    # Best-effort‌ه: اگه شکست خورد یا طول کشید، بی‌سروصدا رد می‌شیم سراغ دانلود اصلی.
+    if platform in ("youtube", "soundcloud") and yt_dlp is not None:
+        try:
+            probe_info = await asyncio.wait_for(
+                asyncio.to_thread(_yt_dlp_probe, url, platform), timeout=15
+            )
+        except Exception:
+            probe_info = None
+        if probe_info:
+            approx_bytes = probe_info.get("filesize") or probe_info.get("filesize_approx")
+            if approx_bytes and approx_bytes > MAX_TELEGRAM_UPLOAD_BYTES:
+                _log_job(job_id, platform=platform, url=url, stage="pre-check-filesize-reject",
+                          approx_bytes=approx_bytes)
+                await status.edit_text(
+                    "❌ دانلود انجام نشد\nعلت: 📦 حجم فایل برای ارسال مستقیم توسط ربات بیش از حد مجاز است."
+                )
+                return
+            title = (probe_info.get("title") or "").strip()
+            duration_s = probe_info.get("duration")
+            lines = ["▶️ YouTube" if platform == "youtube" else "🎧 SoundCloud"]
+            if title:
+                lines.append(f"{'🎬 عنوان' if platform == 'youtube' else '🎵 Track'}: {title}")
+            if duration_s:
+                m, s = divmod(int(duration_s), 60)
+                lines.append(f"⏱ مدت: {m:02d}:{s:02d}")
+            lines.append(f"📦 حجم تقریبی: {_human_size(approx_bytes)}" if approx_bytes else "📦 حجم: در حال محاسبه...")
+            lines.append("")
+            lines.append("⏳ در حال دانلود...")
+            try:
+                await status.edit_text("\n".join(lines))
+            except Exception:
+                pass
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # پینترست: اول روش مستقیم (resource API / اسکرپ HTML) رو امتحان کن،
@@ -552,7 +726,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
             try:
                 media = await _pinterest_extract(url)
             except Exception as e:
-                log.info(f"pinterest direct extract error: {e}")
+                log.info(f"[dl:{job_id}] pinterest direct extract error: {e}")
                 media = None
             if media:
                 try:
@@ -563,53 +737,131 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                             await msg.reply_video(f, caption=caption, supports_streaming=True)
                         else:
                             await msg.reply_photo(f, caption=caption)
+                    _log_job(job_id, platform=platform, url=url, stage="sent",
+                              output_path=filepath, file_size=os.path.getsize(filepath))
                     try:
                         await status.delete()
                     except Exception:
                         pass
                     return
                 except Exception as e:
-                    log.info(f"pinterest direct download/send failed, falling back to yt-dlp: {e}")
+                    log.info(f"[dl:{job_id}] pinterest direct download/send failed, falling back to yt-dlp: {e}")
                     # می‌افته پایین، سراغ yt-dlp
             if yt_dlp is None:
                 await status.edit_text(
-                    "❌ دانلود مستقیم از پینترست شکست خورد و yt-dlp هم نصب نیست تا fallback بشه."
+                    "❌ دانلود انجام نشد\nعلت: دانلود مستقیم از پینترست شکست خورد و yt-dlp هم نصب نیست تا Fallback بشه."
                 )
                 return
 
+        start_ts = time.monotonic()
         try:
-            filepath, info = await asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform)
+            filepath, info = await _download_with_retry(url, tmpdir, platform, job_id)
+        except asyncio.TimeoutError:
+            log.warning(f"[dl:{job_id}] timeout platform={platform} url={url} user_id={uid} "
+                        f"after={time.monotonic() - start_ts:.1f}s")
+            await status.edit_text("❌ دانلود انجام نشد\nعلت: ⏱ زمان دانلود تمام شد.")
+            return
         except Exception as e:
-            log.warning(f"downloader failed for {url}: {e}")
-            err_text = str(e)
-            if "Sign in to confirm" in err_text or "not a bot" in err_text:
-                await status.edit_text(
-                    "❌ یوتیوب برای این لینک قفل ضد-ربات گذاشته و بدون فایل کوکیِ یه اکانت "
-                    "لاگین‌شده قابل دور زدن نیست — این محدودیت خود یوتیوبه، نه باگ ربات.\n"
-                    "اگه مالک ربات هستی، env var به اسم YT_COOKIES_FILE ست کن (مسیر یه فایل "
-                    "cookies.txt که از مرورگر لاگین‌شده export شده)."
-                )
-            elif "empty media response" in err_text or "login" in err_text.lower():
-                await status.edit_text(
-                    "❌ اینستاگرام برای این پست جواب خالی داد — یا پست خصوصیه، یا اینستاگرام "
-                    "بدون لاگین اجازه‌ی دیدنش رو نمی‌ده. این محدودیت خود اینستاگرامه.\n"
-                    "اگه مالک ربات هستی، env var به اسم IG_COOKIES_FILE ست کن."
-                )
-            else:
-                await status.edit_text(
-                    "❌ دانلود ناموفق بود. لینک رو چک کن یا شاید محتوا خصوصی/حذف‌شده باشه.\n"
-                    f"جزئیات فنی: {err_text[:200]}"
-                )
+            # Traceback کامل فقط تو Log — هرگز به کاربر نشون داده نمی‌شه.
+            log.exception(f"[dl:{job_id}] download failed platform={platform} url={url} user_id={uid}")
+            reason, _ = _classify_download_error(str(e))
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: {reason}")
             return
 
+        download_duration = time.monotonic() - start_ts
+
+        # 🃏 Carousel / چند-مدیای اینستاگرام و توییتر: اگه yt-dlp چند entry
+        # برگردونده (noplaylist=False برای این دو پلتفرم، بالاتر تو _base_ydl_opts)،
+        # مسیر واقعیِ هر entry رو با prepare_filename خودِ yt-dlp پیدا می‌کنیم —
+        # نه Glob و نه حدسِ اسم فایل. اگه entry نبود، مسیر قدیمیِ تک‌فایل زیر
+        # دست‌نخورده اجرا می‌شه.
+        entries = info.get("entries") if isinstance(info, dict) else None
+        if entries and platform in ("instagram", "twitter"):
+            media_files = []
+            try:
+                with yt_dlp.YoutubeDL(_base_ydl_opts(tmpdir, platform)) as ydl2:
+                    for entry in entries:
+                        if not entry:
+                            continue
+                        try:
+                            epath = ydl2.prepare_filename(entry)
+                        except Exception:
+                            continue
+                        if epath and os.path.exists(epath):
+                            media_files.append(epath)
+            except Exception as e:
+                log.info(f"[dl:{job_id}] carousel entry resolution failed: {e}")
+                media_files = []
+
+            if len(media_files) > 1:
+                _log_job(job_id, platform=platform, url=url, stage="carousel", count=len(media_files))
+                await status.edit_text(f"📦 {len(media_files)} فایل پیدا شد\n⚡ در حال ارسال...")
+                group = []
+                opened = []
+                try:
+                    for epath in media_files[:10]:  # سقف Media Group تلگرام = ۱۰
+                        eext = os.path.splitext(epath)[1].lower()
+                        f = open(epath, "rb")
+                        opened.append(f)
+                        if eext in (".jpg", ".jpeg", ".png", ".webp"):
+                            group.append(InputMediaPhoto(f))
+                        else:
+                            group.append(InputMediaVideo(f, supports_streaming=True))
+                    await msg.reply_media_group(media=group)
+                    _log_job(job_id, platform=platform, url=url, stage="sent",
+                              count=len(group), download_duration=round(download_duration, 1))
+                finally:
+                    for f in opened:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                return
+            elif len(media_files) == 1:
+                # فقط یه entry معتبر Resolve شد — همون رو به‌جای مسیر سطح‌بالا
+                # (که برای دیکشنری‌های نوع Playlist ممکنه معتبر نباشه) به‌عنوان
+                # filepath واقعی استفاده می‌کنیم و با همون منطق تک‌فایلِ زیر ادامه می‌دیم.
+                filepath = media_files[0]
+            # اگه اصلاً entry معتبری Resolve نشد، از همین‌جا با filepath سطح‌بالای
+            # قبلی ادامه می‌دیم؛ اگه اونم نامعتبر باشه، چک زیر (Output Missing)
+            # با پیام صادقانه (نه «فایل پیدا نشد») گزارشش می‌ده.
+
         if not filepath or not os.path.exists(filepath):
-            await status.edit_text("❌ فایل پیدا نشد؛ لینک رو دوباره چک کن.")
+            # 🧠 دقیقاً همون چیزی که نباید بشه: هیچ‌وقت «فایل پیدا نشد» ساده به
+            # کاربر نشون داده نمی‌شه. اینجا Debug کامل تو Log ثبت می‌شه (لیست
+            # واقعیِ پوشه‌ی Job + کلیدهای info) تا علت واقعی قابل‌ردیابی باشه،
+            # و به کاربر یه علت مشخص (نه یه پیام عمومی گمراه‌کننده) داده می‌شه.
+            try:
+                tmp_listing = os.listdir(tmpdir)
+            except Exception:
+                tmp_listing = "N/A"
+            log.error(
+                f"[dl:{job_id}] output missing platform={platform} url={url} user_id={uid} "
+                f"expected_path={filepath!r} tmpdir_listing={tmp_listing!r} "
+                f"info_keys={sorted(info.keys()) if isinstance(info, dict) else 'N/A'}"
+            )
+            await status.edit_text(
+                "❌ دانلود انجام نشد\nعلت: پلتفرم فایل خروجی معتبری برنگردوند — معمولاً یعنی فرمت "
+                "این پست/رسانه توسط ربات پشتیبانی نمی‌شه."
+            )
             return
 
         real_size = os.path.getsize(filepath)
+        mime_type, _ = mimetypes.guess_type(filepath)
         title = (info.get("title") or "").strip()
         size_line = f"📦 حجم: {_human_size(real_size)}"
         caption = f"{title}\n{size_line}" if title else size_line
+
+        _log_job(
+            job_id, platform=platform, url=url, user_id=uid, chat_id=chat_id,
+            output_path=filepath, file_size=real_size, mime_type=mime_type,
+            download_duration=round(download_duration, 1), extractor=info.get("extractor"),
+            selected_format=info.get("format_id"), stage="downloaded",
+        )
 
         ext = os.path.splitext(filepath)[1].lower()
         send_path = filepath
@@ -624,7 +876,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                     _fix_video_for_telegram, filepath
                 )
             except Exception as e:
-                log.warning(f"video fixup failed, sending raw file: {e}")
+                log.warning(f"[dl:{job_id}] video fixup failed, sending raw file: {e}")
                 send_path = filepath
         try:
             with open(send_path, "rb") as f:
@@ -638,15 +890,24 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         duration=int(v_duration) if v_duration else None,
                         width=v_width or None, height=v_height or None,
                     )
+            _log_job(job_id, platform=platform, url=url, stage="sent")
         except Exception as e:
-            log.warning(f"send failed, fallback to document: {e}")
+            log.warning(f"[dl:{job_id}] send failed, fallback to document: {e}")
             try:
                 with open(filepath, "rb") as f:
                     await msg.reply_document(f, caption=caption or None)
+                _log_job(job_id, platform=platform, url=url, stage="sent-as-document")
             except Exception as e2:
-                await status.edit_text(f"❌ فایل دانلود شد ولی ارسالش شکست خورد (احتمالاً حجمش زیاده): {str(e2)[:150]}")
+                log.exception(f"[dl:{job_id}] document fallback also failed")
+                await status.edit_text(
+                    "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام "
+                    "موقتاً پاسخ نداد."
+                )
                 return
 
+        # 🧹 Cleanup: فقط بعد از ارسال موفق فایل حذف می‌شه؛ چون فایل داخل
+        # TemporaryDirectory هست، خروج از بلوک with همین‌جا کل پوشه‌ی Job رو
+        # (فایل خام + فایل‌های remux/re-encode احتمالی) پاک می‌کنه — نه زودتر.
         try:
             await status.delete()
         except Exception:
