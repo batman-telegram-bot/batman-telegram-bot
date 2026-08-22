@@ -22,6 +22,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ChatMemberHandler,
     ContextTypes,
+    ApplicationHandlerStop,
     filters,
 )
 
@@ -513,6 +514,15 @@ def _init_db():
             ts REAL
         )
     """)
+    # 📱 احراز اجباری شماره تلفن — وضعیت تاییدشده‌ها اینجا ذخیره می‌شه تا کاربر
+    # مجبور نباشه هر بار دوباره شماره‌ش رو بفرسته.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS verified_users (
+            user_id INTEGER PRIMARY KEY,
+            phone_number TEXT DEFAULT '',
+            verified_at REAL
+        )
+    """)
     # مهاجرت برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو ندارن
     for col, ddl in (
         ("game_wins", "ALTER TABLE players ADD COLUMN game_wins INTEGER DEFAULT 0"),
@@ -587,6 +597,28 @@ def _count_bot_starters():
     n = c.fetchone()["n"]
     conn.close()
     return n
+
+
+def _is_phone_verified(user_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM verified_users WHERE user_id=?", (user_id,))
+    ok = c.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def _set_phone_verified(user_id, phone_number):
+    """وضعیت تایید شماره رو ذخیره می‌کنه. شماره‌ی تلفن هیچ‌جای دیگه‌ای (لاگ عمومی،
+    پیام گروه) چاپ نمی‌شه — فقط همینجا تو دیتابیس، برای همینه که این تابع جدا شده."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO verified_users (user_id, phone_number, verified_at) VALUES (?,?,?)",
+        (user_id, phone_number or "", time.time()),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _log_gotham_event(event_text, dialogue_text):
@@ -1186,7 +1218,7 @@ def build_words_panel_text() -> str:
         "تو چت خصوصی: «تیکت <متن>»",
         "",
         "🎂 *یادآور تولد یار بتمن:*",
-        "پنل «امکانات جدید» — دکمه‌ای، تقویم شمسی؛ «تولدم ۱۵ مرداد» هم هنوز کار می‌کنه",
+        "پنل «امکانات جدید» — دکمه‌ای، تقویم شمسی؛ «تولدم ۲۳ اردیبهشت» هم هنوز کار می‌کنه",
         "",
         "🔒 *قفل/باز کردن گروه (ادمین):*",
         "«قفل گروه» / «باز کردن گروه»",
@@ -1766,26 +1798,22 @@ async def send_profile(update: Update, chat, player, edit=False):
 #  COMMANDS
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    # 🃏 اگه کاربر از دیپ‌لینکِ «دستِ کارت‌های بازی کارتی» اومده (چون تو گروه هنوز PV
-    # با ربات رو استارت نکرده بود)، دستش رو الان بفرست و بازی رو ادامه بده.
-    if context.args and context.args[0] == "cardhand":
-        try:
-            from card_room import try_resume_after_start
-            await try_resume_after_start(update, context)
-        except Exception as e:
-            log.info(f"start: card room resume failed (harmless): {e}")
-    is_new = await db_run(_log_bot_starter, user)
-    if is_new and user.id != OWNER_ID:
-        try:
-            uname = f"@{user.username}" if user.username else "بدون یوزرنیم"
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"🦇 یه شهروند جدید وارد گاتهام شد:\n{user.first_name} ({uname}) — آیدی: {user.id}",
-            )
-        except Exception:
-            pass
+def _phone_request_keyboard():
+    """کیبورد رسمی تلگرام برای درخواست شماره — هیچ گزینه‌ی «رد شدن» نداره چون
+    از الان احراز شماره برای استفاده از ربات اجباریه."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 ارسال شماره تلفن", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+
+
+PHONE_VERIFY_PROMPT_TEXT = (
+    "📱 برای شروع استفاده از ربات، ابتدا شماره تلفنت را با دکمه زیر برای ربات ارسال کن."
+)
+
+
+async def _send_main_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """متن خوش‌آمدگویی و معرفی اصلی — فقط بعد از تایید شماره نمایش داده می‌شه."""
     text = (
         "🦇 *به دنیای بتمن خوش اومدی*\n\n"
         "یه رفیقِ تاریکِ گاتهام برای گروهت 🌃\n\n"
@@ -1806,49 +1834,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top رتبه‌بندی گروه\n"
         "/quote یه جمله بتمنی"
     )
-    # دکمه‌ی اشتراک‌گذاری شماره کاملاً اختیاریه — کاربر خودش تصمیم می‌گیره لمسش
-    # کنه یا نه؛ ربات هیچ‌وقت شماره رو اجباری نمی‌کنه و بدونش هم همه‌چی کار می‌کنه.
-    contact_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 اشتراک‌گذاری شماره (اختیاری)", request_contact=True)],
-         [KeyboardButton("رد شدن، نیازی نیست")]],
-        resize_keyboard=True, one_time_keyboard=True,
+    await update.effective_message.reply_text(
+        text, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
-    await update.message.reply_text(
-        "اگه دوست داشتی می‌تونی شماره‌ت رو با دکمه‌ی رسمی تلگرام (پایین صفحه) به‌صورت "
-        "کاملاً اختیاری با سازنده‌ی ربات به اشتراک بذاری — یا بی‌خیالش شو، هیچ فرقی تو "
-        "کارکرد ربات نداره.",
-        reply_markup=contact_kb,
-    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # 🃏 اگه کاربر از دیپ‌لینکِ «دستِ کارت‌های بازی کارتی» اومده (چون تو گروه هنوز PV
+    # با ربات رو استارت نکرده بود)، دستش رو الان بفرست و بازی رو ادامه بده.
+    if context.args and context.args[0] == "cardhand":
+        try:
+            from card_room import try_resume_after_start
+            await try_resume_after_start(update, context)
+        except Exception as e:
+            log.info(f"start: card room resume failed (harmless): {e}")
+    is_new = await db_run(_log_bot_starter, user)
+    if is_new and user.id != OWNER_ID:
+        try:
+            uname = f"@{user.username}" if user.username else "بدون یوزرنیم"
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"🦇 یه شهروند جدید وارد گاتهام شد:\n{user.first_name} ({uname}) — آیدی: {user.id}",
+            )
+        except Exception:
+            pass
+
+    # 📱 احراز شماره یک مرحله‌ی اجباریه: تا کاربر (به‌جز OWNER) شماره‌ش رو تایید
+    # نکرده، منوی اصلی/امکانات ربات اصلاً نمایش داده نمی‌شه.
+    if user.id != OWNER_ID and not await db_run(_is_phone_verified, user.id):
+        await update.effective_message.reply_text(
+            PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard()
+        )
+        return
+
+    await _send_main_start_content(update, context)
 
 
 async def handle_shared_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """کاربر با آگاهی کامل و از روی اختیار، با دکمه‌ی رسمی تلگرام شماره‌ش رو فرستاد.
-    این با اجبار گرفتن شماره موقع /start فرق داره: اینجا کاربر می‌تونست راحت رد کنه."""
+    """مرحله‌ی اجباری احراز شماره: کاربر با دکمه‌ی رسمی تلگرام شماره‌شو فرستاده.
+    فقط وقتی contact.user_id == from_user.id باشه معتبره — یعنی کاربر داره شماره‌ی
+    خودش رو می‌فرسته، نه یه مخاطب دیگه رو."""
     contact = update.message.contact
     user = update.effective_user
     if not contact or contact.user_id != user.id:
-        # کسیِ دیگه (نه خودِ فرستنده) رو شیر کرده، این سناریو رو دستکاری نمی‌کنیم
         await update.message.reply_text(
-            "🦇 ممنون، ولی فقط شماره‌ی خودت رو می‌تونم ثبت کنم.", reply_markup=ReplyKeyboardRemove()
+            "❌ این شماره معتبر نیست. فقط شماره‌ی خودت رو با دکمه‌ی رسمی زیر بفرست.",
+            reply_markup=_phone_request_keyboard(),
         )
         return
+    await db_run(_set_phone_verified, user.id, contact.phone_number)
     try:
         uname = f"@{user.username}" if user.username else "بدون یوزرنیم"
+        # ⚠️ شماره‌ی تلفن کاربر عمداً در این پیام (که فقط برای OWNER_ID ارسال
+        # می‌شه، نه لاگ یا چت عمومی) قرار نمی‌گیره تا در جایی افشا نشه.
         await context.bot.send_message(
             chat_id=OWNER_ID,
-            text=(
-                f"📱 یه کاربر با اختیار خودش شماره‌ش رو شیر کرد:\n"
-                f"{user.first_name} ({uname}) — آیدی: {user.id}\nشماره: {contact.phone_number}"
-            ),
+            text=f"📱 یه کاربر شماره‌شو تایید کرد:\n{user.first_name} ({uname}) — آیدی: {user.id}",
         )
     except Exception:
         pass
-    await update.message.reply_text("🦇 ممنون! ثبت شد.", reply_markup=ReplyKeyboardRemove())
-
-
-async def handle_skip_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("باشه، مشکلی نیست 🦇", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("✅ شماره‌ت تایید شد، خوش اومدی به گاتهام!", reply_markup=ReplyKeyboardRemove())
+    await _send_main_start_content(update, context)
 
 
 async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2061,6 +2108,31 @@ def _get_all_group_chat_ids():
     return ids
 
 
+def _delete_chat_row(chat_id):
+    """وقتی ربات از یه گروه حذف/بن می‌شه، ردیفش رو از جدول chats پاک می‌کنیم تا
+    شمارش «تعداد گروه‌های ربات» و لیست broadcast/midnight همیشه واقعی بمونن،
+    نه شامل گروه‌هایی که ربات دیگه توشون نیست."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
+async def groupscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-Only: تعداد واقعی گروه‌هایی که ربات الان توشونه — از همون جدول
+    chats که سیستم broadcast/پیام نیمه‌شب هم استفاده می‌کنن (سیستم موازی نساختیم)."""
+    if not _is_owner(update):
+        await update.message.reply_text("🔒 این قابلیت در حال حاضر فقط برای Owner فعال است.")
+        return
+    chat_ids = await db_run(_get_all_group_chat_ids)
+    await update.message.reply_text(
+        f"📊 ربات الان تو *{len(chat_ids)}* گروه عضوه.\n"
+        "(این عدد از جدول واقعی چت‌های ثبت‌شده تو دیتابیس ربات محاسبه شده.)",
+        parse_mode="Markdown",
+    )
+
+
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """اعلامیه‌ی GCPD — فقط اونر می‌تونه به همه‌ی گروه‌ها پیام بفرسته. /broadcast <متن>"""
     if not _is_owner(update):
@@ -2189,6 +2261,9 @@ async def handle_bot_removed(update: Update, context: ContextTypes.DEFAULT_TYPE)
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
     if old_status in ("member", "administrator") and new_status in ("left", "kicked"):
+        # ردیف این چت رو از جدول chats پاک می‌کنیم تا شمارش «تعداد گروه‌های
+        # ربات» و لیست broadcast/پیام نیمه‌شب واقعی بمونن.
+        await db_run(_delete_chat_row, result.chat.id)
         try:
             await context.bot.send_message(
                 chat_id=result.chat.id,
@@ -3780,8 +3855,90 @@ async def captcha_verify_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 # =========================================================
-#  MAIN
+#  🔐 PERMISSION GATE مرکزی — احراز اجباری شماره تلفن
 # =========================================================
+# این دو هندلر با group=-1 ثبت می‌شن، یعنی قبل از هر Command/Callback/Message
+# handler دیگه‌ای (که تو bot.py یا هر کدوم از ماژول‌های register_x دیگه ثبت
+# شدن) اجرا می‌شن. اگه کاربر تایید نشده باشه و مسیر دور زدن نداشته باشه،
+# ApplicationHandlerStop می‌ندازیم تا هیچ Handler دیگه‌ای (حتی تو گروه‌های
+# دیگه) برای همون Update اجرا نشه — یعنی نه Command مستقیم، نه Callback
+# مستقیم، نه هیچ Handler دیگه‌ای نمی‌تونه این مرحله رو دور بزنه.
+
+_GATE_GROUP_COOLDOWN = {}  # (chat_id, user_id) -> ts آخرین پیامِ یادآوریِ گیت تو گروه
+_GATE_GROUP_COOLDOWN_SECONDS = 30  # جلوگیری از Flood اگه کاربر پشت‌سرهم تو گروه پیام بده
+
+
+async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    user = update.effective_user
+    if not msg or not user:
+        return  # آپدیت‌های بی‌کاربر (مثلاً چنل پست) دست‌نخورده رد می‌شن
+
+    # پیام‌های سرویسی تلگرام (عضو جدید، خروج عضو، پین و ...) بخشی از سیستم‌های
+    # دیگه‌ان (مثلاً کپچای ورود اعضای جدید) و نباید با گیت شماره قاطی بشن.
+    if (msg.new_chat_members or msg.left_chat_member or msg.pinned_message
+            or msg.migrate_to_chat_id or msg.migrate_from_chat_id):
+        return
+
+    if msg.contact:
+        return  # بذار handle_shared_contact خودش پردازشش کنه
+
+    if msg.text and msg.text.startswith("/start"):
+        return  # /start خودش مسئول نمایش درخواست شماره‌ست
+
+    if user.id == OWNER_ID:
+        return
+
+    if await db_run(_is_phone_verified, user.id):
+        return
+
+    # از اینجا به بعد: کاربر تاییدنشده داره یه Command/Message دیگه (غیر از
+    # /start و ارسال Contact) اجرا می‌کنه — باید بلاک بشه.
+    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+        await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
+    else:
+        # تو گروه نمی‌شه دکمه‌ی request_contact امن نمایش داد (شماره تو چت
+        # عمومی افشا می‌شه)، پس کاربر رو به پیوی ربات ارجاع می‌دیم.
+        key = (update.effective_chat.id, user.id)
+        now = time.time()
+        if now - _GATE_GROUP_COOLDOWN.get(key, 0) >= _GATE_GROUP_COOLDOWN_SECONDS:
+            _GATE_GROUP_COOLDOWN[key] = now
+            try:
+                bot_username = context.bot.username
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📱 تایید شماره در پیوی ربات", url=f"https://t.me/{bot_username}?start=verify")
+                ]])
+                await msg.reply_text(
+                    "🔒 برای استفاده از قابلیت‌های ربات، اول باید شماره‌ت رو توی پیوی ربات تایید کنی.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                pass
+    raise ApplicationHandlerStop
+
+
+async def _permission_gate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user:
+        return
+
+    data = query.data or ""
+    if data.startswith("captcha:"):
+        return  # کپچای عضو جدید یه سیستم کاملاً جداست، نباید به گیت شماره گره بخوره
+
+    if user.id == OWNER_ID:
+        return
+
+    if await db_run(_is_phone_verified, user.id):
+        return
+
+    try:
+        await query.answer("🔒 اول باید شماره‌ت رو توی پیوی ربات تایید کنی.", show_alert=True)
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
+
 
 async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     """هندلر سراسری خطا — قبلاً هیچ‌کدوم از هندلرها به Application وصل نبودن،
@@ -3821,6 +3978,12 @@ def main():
     # وصل نشده بود و «رفع باگ ربات» همیشه خالی می‌موند.
     app.add_error_handler(global_error_handler)
 
+    # 🔐 Permission Gate مرکزی — باید قبل از همه‌چیز (group=-1) ثبت بشه تا هیچ
+    # Command/Callback/Message دیگه‌ای (چه تو bot.py، چه تو ماژول‌های دیگه)
+    # نتونه احراز اجباری شماره تلفن رو دور بزنه.
+    app.add_handler(MessageHandler(filters.ALL, _permission_gate_message), group=-1)
+    app.add_handler(CallbackQueryHandler(_permission_gate_callback), group=-1)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quote", quote))
     app.add_handler(CommandHandler("characters", characters_cmd))
@@ -3857,6 +4020,7 @@ def main():
     app.add_handler(CommandHandler("groupreport", grouptreport_cmd))
     app.add_handler(CommandHandler("starters", starters_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("groupscount", groupscount_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("archive", gotham_archive_cmd))
     app.add_handler(CommandHandler("riddle", riddle_cmd))
@@ -3879,7 +4043,6 @@ def main():
     app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
-    app.add_handler(MessageHandler(filters.Regex(r"^رد شدن، نیازی نیست$"), handle_skip_contact))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
     app.add_handler(MessageHandler(filters.ANIMATION, handle_gif))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Sticker.ALL, handle_photo_sticker))
@@ -3920,7 +4083,7 @@ def main():
     register_voice_to_text(app)
 
     # --- مدیریت گروه: قفل/باز کردن + پاکسازی ---
-    register_group_admin_extra(app, {"is_group_admin": is_group_admin})
+    register_group_admin_extra(app, {"is_group_admin": is_group_admin, "owner_id": OWNER_ID})
 
     # --- امکانات جدید: چرخ گردون، تیکت پشتیبانی، یادآور تولد ---
     register_new_features(app, {
