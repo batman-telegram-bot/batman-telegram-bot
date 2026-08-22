@@ -121,12 +121,20 @@ def _today_case(chat_id):
     return state
 
 
+def _case_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔍 بررسی پرونده", callback_data="case:show"),
+        InlineKeyboardButton("💡 راهنمایی", callback_data="case:hint"),
+    ]])
+
+
 def _case_cmd_factory(deps):
     async def case_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = _today_case(update.effective_chat.id)
         status = " (قبلاً حل شده)" if state["solved"] else ""
         await update.effective_message.reply_text(
-            f"🧩 پرونده‌ی امروز گاتهام{status}:\n«{state['q']}»\n\nبرای جواب بنویس: «جواب <حدست>»"
+            f"🧩 پرونده‌ی امروز گاتهام{status}:\n«{state['q']}»\n\nبرای جواب بنویس: «جواب <حدست>»",
+            reply_markup=_case_keyboard(),
         )
 
     async def answer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +156,35 @@ def _case_cmd_factory(deps):
         await update.effective_message.reply_text(
             f"🧩 آفرین {user.first_name}! درست بود — جواب: «{state['a']}». +۲۰ امتیاز 🏆"
         )
-    return case_cmd, answer_cmd
+
+    async def case_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # 🕵️ GOTHAM CASE FILE (Phase 6) — از همون _CASE_STATE/_today_case
+        # موجود استفاده می‌کنه؛ فقط دو دکمه‌ی «بررسی پرونده» و «راهنمایی»
+        # به سیستم فعلی اضافه شد. «✅ جواب» دکمه نشد چون جواب یه حدسِ آزاده و
+        # از طریق دکمه قابل گرفتن نیست — همون «جواب <حدست>» متنی موجود می‌مونه.
+        q = update.callback_query
+        action = q.data.split(":", 1)[1]
+        chat_id = update.effective_chat.id
+        state = _today_case(chat_id)
+        if action == "show":
+            status = " (قبلاً حل شده)" if state["solved"] else ""
+            await q.answer()
+            await q.edit_message_text(
+                f"🧩 پرونده‌ی امروز گاتهام{status}:\n«{state['q']}»\n\nبرای جواب بنویس: «جواب <حدست>»",
+                reply_markup=_case_keyboard(),
+            )
+            return
+        if action == "hint":
+            if state["solved"]:
+                await q.answer("این پرونده قبلاً حل شده.", show_alert=True)
+                return
+            ans = state["a"]
+            hint = f"جواب {len(ans)} حرفیه و با «{ans[0]}» شروع می‌شه."
+            await q.answer(f"💡 {hint}", show_alert=True)
+            return
+        await q.answer()
+
+    return case_cmd, answer_cmd, case_button_callback
 
 
 # --- ۴) کدوم شخصیت گاتهامی هستی؟ (کوییز کوتاه) ---
@@ -299,7 +335,7 @@ def register_fortune_and_extras(app, deps):
     """
     fortune_cmd = _fortune_cmd_factory(deps)
     slot_cmd = _slot_cmd_factory(deps)
-    case_cmd, answer_cmd = _case_cmd_factory(deps)
+    case_cmd, answer_cmd, case_button_callback = _case_cmd_factory(deps)
     quiz_cmd, quiz_callback = _quiz_cmd_factory()
     capsule_cmd = _capsule_cmd_factory()
     citizen_job = _citizen_job_factory(deps)
@@ -307,6 +343,7 @@ def register_fortune_and_extras(app, deps):
     app.add_handler(MessageHandler(FORTUNE_RE, fortune_cmd), group=26)
     app.add_handler(MessageHandler(SLOT_RE, slot_cmd), group=26)
     app.add_handler(MessageHandler(CASE_RE, case_cmd), group=26)
+    app.add_handler(CallbackQueryHandler(case_button_callback, pattern=r"^case:"), group=26)
     app.add_handler(MessageHandler(ANSWER_RE, answer_cmd), group=26)
     app.add_handler(MessageHandler(QUIZ_RE, quiz_cmd), group=26)
     app.add_handler(CallbackQueryHandler(quiz_callback, pattern=r"^quiz:"), group=26)

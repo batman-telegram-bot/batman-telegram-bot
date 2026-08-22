@@ -313,6 +313,16 @@ async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["discard"].append(card)
         if not hand:
             _uno_cancel_timer(context.application, gid)
+            # اتصال به Score موجود — فقط وقتی بازی دقیقاً دونفره‌ست، چون
+            # _record_game_result یه برنده/بازنده‌ی تکی می‌خواد و تو یونوی
+            # ۳-۴ نفره معلوم نیست «بازنده» کدوم بقیه‌ست؛ حدس نزدم.
+            if len(game["players"]) == 2:
+                loser_id = [p for p in game["players"] if p != uid][0]
+                try:
+                    import bot as _bot
+                    _bot._record_game_result(game["chat_id"], uid, loser_id)
+                except Exception:
+                    pass
             await q.edit_message_text(f"🃏 یونو تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🎉 کارت‌هاش تموم شد!")
             del UNO_GAMES[gid]; await q.answer(); return
         if card[0] == "W":

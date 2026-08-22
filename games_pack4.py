@@ -711,5 +711,10 @@ def register_extra_games2(app):
     app.add_handler(MessageHandler(_kw("گیر بازار|بازی گیر بازار"), bazar_start), group=4)
     app.add_handler(CallbackQueryHandler(bazar_callback, pattern=r"^bazar:"), group=4)
 
-    app.add_handler(CallbackQueryHandler(_noop_callback, pattern=r"^noop$"), group=4)
+    # 🐛 Duplicate Handler رفع شد: قبلاً اینجا هم یه CallbackQueryHandler برای
+    # "^noop$" ثبت می‌شد، درست مثل games_pack2.py. چون هر دو تو گروه‌های
+    # جداگونه بودن، هر کلیک رو دکمه‌های تزئینی (مثل خونه‌های خالیِ ۲۰۴۸/دوز/
+    # دوردونه) هر دو رو صدا می‌زد؛ دومی چون callback_query از قبل answer شده
+    # بود می‌خورد به خطای بی‌صدا. همون هندلر مشترکِ games_pack2.py برای همه‌ی
+    # دکمه‌های noopِ کل ربات کافیه — این ثبتِ تکراری حذف شد.
     app.add_handler(CallbackQueryHandler(lobby4_join_callback, pattern=r"^lobby4:"), group=4)

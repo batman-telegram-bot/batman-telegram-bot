@@ -111,6 +111,7 @@ async def _launch_gotham_ttt(target_msg, p1, p2, size, edit=False):
     vs_bot = p2 is None
     win_len = _gttt_win_length(size)
     GTTT_GAMES[gid] = {
+        "chat_id": target_msg.chat.id,
         "size": size, "win_len": win_len, "board": [""] * (size * size),
         "players": {"X": p1.id, "O": ("BOT" if vs_bot else p2.id)},
         "names": {p1.id: p1.first_name, **({} if vs_bot else {p2.id: p2.first_name})},
@@ -189,6 +190,19 @@ def _gttt_bot_move(game):
     return empties[0]
 
 
+def _gttt_record_result(game, winner_uid, loser_uid):
+    """اتصال به Score موجود (bot._record_game_result) — فقط برای بازی‌های
+    واقعاً دونفره؛ برد/باخت مقابل ربات حدس‌زده نشد و ثبت نمی‌شه چون تو
+    مشخصات چیزی درباره‌ش گفته نشده بود."""
+    if game.get("vs_bot"):
+        return
+    try:
+        import bot as _bot
+        _bot._record_game_result(game["chat_id"], winner_uid, loser_uid)
+    except Exception:
+        pass
+
+
 async def gotham_ttt_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -210,6 +224,8 @@ async def gotham_ttt_move_callback(update: Update, context: ContextTypes.DEFAULT
 
     if _gttt_check_win(game["board"], size, win_len, mark):
         winner_name = game["names"].get(uid, mark)
+        loser_uid = game["players"]["O"] if mark == "X" else game["players"]["X"]
+        _gttt_record_result(game, uid, loser_uid)
         await q.edit_message_text(f"🎯 دوز گاتهام تمام شد!\n\n🏆 برنده: {winner_name} ({mark})", reply_markup=_gttt_markup(gid, game))
         del GTTT_GAMES[gid]; await q.answer(); return
     if all(game["board"]):

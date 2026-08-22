@@ -1280,6 +1280,7 @@ def build_new_features_keyboard():
          InlineKeyboardButton("🎵 تشخیص آهنگ", callback_data="panel:song_info")],
         [InlineKeyboardButton("🎂 یادآور تولد یار بتمن", callback_data="bday:open"),
          InlineKeyboardButton("📝 خلاصه‌ی گروه", callback_data="panel:summary_info")],
+        [InlineKeyboardButton("🎯 چالش روزانه گاتهام", callback_data="panel:daily")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -2544,6 +2545,11 @@ _FOREIGN_CALLBACK_PREFIXES = (
     # card_room (گروه ۵) موقع answer/edit خودش با خطای "قبلاً answer شده" مواجه
     # می‌شد و دکمه بی‌صدا هیچ کاری نمی‌کرد. رفع باگ: همون الگوی lobby4/lobby5/gttt/grps.
     "cr:", "war:", "bj21:", "bjd:", "hokm:", "haft:", "charbarg:", "rummy:", "poker:",
+    # 🕵️ پرونده روز (fortune_and_extras.py, Phase 6) — همون کلاس باگِ Phase 0؛
+    # هر callback جدید که تو یه فایل دیگه (نه bot.py) با CallbackQueryHandler
+    # مخصوص خودش ثبت می‌شه، باید همینجا هم اضافه بشه وگرنه button_handler
+    # (گروه ۰، بدون pattern) اول answer() رو مصرف می‌کنه.
+    "case:",
     # 🎬 تشخیص رسانه (media_recognition.py) — همون کلاس باگ؛ دکمه‌های "تشخیص
     # فیلم/سریال" و "تشخیص آهنگ" هم قبلاً تو این لیست نبودن.
     "mr:",
@@ -2599,6 +2605,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "panel:persona":
         await query.edit_message_text("🎭 یه شخصیت انتخاب کن:", reply_markup=build_persona_panel_keyboard())
+        return
+
+    if data == "panel:daily":
+        # 🎯 GOTHAM DAILY CHALLENGE (Phase 6) — سیستم ماموریت روزانه از قبل
+        # کامل تو bot.py وجود داشت (reset_daily_mission_if_needed، دکمه‌ی
+        # claim_mission، همه‌چی) ولی فقط از دستور /missions در دسترس بود؛
+        # سیستم اقتصادی جدیدی ساخته نشد، فقط از Control Center بهش وصل شدیم.
+        player = await db_run(_get_player, chat_id, update.effective_user.id, update.effective_user.username or "")
+        player = reset_daily_mission_if_needed(player)
+        await db_run(_save_player, player)
+        text = (
+            "🎯 *چالش روزانه گاتهام*\n\n"
+            f"⚔️ ۳ جنگ رو ببر ({player['wins_today']}/{DAILY_MISSION_TARGET})\n"
+        )
+        kb_rows = []
+        if player["wins_today"] >= DAILY_MISSION_TARGET and not player["mission_claimed"]:
+            text += "\n✅ ماموریت تکمیل شد! جایزه‌ت رو بگیر."
+            kb_rows.append([InlineKeyboardButton("🎁 دریافت جایزه", callback_data="claim_mission")])
+        elif player["mission_claimed"]:
+            text += "\n🎉 جایزه امروز رو گرفتی، فردا دوباره بیا."
+        kb_rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="panel:new")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="Markdown")
         return
 
     if data == "panel:lists":

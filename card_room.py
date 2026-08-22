@@ -1058,7 +1058,10 @@ def _hokm_trump_markup(gid):
 
 
 def _hokm_control_markup(gid, state):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 دست من (خصوصی)", callback_data=f"hokm:hand:{gid}")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🃏 دست من (خصوصی)", callback_data=f"hokm:hand:{gid}")],
+        _forfeit_row("hokm", gid),
+    ])
 
 
 async def _launch_hokm(context, target_msg, p1, p2):
@@ -1130,6 +1133,18 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in state["order"]:
         await q.answer("تو تو این بازی نیستی.", show_alert=True); return
+
+    if action == "forfeit":
+        _cancel_timeout(context.application, "hokm", gid)
+        p1, p2 = state["order"]
+        winner = p2 if uid == p1 else p1
+        _record_result(state["chat_id"], winner, uid)
+        token = _store_rematch(state["chat_id"], state["players"][p1], state["players"][p2], "hokm")
+        await q.edit_message_text(
+            f"🏳 {state['names'][uid]} از بازی انصراف داد.\n\n🏆 برنده: {state['names'][winner]}",
+            reply_markup=_rematch_markup(token),
+        )
+        del HOKM_GAMES[gid]; await q.answer(); return
 
     if action == "trump":
         if uid != state["hakem"]:
