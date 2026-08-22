@@ -12,6 +12,29 @@ from telegram import Bot
 
 RECENT_ERRORS = deque(maxlen=20)
 
+# دسته‌بندی خطاها طبق مشخصات (Exception/API/Handler/Database/AI/Downloader).
+# چون فیلد kind یه رشته‌ی آزاده (هر فراخوانی remember_error هرچی بخواد می‌ده)،
+# دسته‌بندی با تطبیق کلیدواژه رو خودِ همون داده‌ی واقعی انجام می‌شه — چیزی
+# جعل نمی‌شه، فقط داده‌ی موجود مرتب می‌شه.
+BUG_CATEGORIES = {
+    "api": ("API", ("api", "groq", "http", "download", "yt-dlp", "instaloader")),
+    "handler": ("Handler", ("handler", "callback", "button", "keyboard")),
+    "database": ("Database", ("db", "database", "sqlite", "sql")),
+    "ai": ("AI", ("ai", "groq", "llm", "voice", "transcribe", "recognition")),
+    "downloader": ("Downloader", ("downloader", "youtube", "instagram", "tiktok", "twitter", "pinterest", "soundcloud")),
+    "exception": ("Exception", ()),  # پیش‌فرض/باقی‌مونده
+}
+
+
+def _categorize(kind: str) -> str:
+    k = (kind or "").lower()
+    for cat_key, (_label, keywords) in BUG_CATEGORIES.items():
+        if cat_key == "exception":
+            continue
+        if any(kw in k for kw in keywords):
+            return cat_key
+    return "exception"
+
 
 def _clean(value, limit=1200):
     text = str(value or "").replace("`", "'")
@@ -26,6 +49,7 @@ def remember_error(kind, exc, *, chat_id=None, user_id=None, extra=None):
     item = {
         "time": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
         "kind": _clean(kind, 80),
+        "category": _categorize(kind),
         "error": _clean(f"{type(exc).__name__}: {exc}", 1000),
         "chat_id": chat_id,
         "user_id": user_id,
@@ -74,4 +98,108 @@ def recent_errors_text(limit=8):
     for i, item in enumerate(list(RECENT_ERRORS)[:limit], 1):
         lines.append(f"{i}. `{item['time']}` — *{item['kind']}* — `{item['error'][:180]}`")
     lines += ["", "⚡️ خطاهای جدید به‌صورت خودکار برای مالک ربات ارسال می‌شوند."]
+    return "\n".join(lines)
+
+
+def category_counts():
+    """چند تا خطا (تو حافظه‌ی همین اجرای ربات) تو هر دسته ثبت شده."""
+    counts = {cat_key: 0 for cat_key in BUG_CATEGORIES}
+    for item in RECENT_ERRORS:
+        cat = item.get("category") or _categorize(item.get("kind", ""))
+        counts[cat] = counts.get(cat, 0) + 1
+    return counts
+
+
+def errors_by_category_text(cat_key: str, limit=15):
+    label = BUG_CATEGORIES.get(cat_key, (cat_key, ()))[0]
+    items = [it for it in RECENT_ERRORS if (it.get("category") or _categorize(it.get("kind", ""))) == cat_key]
+    if not items:
+        return f"📜 *لاگ خطاها — {label}*\n\n✅ خطایی تو این دسته ثبت نشده."
+    lines = [f"📜 *لاگ خطاها — {label}*", ""]
+    for i, item in enumerate(items[:limit], 1):
+        lines.append(f"{i}. `{item['time']}` — *{item['kind']}* — `{item['error'][:180]}`")
+    return "\n".join(lines)
+
+
+def clear_log():
+    n = len(RECENT_ERRORS)
+    RECENT_ERRORS.clear()
+    return n
+
+
+async def health_check_text(context) -> str:
+    """🩺 GOTHAM HEALTH — بررسی سلامت اجزای اصلی ربات. هم زیر «رفع باگ ربات
+    ← وضعیت ربات» و هم به‌عنوان Health Check مستقل (Phase 5) از همین یه تابع
+    استفاده می‌شه — سیستم موازی ساخته نشده."""
+    checks = []
+
+    # Database — یه کوئری واقعی و سبک روی همون دیتابیس فعلی
+    try:
+        import bot as _bot
+        conn = _bot._connect()
+        conn.cursor().execute("SELECT 1")
+        conn.close()
+        checks.append(("Database", "🟢 OK", ""))
+    except Exception as e:
+        checks.append(("Database", "🔴 ERROR", _clean(e, 120)))
+
+    # Handlers — تعداد Handlerهای واقعاً ثبت‌شده رو Application
+    try:
+        app = getattr(context, "application", None)
+        total = sum(len(v) for v in app.handlers.values()) if app and getattr(app, "handlers", None) else 0
+        checks.append(("Handlers", f"🟢 OK ({total} handler)" if total else "🟡 WARNING", ""))
+    except Exception as e:
+        checks.append(("Handlers", "🔴 ERROR", _clean(e, 120)))
+
+    # Game Sessions — جمع بازی‌های فعال تو حافظه، از تمام ماژول‌های بازی
+    try:
+        active = 0
+        for mod_name, attr_names in (
+            ("card_room", ("WAR_GAMES", "BJ21_GAMES", "BLACKJACK_GAMES", "HOKM_GAMES",
+                           "HAFT_GAMES", "CHARBARG_GAMES", "RUMMY_GAMES", "POKER_GAMES")),
+            ("games_pack5", ("UNO_GAMES", "TER_GAMES", "BIL_GAMES", "RACE_GAMES")),
+            ("group_rps", ("GRPS_GAMES",)),
+            ("ttt_gotham", ("GTTT_GAMES",)),
+        ):
+            try:
+                mod = __import__(mod_name)
+                for attr in attr_names:
+                    active += len(getattr(mod, attr, {}) or {})
+            except Exception:
+                continue
+        checks.append(("Game Sessions", f"🟢 OK ({active} فعال)", ""))
+    except Exception as e:
+        checks.append(("Game Sessions", "🔴 ERROR", _clean(e, 120)))
+
+    # Downloader
+    try:
+        import downloader  # noqa: F401
+        checks.append(("Downloader", "🟢 OK", ""))
+    except Exception as e:
+        checks.append(("Downloader", "🔴 ERROR", _clean(e, 120)))
+
+    # AI (کلید GROQ)
+    checks.append(("AI", "🟢 OK" if os.getenv("GROQ_API_KEY") else "🟡 WARNING (بدون کلید API)", ""))
+
+    # Bug Reporter — همیشه OK چون داریم توش اجرا می‌شیم
+    checks.append(("Bug Reporter", f"🟢 OK ({len(RECENT_ERRORS)} خطای اخیر تو حافظه)", ""))
+
+    # Security
+    try:
+        import security_tools  # noqa: F401
+        checks.append(("Security", "🟢 OK", ""))
+    except Exception as e:
+        checks.append(("Security", "🔴 ERROR", _clean(e, 120)))
+
+    # Scheduler
+    try:
+        app = getattr(context, "application", None)
+        has_jq = bool(app and getattr(app, "job_queue", None) is not None)
+        checks.append(("Scheduler", "🟢 OK" if has_jq else "🟡 WARNING", ""))
+    except Exception as e:
+        checks.append(("Scheduler", "🔴 ERROR", _clean(e, 120)))
+
+    lines = ["🩺 *GOTHAM HEALTH*", ""]
+    for name, status, note in checks:
+        lines.append(f"{status} — {name}" + (f" ({note})" if note else ""))
     return "\n".join(lines)

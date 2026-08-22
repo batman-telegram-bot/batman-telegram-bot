@@ -396,6 +396,35 @@ async def try_resume_after_start(update, context):
             PRIVATE_PENDING.get(uid, set()).discard(gid)
 
 
+def active_card_games_for_user(user_id):
+    """🎮 بازی‌های فعال من (Phase 5) — بازی‌های کارتیِ فعلاً بازِ این کاربر رو
+    برمی‌گردونه: [(label, chat_id, opponent_name, my_turn_bool), ...].
+    دورهم‌جمع (ttt_gotham.GTTT_GAMES) عمداً اینجا نیست چون اصلاً chat_id تو
+    state‌ش ذخیره نمی‌کنه — امن نیست حدس زده بشه؛ تو گزارش نهایی هم گفته شده."""
+    results = []
+    for game_key, games_dict in (
+        ("war", WAR_GAMES), ("bj21", BJ21_GAMES), ("blackjack", BLACKJACK_GAMES),
+        ("charbarg", CHARBARG_GAMES), ("rummy", RUMMY_GAMES), ("poker", POKER_GAMES),
+        ("hokm", HOKM_GAMES),
+    ):
+        for gid, state in games_dict.items():
+            if user_id not in state.get("players", {}):
+                continue
+            order = state.get("order", [])
+            opp_id = next((u for u in order if u != user_id), None)
+            opp_name = state.get("names", {}).get(opp_id, "؟") if opp_id else "؟"
+            my_turn = bool(order) and "turn" in state and 0 <= state["turn"] < len(order) and order[state["turn"]] == user_id
+            results.append((CARD_GAME_LABELS.get(game_key, game_key), state.get("chat_id"), opp_name, my_turn))
+
+    for gid, state in HAFT_GAMES.items():
+        if user_id not in state.get("order", []):
+            continue
+        others = [state["names"][u] for u in state.get("order", []) if u != user_id]
+        results.append((CARD_GAME_LABELS.get("haft", "haft"), state.get("chat_id"), "، ".join(others) or "؟", None))
+
+    return results
+
+
 async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -406,7 +435,11 @@ async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await q.answer(); return
 
     if action == "quick":
-        game_key = random.choice(list(IMPLEMENTED_GAMES))
+        # ⚡ بازی سریع (Phase 5): طبق اولویت مشخصات — ۱) دونفره ۲) سریع ۳) کارتی.
+        # قبلاً بین هر ۸ بازی (even رامی/پوکر/حکم که کند و پرمرحله‌ن) رندوم
+        # انتخاب می‌شد؛ الان فقط از بین بازی‌های واقعاً دونفره‌ی سریع انتخاب می‌شه.
+        quick_pool = [g for g in ("war", "bj21") if g in IMPLEMENTED_GAMES] or list(IMPLEMENTED_GAMES)
+        game_key = random.choice(quick_pool)
         await _open_lobby(q.message, update.effective_user, game_key, edit=True)
         await q.answer(f"⚡ {CARD_GAME_LABELS[game_key]} انتخاب شد!"); return
 
@@ -1042,7 +1075,9 @@ async def _launch_hokm(context, target_msg, p1, p2):
     h1.sort(key=lambda c: (c[1], RANK_VALUE[c[0]]))
     h2.sort(key=lambda c: (c[1], RANK_VALUE[c[0]]))
     HOKM_GAMES[gid] = {
+        "chat_id": target_msg.chat_id, "message_id": None,
         "order": [p1.id, p2.id], "names": {p1.id: _name(p1), p2.id: _name(p2)},
+        "players": {p1.id: p1, p2.id: p2},
         "hands": {p1.id: h1, p2.id: h2},
         "hakem": hakem, "trump": None, "phase": "choose_trump",
         "tricks": {p1.id: 0, p2.id: 0}, "table": [], "turn": 0,
@@ -1145,16 +1180,24 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note = f"🎯 دست کوچیک رو {state['names'][winner]} برد."
         if state["tricks"][winner] >= HOKM_TRICKS_TO_WIN:
             loser = [p for p in state["order"] if p != winner][0]
+            _record_result(state["chat_id"], winner, loser)
+            token = _store_rematch(state["chat_id"], state["players"][state["order"][0]],
+                                    state["players"][state["order"][1]], "hokm")
             await q.edit_message_text(
-                f"{_hokm_text(state)}\n\n{note}\n\n🏆🏆 {state['names'][winner]} با {state['tricks'][winner]} دست برنده‌ی بازی شد!"
+                f"{_hokm_text(state)}\n\n{note}\n\n🏆🏆 {state['names'][winner]} با {state['tricks'][winner]} دست برنده‌ی بازی شد!",
+                reply_markup=_rematch_markup(token),
             )
             del HOKM_GAMES[gid]; await q.answer(); return
 
         if not state["hands"][state["order"][0]] and not state["hands"][state["order"][1]]:
             p1, p2 = state["order"]
             champ = p1 if state["tricks"][p1] > state["tricks"][p2] else p2
+            loser = p2 if champ == p1 else p1
+            _record_result(state["chat_id"], champ, loser)
+            token = _store_rematch(state["chat_id"], state["players"][p1], state["players"][p2], "hokm")
             await q.edit_message_text(
-                f"{_hokm_text(state)}\n\n{note}\n\n🏁 کارت‌ها تموم شد. 🏆 برنده: {state['names'][champ]}"
+                f"{_hokm_text(state)}\n\n{note}\n\n🏁 کارت‌ها تموم شد. 🏆 برنده: {state['names'][champ]}",
+                reply_markup=_rematch_markup(token),
             )
             del HOKM_GAMES[gid]; await q.answer(); return
 

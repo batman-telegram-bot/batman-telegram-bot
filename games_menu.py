@@ -118,6 +118,10 @@ def build_games_menu_root_keyboard() -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
+    # ⚡ بازی سریع (Phase 5) — همون منطق cr:quick تو card_room.py رو صدا می‌زنه؛
+    # بازی جدیدی ساخته نشده، فقط یه مسیر میان‌بر به همون قابلیتِ از قبل موجوده.
+    rows.append([InlineKeyboardButton("⚡ بازی سریع", callback_data="cr:quick"),
+                 InlineKeyboardButton("🎮 بازی‌های فعال من", callback_data="panel:active_games")])
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")])
     return InlineKeyboardMarkup(rows)
 

@@ -50,7 +50,14 @@ def _format_persian_date(now: datetime) -> str:
     if not HAS_JDATETIME:
         return "(برای تاریخ شمسی: pip install jdatetime)"
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
-    weekday = WEEKDAYS_FA[jnow.weekday()]
+    # 🐛 باگ روز هفته: WEEKDAYS_FA با ترتیب weekday() پایتونِ معمولی ساخته شده
+    # (دوشنبه=۰ … یکشنبه=۶)، اما jdatetime.weekday() ترتیب خودش رو داره
+    # (شنبه=۰ … جمعه=۶ — طبق خودِ کتابخونه). قبلاً با jnow.weekday() ایندکس
+    # می‌خورد که غلط بود؛ روز هفته واقعی که ربات میلادی/شمسی نداره، همونیه
+    # که تو خودِ آبجکت now (میلادی) هست، پس با now.weekday() (که با ترتیب
+    # همین لیست هم‌خونه) درست می‌شه — دقیقاً همون کاری که _format_hijri_date
+    # پایین‌تر همیشه درست انجام می‌داد.
+    weekday = WEEKDAYS_FA[now.weekday()]
     month = MONTHS_FA[jnow.month - 1]
     return f"{weekday} {jnow.day} {month} {jnow.year} ساعت {now.strftime('%H:%M')}"
 

@@ -34,15 +34,18 @@ from games_pack3 import register_extra_lists
 from games_pack4 import register_extra_games2
 from games_pack5 import register_extra_games3
 from board_games import register_board_games
-from group_rps import register_group_rps
+from group_rps import register_group_rps, GRPS_GAMES
 from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
 from games_menu import register_games_menu, GAMES_MENU_MAIN_TEXT, build_games_menu_root_keyboard
-from card_room import register_card_room
+from card_room import register_card_room, active_card_games_for_user
 from gotham_content import gotham_signature_line, RIDDLES
 from downloader import register_downloader, dl_menu_markup, DOWNLOADER_HELP_TEXT
 from admin_panel import register_admin_panel
-from bug_reporter import recent_errors_text
+from bug_reporter import (
+    recent_errors_text, category_counts, errors_by_category_text, clear_log, health_check_text,
+    BUG_CATEGORIES, RECENT_ERRORS,
+)
 from security_tools import register_security, build_security_text_and_kb
 from tools_and_fun import register_tools_and_fun, TOOLS_TEXT, FUN_TEXT, tools_menu_keyboard, fun_menu_keyboard
 from compress_tools import register_compress
@@ -1340,8 +1343,8 @@ def build_mod_panel_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-def build_back_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")]])
+def build_back_keyboard(target="panel:main"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=target)]])
 
 
 def build_persona_panel_keyboard():
@@ -2618,20 +2621,106 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text.replace("*", ""), reply_markup=build_gdb_detail_keyboard())
         return
 
-    if data == "panel:bug":
-        try:
-            await query.edit_message_text(
-                recent_errors_text(), reply_markup=build_back_keyboard(), parse_mode="Markdown"
+    if data == "panel:bug" or data.startswith("bug:"):
+        # 🛠 رفع باگ ربات — فقط Owner/Admin. قبلاً هیچ محدودیتی نبود و Traceback
+        # کامل برای هر کسی که این دکمه رو می‌زد نمایش داده می‌شد؛ این خودش یه
+        # نشتی اطلاعاتیه که با همین تغییر جمع شد.
+        if not _is_owner(update):
+            await query.answer("این بخش فقط برای مالک ربات در دسترسه.", show_alert=True)
+            return
+
+        if data == "panel:bug":
+            text = (
+                "🛠 *رفع باگ ربات*\n\n"
+                f"🚨 {len(RECENT_ERRORS)} خطا تو حافظه‌ی این اجرای ربات ثبت شده.\n\n"
+                "یه بخش رو انتخاب کن:"
             )
-        except Exception:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 خطاهای اخیر", callback_data="bug:recent"),
+                 InlineKeyboardButton("📜 لاگ خطاها (دسته‌بندی)", callback_data="bug:cat")],
+                [InlineKeyboardButton("📊 وضعیت ربات", callback_data="bug:status"),
+                 InlineKeyboardButton("🧹 پاک کردن لاگ", callback_data="bug:clear")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
+            ])
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+            return
+
+        if data == "bug:recent":
             await query.edit_message_text(
-                recent_errors_text().replace("*", ""), reply_markup=build_back_keyboard()
+                recent_errors_text(), reply_markup=build_back_keyboard("panel:bug"), parse_mode="Markdown"
             )
+            return
+
+        if data == "bug:cat":
+            counts = category_counts()
+            rows = []
+            for cat_key, (label, _kw) in BUG_CATEGORIES.items():
+                rows.append([InlineKeyboardButton(f"{label} ({counts.get(cat_key, 0)})", callback_data=f"bug:cat:{cat_key}")])
+            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="panel:bug")])
+            await query.edit_message_text(
+                "📜 *لاگ خطاها*\n\nیه دسته رو انتخاب کن:", reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown"
+            )
+            return
+
+        if data.startswith("bug:cat:"):
+            cat_key = data.split(":", 2)[2]
+            text = errors_by_category_text(cat_key)
+            await query.edit_message_text(text, reply_markup=build_back_keyboard("bug:cat"), parse_mode="Markdown")
+            return
+
+        if data == "bug:status":
+            text = await health_check_text(context)
+            await query.edit_message_text(text, reply_markup=build_back_keyboard("panel:bug"), parse_mode="Markdown")
+            return
+
+        if data == "bug:clear":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ بله، پاک کن", callback_data="bug:clear:confirm"),
+                 InlineKeyboardButton("❌ نه", callback_data="panel:bug")],
+            ])
+            await query.edit_message_text(
+                f"🧹 مطمئنی می‌خوای هر {len(RECENT_ERRORS)} خطای ثبت‌شده رو پاک کنی؟", reply_markup=kb
+            )
+            return
+
+        if data == "bug:clear:confirm":
+            n = clear_log()
+            await query.answer(f"{n} خطا پاک شد.")
+            await query.edit_message_text(
+                recent_errors_text(), reply_markup=build_back_keyboard("panel:bug"), parse_mode="Markdown"
+            )
+            return
+
         return
 
     if data == "panel:games":
         await query.edit_message_text(
             GAMES_MENU_MAIN_TEXT, reply_markup=build_games_menu_root_keyboard(), parse_mode="Markdown"
+        )
+        return
+
+    if data == "panel:active_games":
+        # 🎮 بازی‌های فعال من (Phase 5). فعلاً روی بازی‌های کارتیِ war/bj21/
+        # blackjack/charbarg/rummy/poker/hokm/haft و سنگ‌کاغذقیچی گروهی کار می‌کنه —
+        # دورهم‌جمع (تیک‌تاک‌تو) تو state‌ش chat_id نداره (جزئیات کامل تو گزارش نهایی).
+        uid = update.effective_user.id
+        lines = ["🎮 *بازی‌های فعال من*", ""]
+        found = False
+        for label, chat_id, opp_name, my_turn in active_card_games_for_user(uid):
+            found = True
+            turn_note = "📍 نوبت توئه" if my_turn else ("📍 نوبت حریفه" if my_turn is False else "")
+            lines.append(f"🃏 {label} — 👥 {opp_name}" + (f" — {turn_note}" if turn_note else ""))
+        for gid, game in GRPS_GAMES.items():
+            if uid not in (game.get("creator_id"), game.get("opponent_id")):
+                continue
+            found = True
+            opp = game["opponent_name"] if uid == game["creator_id"] else game["creator_name"]
+            phase_note = "⏳ منتظر بازیکن دوم" if game.get("phase") == "waiting" else "⚔️ در حال نبرد"
+            lines.append(f"🎮 سنگ‌کاغذقیچی — 👥 {opp} — {phase_note}")
+        if not found:
+            lines.append("فعلاً تو هیچ بازی‌ای نیستی.")
+        await query.edit_message_text(
+            "\n".join(lines), reply_markup=build_back_keyboard(), parse_mode="Markdown"
         )
         return
 
