@@ -243,12 +243,6 @@ async def _open_lobby(query_or_msg, creator, game_key, edit=False):
         f"👤 {_name(creator)} می‌خواد {label} بازی کنه!\n"
         f"⚔️ فقط یه بازیکن دیگه (نه خودِ سازنده) می‌تونه بپیونده."
     )
-    # 🐛 باگ اصلیِ «پنل باز می‌شه ولی هیچ دکمه‌ای کار نمی‌کنه» همین‌جا بود:
-    # edit=True از card_room_callback همیشه با q.message (یه شیء Message)
-    # صدا زده می‌شد، ولی edit_message_text() متد Message نیست (متد
-    # CallbackQuery/Bot‌ه؛ Message شورت‌کاتش edit_text()‌ه). یعنی هر کلیک روی
-    # دکمه‌های پنل، همین‌جا با AttributeError کرش می‌کرد — قبل از رسیدن به
-    # q.answer() — پس کاربر فقط اسپینر می‌دید و هیچ پاسخی نمی‌گرفت.
     if edit:
         await query_or_msg.edit_message_text(text, reply_markup=_lobby_markup(token))
     else:
@@ -451,7 +445,7 @@ async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # انتخاب می‌شد؛ الان فقط از بین بازی‌های واقعاً دونفره‌ی سریع انتخاب می‌شه.
         quick_pool = [g for g in ("war", "bj21") if g in IMPLEMENTED_GAMES] or list(IMPLEMENTED_GAMES)
         game_key = random.choice(quick_pool)
-        await _open_lobby(q, update.effective_user, game_key, edit=True)
+        await _open_lobby(q.message, update.effective_user, game_key, edit=True)
         await q.answer(f"⚡ {CARD_GAME_LABELS[game_key]} انتخاب شد!"); return
 
     if action == "pick":
@@ -459,9 +453,9 @@ async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if game_key not in IMPLEMENTED_GAMES:
             await q.answer("این بازی به‌زودی اضافه می‌شه 🚧", show_alert=True); return
         if game_key in MULTI_PLAYER_GAMES:
-            await _open_multi_lobby(q, update.effective_user, game_key, edit=True)
+            await _open_multi_lobby(q.message, update.effective_user, game_key, edit=True)
             await q.answer(); return
-        await _open_lobby(q, update.effective_user, game_key, edit=True)
+        await _open_lobby(q.message, update.effective_user, game_key, edit=True)
         await q.answer(); return
 
     if action == "join":
