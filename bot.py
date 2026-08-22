@@ -129,6 +129,22 @@ log = logging.getLogger("batbot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
+# 🩺 Persistence diagnostic — این لاگ تنها راهیه که از رو Railway Logs (بدون نیاز
+# به SSH/دسترسی به فایل‌سیستم) می‌شه فهمید DB داره رو یه Volume دائمی ذخیره
+# می‌شه یا رو فایل‌سیستم موقتِ کانتینر (که با هر Redeploy/Restart پاک می‌شه).
+# کد این پروژه از قبل درست بود (CREATE TABLE IF NOT EXISTS، بدون DROP/Reset)؛
+# اگه اطلاعات بعد از Update پاک می‌شن، علتش تقریباً همیشه همینه: تو داشبورد
+# Railway هیچ Volume‌ای به مسیر /data وصل نشده. راه‌حل کد نیست، تنظیمِ سرویسه:
+# Railway → سرویس → Volumes → یه Volume بساز و Mount Path رو /data بذار.
+if os.path.isdir("/data"):
+    log.info(f"💾 DB_PATH = {DB_PATH} — پوشه‌ی /data پیدا شد؛ اگه Volume Railway واقعاً به همین مسیر Mount شده باشه، دیتابیس با Restart/Redeploy حفظ می‌شه.")
+else:
+    log.warning(
+        f"⚠️ DB_PATH = {DB_PATH} — پوشه‌ی /data پیدا نشد! دیتابیس داره رو فایل‌سیستم موقتِ کانتینر ذخیره "
+        "می‌شه و با هر Redeploy/Restart روی Railway از بین می‌ره. رفع دائمی: تو داشبورد Railway برای این "
+        "سرویس یه Volume بساز با Mount Path=/data (یا env var DB_PATH رو به مسیر داخل همون Volume ست کن) "
+        "و بعد Redeploy کن."
+    )
 # =========================================================
 #  PERSONAS
 # =========================================================
