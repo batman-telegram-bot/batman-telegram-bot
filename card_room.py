@@ -1088,7 +1088,42 @@ async def _launch_hokm(context, target_msg, p1, p2):
     state = HOKM_GAMES[gid]
     if hakem == p2.id:
         state["order"] = [p2.id, p1.id]
-    await target_msg.edit_text(_hokm_text(state), reply_markup=_hokm_trump_markup(gid))
+    msg = await target_msg.edit_text(_hokm_text(state), reply_markup=_hokm_trump_markup(gid))
+    # 🐞 قبلاً message_id ذخیره نمی‌شد (برخلاف همه‌ی بازی‌های کارتیِ دیگه‌ی این
+    # فایل)، یعنی هیچ Timeout ای اصلاً نمی‌تونست پیام رو پیدا کنه و ادیت کنه.
+    state["message_id"] = msg.message_id
+    # ⏰ مهلت انتخاب خالِ حکم — اگه حکم‌بند تو مهلت انتخاب نکنه، بازی به نفع
+    # حریف تموم می‌شه (قبلاً هیچ Timeout ای برای حکم ثبت نمی‌شد).
+    _schedule_timeout(context.application, "hokm", gid, _hokm_timeout)
+
+
+async def _hokm_timeout(context: ContextTypes.DEFAULT_TYPE):
+    """اگه بازیکن تو مهلتش (چه انتخاب خالِ حکم، چه بازیِ کارت) اقدام نکنه،
+    بازی به نفع حریف تموم می‌شه و سشن (HOKM_GAMES[gid]) صحیح پاک می‌شه —
+    دقیقاً هم‌الگو با جنگ/بیست‌ویک/بلک‌جک تو همین فایل."""
+    gid = context.job.data["gid"]
+    state = HOKM_GAMES.get(gid)
+    if not state:
+        return  # بازی از قبل (مثلاً با انصراف دستی) تموم شده
+    timeout_uid = state["hakem"] if state["phase"] == "choose_trump" else state["order"][state["turn"]]
+    p1, p2 = state["order"]
+    winner = p2 if timeout_uid == p1 else p1
+    _record_result(state["chat_id"], winner, timeout_uid)
+    token = _store_rematch(state["chat_id"], state["players"][p1], state["players"][p2], "hokm")
+    text = (
+        f"{_hokm_text(state)}\n\n"
+        f"⏰ {state['names'][timeout_uid]} تو مهلت خودش اقدام نکرد.\n\n"
+        f"🏆 برنده: {state['names'][winner]}"
+    )
+    del HOKM_GAMES[gid]
+    if state.get("message_id"):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=state["chat_id"], message_id=state["message_id"],
+                text=text, reply_markup=_rematch_markup(token),
+            )
+        except Exception as e:
+            log.info(f"hokm_timeout: could not edit message (harmless): {e}")
 
 
 def _hokm_start_play(state):
@@ -1152,6 +1187,7 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["trump"] = parts[3]
         _hokm_start_play(state)
         await q.edit_message_text(_hokm_text(state), reply_markup=_hokm_control_markup(gid, state))
+        _schedule_timeout(context.application, "hokm", gid, _hokm_timeout)
         await q.answer(f"حکم: {state['trump']}"); return
 
     if action == "hand":
@@ -1189,11 +1225,13 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             other = [p for p in state["order"] if p != uid][0]
             state["turn"] = state["order"].index(other)
             await q.edit_message_text(_hokm_text(state), reply_markup=_hokm_control_markup(gid, state))
+            _schedule_timeout(context.application, "hokm", gid, _hokm_timeout)
             await q.answer(f"کارتِ {_card_label(card)} بازی شد."); return
 
         winner = _hokm_resolve_trick(state)
         note = f"🎯 دست کوچیک رو {state['names'][winner]} برد."
         if state["tricks"][winner] >= HOKM_TRICKS_TO_WIN:
+            _cancel_timeout(context.application, "hokm", gid)
             loser = [p for p in state["order"] if p != winner][0]
             _record_result(state["chat_id"], winner, loser)
             token = _store_rematch(state["chat_id"], state["players"][state["order"][0]],
@@ -1205,6 +1243,7 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del HOKM_GAMES[gid]; await q.answer(); return
 
         if not state["hands"][state["order"][0]] and not state["hands"][state["order"][1]]:
+            _cancel_timeout(context.application, "hokm", gid)
             p1, p2 = state["order"]
             champ = p1 if state["tricks"][p1] > state["tricks"][p2] else p2
             loser = p2 if champ == p1 else p1
@@ -1217,6 +1256,7 @@ async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del HOKM_GAMES[gid]; await q.answer(); return
 
         await q.edit_message_text(_hokm_text(state) + f"\n\n{note}", reply_markup=_hokm_control_markup(gid, state))
+        _schedule_timeout(context.application, "hokm", gid, _hokm_timeout)
         await q.answer(); return
 
 
