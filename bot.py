@@ -26,7 +26,26 @@ from telegram.ext import (
     filters,
 )
 
-OWNER_ID = 5527941204  # آیدی عددی سازنده‌ی ربات — برای دستورهای ویژه و اطلاع‌رسانی
+
+# 👑 OWNER_ID اول از Environment Variable خونده می‌شه (طبق قانون پروژه: نباید
+# Hardcode باشه). عدد قبلی فقط به‌عنوان Fallback نگه داشته شده تا اگه یادت رفت
+# تو Railway ست‌ش کنی، ربات ناگهان بدون هیچ Owner ای بالا نیاد؛ ولی بشدت توصیه
+# می‌شه OWNER_ID رو تو Railway Variables ست کنی (راهنما در گزارش پایانی).
+_owner_id_env = os.getenv("OWNER_ID", "").strip()
+if _owner_id_env:
+    try:
+        OWNER_ID = int(_owner_id_env)
+    except ValueError:
+        raise RuntimeError("OWNER_ID تو Environment Variable مقدار عددی معتبر نیست!")
+else:
+    OWNER_ID = 5527941204  # Fallback — توصیه می‌شه OWNER_ID رو تو Railway ست کنی
+
+# 📢 عضویت اجباری در کانال رسمی — قبل از هر قابلیتی (به‌جز /start و تایید
+# عضویت) باید کاربر عضو این کانال باشه. هم اسم کانال هم لینکش از env قابل
+# override هستن، ولی مقدار پیش‌فرض دقیقاً همونیه که خواسته شده.
+REQUIRED_CHANNEL_USERNAME = os.getenv("REQUIRED_CHANNEL", "@Ee_club").lstrip("@")
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", f"https://t.me/{REQUIRED_CHANNEL_USERNAME}")
+
 CAPTCHA_TIMEOUT_SECONDS = 180  # ۳ دقیقه فرصت برای تایید عضو جدید
 
 from games import register_games, is_game_text, GAME_TRIGGER_WORDS
@@ -523,6 +542,16 @@ def _init_db():
             verified_at REAL
         )
     """)
+    # 📢 کش وضعیت عضویت کانال اجباری — چک زنده‌ی API تلگرام سر /start و دکمه‌ی
+    # «بررسی عضویت» انجام می‌شه؛ این جدول فقط برای Gate سریع روی هر پیام (بدون
+    # این‌که هر پیام یه Call جدا به Telegram API بزنه و ریت‌لیمیت بخوره) استفاده
+    # می‌شه. جدول جداست چون verified_users مخصوص شماره تلفنه، قاطی نکردیم.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS channel_verified (
+            user_id INTEGER PRIMARY KEY,
+            verified_at REAL
+        )
+    """)
     # مهاجرت برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو ندارن
     for col, ddl in (
         ("game_wins", "ALTER TABLE players ADD COLUMN game_wins INTEGER DEFAULT 0"),
@@ -533,6 +562,10 @@ def _init_db():
         ("week_message_count", "ALTER TABLE players ADD COLUMN week_message_count INTEGER DEFAULT 0"),
         ("week_start_date", "ALTER TABLE players ADD COLUMN week_start_date TEXT DEFAULT ''"),
         ("first_seen_ts", "ALTER TABLE players ADD COLUMN first_seen_ts REAL DEFAULT 0"),
+        ("title", "ALTER TABLE chats ADD COLUMN title TEXT DEFAULT ''"),
+        ("chat_type", "ALTER TABLE chats ADD COLUMN chat_type TEXT DEFAULT ''"),
+        ("first_seen_ts_chat", "ALTER TABLE chats ADD COLUMN first_seen_ts REAL DEFAULT 0"),
+        ("last_seen_ts", "ALTER TABLE chats ADD COLUMN last_seen_ts REAL DEFAULT 0"),
     ):
         try:
             c.execute(ddl)
@@ -606,6 +639,115 @@ def _is_phone_verified(user_id):
     ok = c.fetchone() is not None
     conn.close()
     return ok
+
+
+def _count_phone_verified():
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM verified_users")
+    n = c.fetchone()["n"]
+    conn.close()
+    return n
+
+
+def _is_channel_verified_cached(user_id):
+    """کش سریع (بدون Call به Telegram API) برای Gate روی هر پیام. مقدار واقعی
+    همیشه سر /start و دکمه‌ی «بررسی عضویت» با API چک و اینجا آپدیت می‌شه."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM channel_verified WHERE user_id=?", (user_id,))
+    ok = c.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def _set_channel_verified(user_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO channel_verified (user_id, verified_at) VALUES (?,?)",
+        (user_id, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _clear_channel_verified(user_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM channel_verified WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def _track_group_chat(chat_id, title, chat_type):
+    """اطلاعات نمایشی گروه (عنوان/نوع/آخرین‌فعالیت) رو برای داشبورد Owner
+    به‌روز نگه می‌داره. ردیف از قبل با _get_chat ساخته می‌شه؛ اینجا فقط
+    ستون‌های جدید رو آپدیت می‌کنیم (سیستم دیتابیس موازی نساختیم)."""
+    conn = _connect()
+    c = conn.cursor()
+    now = time.time()
+    c.execute("SELECT first_seen_ts FROM chats WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    if row is None:
+        c.execute(
+            "INSERT INTO chats (chat_id, next_switch_at, next_battle_at, title, chat_type, first_seen_ts, last_seen_ts) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (chat_id, random.randint(8, 15), random.randint(10, 20), title or "", chat_type or "", now, now),
+        )
+    else:
+        first_seen = row["first_seen_ts"] or now
+        c.execute(
+            "UPDATE chats SET title=?, chat_type=?, first_seen_ts=?, last_seen_ts=? WHERE chat_id=?",
+            (title or "", chat_type or "", first_seen, now, chat_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+USERS_PER_PAGE = 10
+GROUPS_PER_PAGE = 10
+
+
+def _get_users_page(offset, limit):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        SELECT b.user_id, b.username, b.first_name, b.started_at,
+               CASE WHEN v.user_id IS NOT NULL THEN 1 ELSE 0 END as phone_verified
+        FROM bot_starters b
+        LEFT JOIN verified_users v ON v.user_id = b.user_id
+        ORDER BY b.started_at DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _get_groups_page(offset, limit):
+    """فقط گروه/سوپرگروه‌های واقعی (chat_id منفی طبق قرارداد تلگرام) — چت‌های
+    خصوصی که به‌خاطر استفاده‌ی مشترک _get_chat تو جدول chats ثبت می‌شن، اینجا
+    حساب نمی‌شن تا شمارش گروه‌ها واقعی بمونه."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts
+        FROM chats WHERE chat_id < 0
+        ORDER BY last_seen_ts DESC LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _count_real_groups():
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0")
+    n = c.fetchone()["n"]
+    conn.close()
+    return n
 
 
 def _set_phone_verified(user_id, phone_number):
@@ -1798,6 +1940,33 @@ async def send_profile(update: Update, chat, player, edit=False):
 #  COMMANDS
 # =========================================================
 
+async def _is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id) -> bool:
+    """بررسی *زنده* عضویت کاربر تو کانال اجباری از خود Telegram API — هیچ حدس
+    یا کشی اینجا نیست، دقیقاً طبق قانون پروژه."""
+    try:
+        member = await context.bot.get_chat_member(f"@{REQUIRED_CHANNEL_USERNAME}", user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        log.warning(f"channel membership check failed for user {user_id}: {e}")
+        return False
+
+
+def _channel_join_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 عضویت در کانال", url=REQUIRED_CHANNEL_URL)],
+        [InlineKeyboardButton("🔄 بررسی عضویت", callback_data="checkjoin")],
+    ])
+
+
+CHANNEL_JOIN_PROMPT_TEXT = (
+    "🦇 *ورود به گاتهام*\n\n"
+    "برای استفاده از ربات ابتدا باید عضو کانال رسمی شوید."
+)
+
+CHANNEL_JOIN_NOT_YET_TEXT = "❌ هنوز عضو کانال نشده‌اید."
+CHANNEL_JOIN_OK_TEXT = "✅ عضویت شما تأیید شد."
+
+
 def _phone_request_keyboard():
     """کیبورد رسمی تلگرام برای درخواست شماره — هیچ گزینه‌ی «رد شدن» نداره چون
     از الان احراز شماره برای استفاده از ربات اجباریه."""
@@ -1860,6 +2029,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+    # 📢 مرحله‌ی اول: عضویت اجباری در کانال رسمی — قبل از هر چیز دیگه (حتی
+    # قبل از احراز شماره) چک می‌شه، طبق ترتیب دقیقِ خواسته‌شده.
+    if user.id != OWNER_ID and not await _is_channel_member(context, user.id):
+        await update.effective_message.reply_text(
+            CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown"
+        )
+        return
+    if user.id != OWNER_ID:
+        await db_run(_set_channel_verified, user.id)
+
     # 📱 احراز شماره یک مرحله‌ی اجباریه: تا کاربر (به‌جز OWNER) شماره‌ش رو تایید
     # نکرده، منوی اصلی/امکانات ربات اصلاً نمایش داده نمی‌شه.
     if user.id != OWNER_ID and not await db_run(_is_phone_verified, user.id):
@@ -1869,6 +2048,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await _send_main_start_content(update, context)
+
+
+async def checkjoin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دکمه‌ی «🔄 بررسی عضویت» — همیشه با یه Call زنده به Telegram API چک می‌کنه،
+    نه با حدس یا کش."""
+    query = update.callback_query
+    user = update.effective_user
+    is_member = await _is_channel_member(context, user.id)
+    if not is_member:
+        await query.answer(CHANNEL_JOIN_NOT_YET_TEXT, show_alert=True)
+        return
+    await query.answer(CHANNEL_JOIN_OK_TEXT)
+    await db_run(_set_channel_verified, user.id)
+    try:
+        await query.edit_message_text(CHANNEL_JOIN_OK_TEXT)
+    except Exception:
+        pass
+    if not await db_run(_is_phone_verified, user.id):
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=PHONE_VERIFY_PROMPT_TEXT,
+            reply_markup=_phone_request_keyboard(),
+        )
+    else:
+        await _send_main_start_content(update, context)
 
 
 async def handle_shared_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2100,9 +2304,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _get_all_group_chat_ids():
+    """طبق قرارداد تلگرام، chat_id گروه/سوپرگروه همیشه منفیه و چت خصوصی مثبت؛
+    قبلاً این کوئری فیلتر نداشت و اگه یه چت خصوصی هم تو جدول chats (که با
+    _get_chat برای هر نوع چتی ساخته می‌شه) ثبت می‌شد، تو شمارش/broadcast
+    گروه‌ها هم حساب می‌شد — این فیلتر همون باگ رو رفع می‌کنه."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT chat_id FROM chats")
+    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0")
     ids = [row["chat_id"] for row in c.fetchall()]
     conn.close()
     return ids
@@ -2131,6 +2339,118 @@ async def groupscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "(این عدد از جدول واقعی چت‌های ثبت‌شده تو دیتابیس ربات محاسبه شده.)",
         parse_mode="Markdown",
     )
+
+
+async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📊 آمار گاتهام — داشبورد اصلی Owner: همه‌ی عددها مستقیماً از دیتابیس
+    واقعی محاسبه می‌شن (bot_starters برای کاربران، verified_users برای شماره‌ی
+    تایید‌شده‌ها، chats با فیلتر chat_id<0 برای گروه‌های واقعی). عدد Hardcode
+    یا ساختگی اینجا نیست."""
+    if not _is_owner(update):
+        await update.message.reply_text("🔒 این قابلیت فقط برای Owner فعال است.")
+        return
+    total_users = await db_run(_count_bot_starters)
+    phone_verified = await db_run(_count_phone_verified)
+    group_count = await db_run(_count_real_groups)
+    text = (
+        "📊 *آمار گاتهام*\n\n"
+        f"👥 تعداد کل کاربرانی که ربات را استارت کرده‌اند: {total_users}\n"
+        f"📱 تعداد کاربران تایید شماره‌شده: {phone_verified}\n"
+        f"🏠 تعداد گروه‌هایی که ربات در آن‌ها فعال است: {group_count}\n\n"
+        "برای لیست کامل کاربران: /userslist\n"
+        "برای لیست کامل گروه‌ها: /groupslist"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+def _build_users_list_page(page: int):
+    total = _count_bot_starters()
+    total_pages = max(1, (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    rows = _get_users_page(page * USERS_PER_PAGE, USERS_PER_PAGE)
+    lines = [f"👥 *کاربران گاتهام*\nTotal: {total}\n"]
+    start_num = page * USERS_PER_PAGE + 1
+    for i, r in enumerate(rows):
+        uname = f"@{r['username']}" if r["username"] else "بدون یوزرنیم"
+        pv = "✅" if r["phone_verified"] else "❌"
+        dt = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d")
+        lines.append(
+            f"{start_num + i}. {r['first_name'] or 'بی‌نام'} ({uname}) — ID: `{r['user_id']}` — 📱{pv} — {dt}"
+        )
+    if len(rows) == 0:
+        lines.append("(هیچ کاربری ثبت نشده)")
+    text = "\n".join(lines)
+    kb_row = []
+    if page > 0:
+        kb_row.append(InlineKeyboardButton("⬅️", callback_data=f"ulist:{page - 1}"))
+    kb_row.append(InlineKeyboardButton(f"صفحه {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        kb_row.append(InlineKeyboardButton("➡️", callback_data=f"ulist:{page + 1}"))
+    return text, InlineKeyboardMarkup([kb_row])
+
+
+async def userslist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        await update.message.reply_text("🔒 این قابلیت فقط برای Owner فعال است.")
+        return
+    text, kb = await db_run(_build_users_list_page, 0)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+def _build_groups_list_page(page: int):
+    total = _count_real_groups()
+    total_pages = max(1, (total + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    rows = _get_groups_page(page * GROUPS_PER_PAGE, GROUPS_PER_PAGE)
+    lines = [f"🏠 *گروه‌های گاتهام*\nTotal: {total}\n"]
+    for r in rows:
+        title = r["title"] or "(بدون عنوان)"
+        ctype = r["chat_type"] or "-"
+        last_seen = datetime.fromtimestamp(r["last_seen_ts"]).strftime("%Y-%m-%d %H:%M") if r["last_seen_ts"] else "-"
+        lines.append(f"• {title}\n  Chat ID: `{r['chat_id']}` — نوع: {ctype} — آخرین فعالیت: {last_seen}")
+    if len(rows) == 0:
+        lines.append("(هیچ گروهی ثبت نشده)")
+    text = "\n\n".join(lines)
+    kb_row = []
+    if page > 0:
+        kb_row.append(InlineKeyboardButton("⬅️", callback_data=f"glist:{page - 1}"))
+    kb_row.append(InlineKeyboardButton(f"صفحه {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        kb_row.append(InlineKeyboardButton("➡️", callback_data=f"glist:{page + 1}"))
+    return text, InlineKeyboardMarkup([kb_row])
+
+
+async def groupslist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        await update.message.reply_text("🔒 این قابلیت فقط برای Owner فعال است.")
+        return
+    text, kb = await db_run(_build_groups_list_page, 0)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def list_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permission Check دوباره این‌جا هم انجام می‌شه — محدودیت فقط با مخفی‌کردن
+    دکمه کافی نیست، خود Handler هم باید Owner بودن رو تایید کنه."""
+    query = update.callback_query
+    if not _is_owner(update):
+        await query.answer("🔒 این قابلیت فقط برای Owner فعال است.", show_alert=True)
+        return
+    data = query.data
+    if data == "noop":
+        await query.answer()
+        return
+    if data.startswith("ulist:"):
+        page = int(data.split(":")[1])
+        text, kb = await db_run(_build_users_list_page, page)
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+    if data.startswith("glist:"):
+        page = int(data.split(":")[1])
+        text, kb = await db_run(_build_groups_list_page, page)
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
 
 
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3886,16 +4206,34 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
     if msg.text and msg.text.startswith("/start"):
         return  # /start خودش مسئول نمایش درخواست شماره‌ست
 
+    # 🏠 ردیابی گروه (عنوان/آخرین‌فعالیت) برای داشبورد Owner — قبل از هر Gate
+    # ای انجام می‌شه چون فقط یه UPDATE سبکه، ربطی به احراز کاربر نداره.
+    chat = update.effective_chat
+    if chat and chat.type != ChatType.PRIVATE:
+        try:
+            await db_run(_track_group_chat, chat.id, chat.title or "", chat.type)
+        except Exception:
+            pass
+
     if user.id == OWNER_ID:
         return
 
-    if await db_run(_is_phone_verified, user.id):
+    # 📢 مرحله‌ی اول Gate: عضویت کانال (از کش سریع — چک زنده‌ی API فقط سر
+    # /start و دکمه‌ی «بررسی عضویت» انجام می‌شه تا هر پیام یه Call جدا به
+    # Telegram API نزنه و ریت‌لیمیت نخوریم).
+    channel_ok = await db_run(_is_channel_verified_cached, user.id)
+    phone_ok = channel_ok and await db_run(_is_phone_verified, user.id)
+
+    if channel_ok and phone_ok:
         return
 
     # از اینجا به بعد: کاربر تاییدنشده داره یه Command/Message دیگه (غیر از
     # /start و ارسال Contact) اجرا می‌کنه — باید بلاک بشه.
     if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
-        await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
+        if not channel_ok:
+            await msg.reply_text(CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown")
+        else:
+            await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
     else:
         # تو گروه نمی‌شه دکمه‌ی request_contact امن نمایش داد (شماره تو چت
         # عمومی افشا می‌شه)، پس کاربر رو به پیوی ربات ارجاع می‌دیم.
@@ -3905,11 +4243,12 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
             _GATE_GROUP_COOLDOWN[key] = now
             try:
                 bot_username = context.bot.username
+                label = "📢 عضویت و تایید در پیوی ربات" if not channel_ok else "📱 تایید شماره در پیوی ربات"
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📱 تایید شماره در پیوی ربات", url=f"https://t.me/{bot_username}?start=verify")
+                    InlineKeyboardButton(label, url=f"https://t.me/{bot_username}?start=verify")
                 ]])
                 await msg.reply_text(
-                    "🔒 برای استفاده از قابلیت‌های ربات، اول باید شماره‌ت رو توی پیوی ربات تایید کنی.",
+                    "🔒 برای استفاده از قابلیت‌های ربات، اول باید تو پیوی ربات عضویت/شماره‌ت رو تایید کنی.",
                     reply_markup=kb,
                 )
             except Exception:
@@ -3926,9 +4265,19 @@ async def _permission_gate_callback(update: Update, context: ContextTypes.DEFAUL
     data = query.data or ""
     if data.startswith("captcha:"):
         return  # کپچای عضو جدید یه سیستم کاملاً جداست، نباید به گیت شماره گره بخوره
+    if data == "checkjoin":
+        return  # این دکمه دقیقاً برای کاربر تاییدنشده‌ست، نباید خودش بلاک بشه
 
     if user.id == OWNER_ID:
         return
+
+    channel_ok = await db_run(_is_channel_verified_cached, user.id)
+    if not channel_ok:
+        try:
+            await query.answer(CHANNEL_JOIN_PROMPT_TEXT.replace("*", ""), show_alert=True)
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
 
     if await db_run(_is_phone_verified, user.id):
         return
@@ -4021,6 +4370,9 @@ def main():
     app.add_handler(CommandHandler("starters", starters_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("groupscount", groupscount_cmd))
+    app.add_handler(CommandHandler("dashboard", dashboard_cmd))
+    app.add_handler(CommandHandler("userslist", userslist_cmd))
+    app.add_handler(CommandHandler("groupslist", groupslist_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("archive", gotham_archive_cmd))
     app.add_handler(CommandHandler("riddle", riddle_cmd))
@@ -4041,6 +4393,8 @@ def main():
     # ترتیب ثبت دیگه اهمیتی نداره؛ ولی ثبت captcha رو قبل از button_handler
     # نگه داشتیم برای وضوح بیشتر.
     app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
+    app.add_handler(CallbackQueryHandler(checkjoin_callback, pattern=r"^checkjoin$"))
+    app.add_handler(CallbackQueryHandler(list_pagination_callback, pattern=r"^(ulist:|glist:|noop)"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))

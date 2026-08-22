@@ -151,11 +151,14 @@ def build_full_datetime_text() -> str:
 
 def _get_all_chat_ids():
     """چت‌آیدی همه‌ی گروه‌هایی که ربات توشون فعاله رو از دیتابیس خود ربات می‌گیره -
-    نیازی به هاردکد کردن نیست. ایمپورت داخل تابعه تا سیکل ایمپورت با bot.py پیش نیاد."""
+    نیازی به هاردکد کردن نیست. ایمپورت داخل تابعه تا سیکل ایمپورت با bot.py پیش نیاد.
+    فیلتر chat_id<0: طبق قرارداد تلگرام گروه/سوپرگروه همیشه منفیه؛ چت‌های خصوصی
+    (که با _get_chat برای هر نوع چتی تو همین جدول ساخته می‌شن) نباید پیام
+    نیمه‌شب/رویداد ماهانه رو به‌عنوان «گروه» دریافت کنن."""
     import bot as _bot
     conn = _bot._connect()
     c = conn.cursor()
-    c.execute("SELECT chat_id FROM chats")
+    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0")
     ids = [row["chat_id"] for row in c.fetchall()]
     conn.close()
     return ids
