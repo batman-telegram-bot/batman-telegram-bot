@@ -158,7 +158,7 @@ def _get_all_chat_ids():
     import bot as _bot
     conn = _bot._connect()
     c = conn.cursor()
-    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0 AND is_active=1")
+    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0")
     ids = [row["chat_id"] for row in c.fetchall()]
     conn.close()
     return ids
