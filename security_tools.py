@@ -123,7 +123,15 @@ def register_security(app, deps):
         await query.answer(f"{'روشن' if new_val == 'on' else 'خاموش'} شد ✅")
 
     async def security_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """روی هر پیام گروه چک می‌کنه: آنتی‌لینک و آنتی‌فلود. اگه پیام رو مصرف کرد True برمی‌گردونه."""
+        """روی هر پیام گروه چک می‌کنه: آنتی‌لینک و آنتی‌فلود. اگه پیام رو مصرف کرد True برمی‌گردونه.
+
+        🔒 موقتاً کاملاً خاموش — طبق درخواست صریح، تا وقتی تشخیص داده بشه مشکل
+        «لینک تو گروه نمی‌ره» از این تابع نیست، اینجا بدون چک تنظیمات همیشه
+        False برمی‌گردونه (یعنی هیچ پیامی، حتی اگه آنتی‌لینک/آنتی‌فلود از تو
+        منو روشن باشه، پاک یا میوت نمی‌شه). برای برگردوندنش، این return False
+        اضافه‌شده رو پاک کن.
+        """
+        return False
         msg = update.message
         if not msg or not update.effective_chat or update.effective_chat.type not in (
             ChatType.GROUP, ChatType.SUPERGROUP
