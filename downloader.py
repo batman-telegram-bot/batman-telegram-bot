@@ -70,6 +70,24 @@ PLATFORM_DOMAINS = {
     "soundcloud": ("soundcloud.com", "snd.sc"),
 }
 
+def text_contains_supported_link(text: str) -> bool:
+    """می‌گه آیا یه متن (کپشن/پیام) حاوی لینکیه که دانلودر پشتیبانی می‌کنه یا نه.
+
+    🐛 باگ اصلی «لینک اینستا تو گروه نمی‌ره»: وقتی آنتی‌لینک یا فیلتر کلمات
+    گروه فعال بود، همین لینکی که کاربر برای دانلودر می‌فرستاد به‌عنوان
+    اسپم شناسایی و پیامش حذف می‌شد — قبل از این‌که اصلاً به downloader_link_handler
+    برسه. این تابع تو bot.py/security_tools.py استفاده می‌شه تا لینک‌های
+    پلتفرم‌های پشتیبانی‌شده (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/ساندکلاود)
+    از این حذف خودکار معاف بشن — چون این‌ها یه قابلیت رسمی ربات‌ان، نه اسپم.
+    """
+    if not text:
+        return False
+    m = URL_RE.search(text)
+    if not m:
+        return False
+    return _detect_platform_from_url(m.group(0)) is not None
+
+
 def _detect_platform_from_url(url: str):
     """اگه کاربر بدون انتخاب پلتفرم (بدون زدن «دانلودر» و بدون کلیک دکمه) مستقیم
     یه لینک پشتیبانی‌شده بفرسته، از روی دامنه‌ش پلتفرم رو خودکار تشخیص بده.
@@ -1183,7 +1201,20 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
+    # 🐛 رفع باگ «کاربر لینک می‌فرسته و ربات کاملاً ساکت می‌مونه»: قبلاً این
+    # reply_text مستقیم و بدون try/except بود؛ اگه به هر دلیلی (مثلاً پیام
+    # اصلی هم‌زمان توسط یه فیچر دیگه‌ی گروه حذف شده بود) ریپلای‌کردن به همون
+    # پیام شکست می‌خورد، کل تابع همون‌جا با یه Exception ناتموم می‌موند — نه
+    # پیامی به کاربر، نه هیچ ردی تو چت گروه، دقیقاً همون «لینک می‌فرستم و
+    # هیچی نمی‌شه». حالا اگه reply مستقیم شکست بخوره، به یه پیام معمولی
+    # (بدون رفرنس به پیام حذف‌شده) افت می‌کنیم تا کاربر همیشه یه واکنش ببینه.
+    try:
+        status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
+    except Exception as e:
+        log.warning(f"[dl:{job_id}] initial status reply failed ({e}); falling back to plain send_message")
+        status = await context.bot.send_message(
+            chat_id, f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}..."
+        )
 
     # 📊 پیش‌نمایش Metadata (عنوان/مدت/حجم تقریبی) قبل از شروع دانلود واقعی —
     # فقط برای یوتیوب/ساندکلاود که extract_info(download=False) سریع و قابل‌اتکاست.
@@ -1289,33 +1320,85 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         except Exception as e:
                             log.info(f"[dl:{job_id}] pinterest thumbnail step failed: {e}")
                     thumb_f = None
-                    try:
-                        if v_thumb and os.path.exists(v_thumb):
-                            thumb_f = open(v_thumb, "rb")
-                        log.info(f"[dl:{job_id}] pinterest send: thumbnail_attached={thumb_f is not None} "
-                                  f"v_thumb_path={v_thumb!r}")
+                    thumbnail_used = False
+
+                    async def _send_pinterest(with_thumb: bool):
+                        tf = thumb_f if with_thumb else None
                         with open(send_path, "rb") as f:
                             if media["is_video"]:
                                 await msg.reply_video(
                                     f, caption=caption, supports_streaming=True,
                                     duration=int(v_duration) if v_duration else None,
                                     width=v_width or None, height=v_height or None,
-                                    thumbnail=thumb_f,
+                                    thumbnail=tf,
                                 )
                             else:
                                 await msg.reply_photo(f, caption=caption)
-                        _log_job(job_id, platform=platform, url=url, stage="sent",
-                                  output_path=send_path, file_size=os.path.getsize(send_path))
+
+                    try:
+                        if v_thumb and os.path.exists(v_thumb):
+                            thumb_f = open(v_thumb, "rb")
+                            thumbnail_used = True
+                        log.info(f"[dl:{job_id}] pinterest send: thumbnail_attached={thumb_f is not None} "
+                                  f"v_thumb_path={v_thumb!r}")
+                        try:
+                            await _send_pinterest(with_thumb=True)
+                            _log_job(job_id, platform=platform, url=url, stage="sent",
+                                      output_path=send_path, file_size=os.path.getsize(send_path))
+                        except Exception as e_thumb:
+                            if not thumbnail_used:
+                                raise
+                            # 🔁 آیتم ۱۳/۱۴ چک‌لیست: قبل از افت به Document، همون
+                            # فایل رو با همون نوع اصلی (video/photo) ولی بدون
+                            # thumbnail دوباره امتحان کن.
+                            log.warning(f"[dl:{job_id}] pinterest send with thumbnail failed "
+                                        f"({e_thumb}); retrying without thumbnail")
+                            if thumb_f:
+                                try:
+                                    thumb_f.close()
+                                except Exception:
+                                    pass
+                                thumb_f = None
+                            await _send_pinterest(with_thumb=False)
+                            _log_job(job_id, platform=platform, url=url, stage="sent-without-thumbnail",
+                                      output_path=send_path, file_size=os.path.getsize(send_path))
                         try:
                             await status.delete()
                         except Exception:
                             pass
                         return
                     except Exception as e:
-                        log.warning(f"[dl:{job_id}] pinterest send failed: {e}")
-                        await status.edit_text(
-                            "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
-                        )
+                        # فقط وقتی حتی بدون thumbnail هم شکست خورد (یا thumbnail
+                        # اصلاً درگیر نبود) به Document افت می‌کنیم، نه مستقیم شکست.
+                        log.warning(f"[dl:{job_id}] pinterest send failed, trying document fallback: {e}")
+                        try:
+                            with open(send_path, "rb") as f:
+                                await msg.reply_document(f, caption=caption)
+                            _log_job(job_id, platform=platform, url=url, stage="sent-as-document")
+                            try:
+                                await status.delete()
+                            except Exception:
+                                pass
+                        except Exception as e2:
+                            # همون فالبک نهایی «بدون reply» که تو مسیر اصلی هم اضافه شد —
+                            # اگه پیام کاربر پاک شده باشه، reply_document شکست می‌خوره
+                            # ولی send_document ساده (بدون رفرنس) هنوز جواب می‌ده.
+                            try:
+                                with open(send_path, "rb") as f:
+                                    await context.bot.send_document(chat_id, f, caption=caption)
+                                _log_job(job_id, platform=platform, url=url, stage="sent-as-document-no-reply")
+                                try:
+                                    await status.delete()
+                                except Exception:
+                                    pass
+                            except Exception as e3:
+                                log.exception(f"[dl:{job_id}] pinterest document fallback also failed")
+                                try:
+                                    await status.edit_text(
+                                        "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
+                                    )
+                                except Exception:
+                                    pass
                         return
                     finally:
                         if thumb_f:
@@ -1536,12 +1619,14 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                 log.info(f"[dl:{job_id}] thumbnail step failed: {e}")
 
         thumb_f = None
-        try:
-            if v_thumb and os.path.exists(v_thumb):
-                thumb_f = open(v_thumb, "rb")
-            if ext in _VIDEO_EXTS and platform != "soundcloud":
-                log.info(f"[dl:{job_id}] main send: thumbnail_attached={thumb_f is not None} "
-                          f"v_thumb_path={v_thumb!r}")
+        thumbnail_used = False
+
+        async def _send_main(with_thumb: bool):
+            """یه تلاش ارسال فایل اصلی؛ with_thumb=False یعنی همون نوع فایل
+            (video/audio/photo) ولی صریحاً بدون پارامتر thumbnail — برای
+            Retry بعد از شکست مخصوص thumbnail (چک‌لیست آیتم ۱۳/۱۴)، بدون
+            این‌که به Document افت کنیم."""
+            tf = thumb_f if with_thumb else None
             with open(send_path, "rb") as f:
                 if ext in (".jpg", ".jpeg", ".png", ".webp"):
                     await msg.reply_photo(f, caption=caption or None)
@@ -1552,9 +1637,36 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                         f, caption=caption or None, supports_streaming=True,
                         duration=int(v_duration) if v_duration else None,
                         width=v_width or None, height=v_height or None,
-                        thumbnail=thumb_f,
+                        thumbnail=tf,
                     )
-            _log_job(job_id, platform=platform, url=url, stage="sent")
+
+        try:
+            if v_thumb and os.path.exists(v_thumb):
+                thumb_f = open(v_thumb, "rb")
+                thumbnail_used = True
+            if ext in _VIDEO_EXTS and platform != "soundcloud":
+                log.info(f"[dl:{job_id}] main send: thumbnail_attached={thumb_f is not None} "
+                          f"v_thumb_path={v_thumb!r}")
+            try:
+                await _send_main(with_thumb=True)
+                _log_job(job_id, platform=platform, url=url, stage="sent")
+            except Exception as e_thumb:
+                if not thumbnail_used:
+                    raise  # thumbnail اصلاً درگیر نبوده -> مستقیم بره به fallback بیرونی (document)
+                # 🔁 آیتم ۱۳/۱۴ چک‌لیست: شکست ارسال با thumbnail نباید مستقیم به
+                # Document افت کنه — چون معمولاً خودِ thumbnail (نه فایل اصلی)
+                # باعث BadRequest تلگرام بوده، اول همون فایل با همون نوع اصلی
+                # (video/audio/photo) ولی بدون thumbnail دوباره امتحان می‌شه.
+                log.warning(f"[dl:{job_id}] send with thumbnail failed ({e_thumb}); "
+                            f"retrying same file without thumbnail")
+                if thumb_f:
+                    try:
+                        thumb_f.close()
+                    except Exception:
+                        pass
+                    thumb_f = None
+                await _send_main(with_thumb=False)
+                _log_job(job_id, platform=platform, url=url, stage="sent-without-thumbnail")
             # 🧪 آیتم ۳ چک‌لیست — فقط وقتی DL_DEBUG_COMPARE_UPLOAD=1 باشه، و فقط
             # برای ویدیو (نه عکس/صدا): همون FINAL FILE رو یه‌بار دیگه هم با
             # send_document می‌فرستیم تا مقایسه‌ی Video در مقابل Document انجام
@@ -1569,18 +1681,35 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                 except Exception as e:
                     log.warning(f"[dl:{job_id}] debug compare-upload (document) failed: {e}")
         except Exception as e:
+            # اینجا یعنی: یا thumbnail اصلاً درگیر نبود و ارسال اصلی خودش
+            # شکست خورد، یا حتی بعد از Retry-بدون-thumbnail هم شکست خورد —
+            # فقط تو همین حالت واقعاً به Document افت می‌کنیم.
             log.warning(f"[dl:{job_id}] send failed, fallback to document: {e}")
             try:
                 with open(filepath, "rb") as f:
                     await msg.reply_document(f, caption=caption or None)
                 _log_job(job_id, platform=platform, url=url, stage="sent-as-document")
             except Exception as e2:
-                log.exception(f"[dl:{job_id}] document fallback also failed")
-                await status.edit_text(
-                    "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام "
-                    "موقتاً پاسخ نداد."
-                )
-                return
+                # 🐛 اگه حتی reply_document هم شکست خورد (مثلاً چون پیام اصلی
+                # کاربر دیگه رو دیسک تلگرام وجود نداره — حذف‌شده توسط یه
+                # فیچر دیگه‌ی گروه)، قبل از تسلیم کامل، یه‌بار بدون رفرنس به
+                # پیام اصلی (send_document ساده، نه reply) امتحان می‌کنیم؛
+                # این‌جوری فایل بالاخره به‌دست کاربر می‌رسه، نه یه پیام خطای
+                # گمراه‌کننده («حجم زیاده») درحالی‌که مشکل چیز دیگه‌ای بود.
+                try:
+                    with open(filepath, "rb") as f:
+                        await context.bot.send_document(chat_id, f, caption=caption or None)
+                    _log_job(job_id, platform=platform, url=url, stage="sent-as-document-no-reply")
+                except Exception as e3:
+                    log.exception(f"[dl:{job_id}] document fallback also failed")
+                    try:
+                        await status.edit_text(
+                            "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام "
+                            "موقتاً پاسخ نداد."
+                        )
+                    except Exception:
+                        pass
+                    return
         finally:
             if thumb_f:
                 try:

@@ -48,7 +48,7 @@ FLOOD_MAX_MSGS = 6
 FLOOD_WINDOW_SECONDS = 8
 FLOOD_MUTE_MINUTES = 5
 
-DEFAULT_SETTINGS = {"antilink": "off", "antiflood": "off"}
+DEFAULT_SETTINGS = {"antilink": "off", "antiflood": "off", "downloader_links": "on"}
 
 
 def _get_setting(deps, chat_id, key):
@@ -67,10 +67,14 @@ def _status_label(value):
 async def build_security_text_and_kb(deps, chat_id):
     antilink = _get_setting(deps, chat_id, "antilink")
     antiflood = _get_setting(deps, chat_id, "antiflood")
+    dl_links = _get_setting(deps, chat_id, "downloader_links")
     text = (
         "🔐 *امنیت گروه*\n\n"
         f"🔗 آنتی‌لینک: {_status_label(antilink)}\n"
         "   وقتی روشنه، لینک/آیدی گروه دیگه که غیرادمین‌ها بفرستن خودکار پاک می‌شه.\n\n"
+        f"📥 لینک‌های دانلودر (یوتیوب/اینستا/تیک‌تاک/ایکس/پینترست/ساندکلاود): {_status_label(dl_links)}\n"
+        "   وقتی روشنه، این لینک‌ها حتی با آنتی‌لینک روشن، برای همه (نه فقط ادمین) مجازن — "
+        "فقط لینک کانال/گروه دیگه طبق آنتی‌لینک پاک می‌مونه.\n\n"
         f"🚫 آنتی‌فلود: {_status_label(antiflood)}\n"
         f"   وقتی روشنه، اگه یکی بیش از {FLOOD_MAX_MSGS} پیام تو {FLOOD_WINDOW_SECONDS} ثانیه بفرسته، "
         f"{FLOOD_MUTE_MINUTES} دقیقه خودکار میوت می‌شه.\n\n"
@@ -79,6 +83,9 @@ async def build_security_text_and_kb(deps, chat_id):
     rows = [
         [InlineKeyboardButton(
             f"🔗 آنتی‌لینک: {_status_label(antilink)}", callback_data="sec:toggle:antilink"
+        )],
+        [InlineKeyboardButton(
+            f"📥 لینک‌های دانلودر: {_status_label(dl_links)}", callback_data="sec:toggle:downloader_links"
         )],
         [InlineKeyboardButton(
             f"🚫 آنتی‌فلود: {_status_label(antiflood)}", callback_data="sec:toggle:antiflood"
@@ -131,7 +138,22 @@ def register_security(app, deps):
             return False
 
         # --- آنتی‌لینک ---
+        # 🐛 رفع باگ «لینک اینستا/یوتیوب/... تو گروه نمی‌ره»: وقتی آنتی‌لینک
+        # روشن بود، این‌جا هر لینکی (حتی لینک‌های پلتفرم‌های پشتیبانی‌شده‌ی
+        # دانلودر) به‌عنوان اسپم پاک می‌شد — قبل از این‌که اصلاً به هندلر
+        # دانلودر برسه. نتیجه: دانلودر با آنتی‌لینک روشن کلاً غیرفعال می‌شد،
+        # بدون هیچ پیام خطایی که علتش رو نشون بده. حالا لینک‌های پلتفرم‌های
+        # پشتیبانی‌شده‌ی دانلودر (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/
+        # ساندکلاود) از این حذف خودکار معاف‌ان — چون این‌ها قابلیت رسمی
+        # خودِ رباتن، نه اسپم.
         if _get_setting(deps, chat_id, "antilink") == "on" and text and LINK_RE.search(text):
+            if _get_setting(deps, chat_id, "downloader_links") == "on":
+                try:
+                    from downloader import text_contains_supported_link
+                    if text_contains_supported_link(text):
+                        return False
+                except Exception:
+                    pass
             try:
                 await msg.delete()
             except Exception:
