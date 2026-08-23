@@ -70,6 +70,24 @@ PLATFORM_DOMAINS = {
     "soundcloud": ("soundcloud.com", "snd.sc"),
 }
 
+def text_contains_supported_link(text: str) -> bool:
+    """می‌گه آیا یه متن (کپشن/پیام) حاوی لینکیه که دانلودر پشتیبانی می‌کنه یا نه.
+
+    🐛 باگ اصلی «لینک اینستا تو گروه نمی‌ره»: وقتی آنتی‌لینک یا فیلتر کلمات
+    گروه فعال بود، همین لینکی که کاربر برای دانلودر می‌فرستاد به‌عنوان
+    اسپم شناسایی و پیامش حذف می‌شد — قبل از این‌که اصلاً به downloader_link_handler
+    برسه. این تابع تو bot.py/security_tools.py استفاده می‌شه تا لینک‌های
+    پلتفرم‌های پشتیبانی‌شده (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/ساندکلاود)
+    از این حذف خودکار معاف بشن — چون این‌ها یه قابلیت رسمی ربات‌ان، نه اسپم.
+    """
+    if not text:
+        return False
+    m = URL_RE.search(text)
+    if not m:
+        return False
+    return _detect_platform_from_url(m.group(0)) is not None
+
+
 def _detect_platform_from_url(url: str):
     """اگه کاربر بدون انتخاب پلتفرم (بدون زدن «دانلودر» و بدون کلیک دکمه) مستقیم
     یه لینک پشتیبانی‌شده بفرسته، از روی دامنه‌ش پلتفرم رو خودکار تشخیص بده.
@@ -1183,7 +1201,20 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
+    # 🐛 رفع باگ «کاربر لینک می‌فرسته و ربات کاملاً ساکت می‌مونه»: قبلاً این
+    # reply_text مستقیم و بدون try/except بود؛ اگه به هر دلیلی (مثلاً پیام
+    # اصلی هم‌زمان توسط یه فیچر دیگه‌ی گروه حذف شده بود) ریپلای‌کردن به همون
+    # پیام شکست می‌خورد، کل تابع همون‌جا با یه Exception ناتموم می‌موند — نه
+    # پیامی به کاربر، نه هیچ ردی تو چت گروه، دقیقاً همون «لینک می‌فرستم و
+    # هیچی نمی‌شه». حالا اگه reply مستقیم شکست بخوره، به یه پیام معمولی
+    # (بدون رفرنس به پیام حذف‌شده) افت می‌کنیم تا کاربر همیشه یه واکنش ببینه.
+    try:
+        status = await msg.reply_text(f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}...")
+    except Exception as e:
+        log.warning(f"[dl:{job_id}] initial status reply failed ({e}); falling back to plain send_message")
+        status = await context.bot.send_message(
+            chat_id, f"⏳ در حال دانلود از {PLATFORM_LABELS[platform]}..."
+        )
 
     # 📊 پیش‌نمایش Metadata (عنوان/مدت/حجم تقریبی) قبل از شروع دانلود واقعی —
     # فقط برای یوتیوب/ساندکلاود که extract_info(download=False) سریع و قابل‌اتکاست.
@@ -1349,10 +1380,25 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                             except Exception:
                                 pass
                         except Exception as e2:
-                            log.exception(f"[dl:{job_id}] pinterest document fallback also failed")
-                            await status.edit_text(
-                                "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
-                            )
+                            # همون فالبک نهایی «بدون reply» که تو مسیر اصلی هم اضافه شد —
+                            # اگه پیام کاربر پاک شده باشه، reply_document شکست می‌خوره
+                            # ولی send_document ساده (بدون رفرنس) هنوز جواب می‌ده.
+                            try:
+                                with open(send_path, "rb") as f:
+                                    await context.bot.send_document(chat_id, f, caption=caption)
+                                _log_job(job_id, platform=platform, url=url, stage="sent-as-document-no-reply")
+                                try:
+                                    await status.delete()
+                                except Exception:
+                                    pass
+                            except Exception as e3:
+                                log.exception(f"[dl:{job_id}] pinterest document fallback also failed")
+                                try:
+                                    await status.edit_text(
+                                        "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
+                                    )
+                                except Exception:
+                                    pass
                         return
                     finally:
                         if thumb_f:
@@ -1644,12 +1690,26 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                     await msg.reply_document(f, caption=caption or None)
                 _log_job(job_id, platform=platform, url=url, stage="sent-as-document")
             except Exception as e2:
-                log.exception(f"[dl:{job_id}] document fallback also failed")
-                await status.edit_text(
-                    "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام "
-                    "موقتاً پاسخ نداد."
-                )
-                return
+                # 🐛 اگه حتی reply_document هم شکست خورد (مثلاً چون پیام اصلی
+                # کاربر دیگه رو دیسک تلگرام وجود نداره — حذف‌شده توسط یه
+                # فیچر دیگه‌ی گروه)، قبل از تسلیم کامل، یه‌بار بدون رفرنس به
+                # پیام اصلی (send_document ساده، نه reply) امتحان می‌کنیم؛
+                # این‌جوری فایل بالاخره به‌دست کاربر می‌رسه، نه یه پیام خطای
+                # گمراه‌کننده («حجم زیاده») درحالی‌که مشکل چیز دیگه‌ای بود.
+                try:
+                    with open(filepath, "rb") as f:
+                        await context.bot.send_document(chat_id, f, caption=caption or None)
+                    _log_job(job_id, platform=platform, url=url, stage="sent-as-document-no-reply")
+                except Exception as e3:
+                    log.exception(f"[dl:{job_id}] document fallback also failed")
+                    try:
+                        await status.edit_text(
+                            "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام "
+                            "موقتاً پاسخ نداد."
+                        )
+                    except Exception:
+                        pass
+                    return
         finally:
             if thumb_f:
                 try:
