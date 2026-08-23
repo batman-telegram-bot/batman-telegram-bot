@@ -131,21 +131,7 @@ def register_security(app, deps):
             return False
 
         # --- آنتی‌لینک ---
-        # 🐛 رفع باگ «لینک اینستا/یوتیوب/... تو گروه نمی‌ره»: وقتی آنتی‌لینک
-        # روشن بود، این‌جا هر لینکی (حتی لینک‌های پلتفرم‌های پشتیبانی‌شده‌ی
-        # دانلودر) به‌عنوان اسپم پاک می‌شد — قبل از این‌که اصلاً به هندلر
-        # دانلودر برسه. نتیجه: دانلودر با آنتی‌لینک روشن کلاً غیرفعال می‌شد،
-        # بدون هیچ پیام خطایی که علتش رو نشون بده. حالا لینک‌های پلتفرم‌های
-        # پشتیبانی‌شده‌ی دانلودر (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/
-        # ساندکلاود) از این حذف خودکار معاف‌ان — چون این‌ها قابلیت رسمی
-        # خودِ رباتن، نه اسپم.
         if _get_setting(deps, chat_id, "antilink") == "on" and text and LINK_RE.search(text):
-            try:
-                from downloader import text_contains_supported_link
-                if text_contains_supported_link(text):
-                    return False
-            except Exception:
-                pass
             try:
                 await msg.delete()
             except Exception:
