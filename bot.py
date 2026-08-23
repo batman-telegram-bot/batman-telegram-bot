@@ -45,6 +45,13 @@ else:
 # override هستن، ولی مقدار پیش‌فرض دقیقاً همونیه که خواسته شده.
 REQUIRED_CHANNEL_USERNAME = os.getenv("REQUIRED_CHANNEL", "@Ee_club").lstrip("@")
 REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", f"https://t.me/{REQUIRED_CHANNEL_USERNAME}")
+# 🔓 سوییچ کامل خاموش/روشن کردن گیت اجباری عضویت کانال، از طریق یه Environment
+# Variable ساده رو Railway — بدون نیاز به تغییر کد هر بار. اگه REQUIRED_CHANNEL
+# رو Railway نباشه یا مقدارش یکی از این کلمات باشه (off/disabled/none/خاموش)،
+# گیت کاملاً غیرفعال می‌مونه و هیچ‌کس مجبور به عضویت نیست. برای روشن کردنش دوباره،
+# کافیه REQUIRED_CHANNEL رو رو Railway به یوزرنیم یا لینک کانال/گروه موردنظر ست کنی.
+FORCE_JOIN_DISABLED_VALUES = {"", "off", "disabled", "none", "خاموش"}
+FORCE_JOIN_ENABLED = REQUIRED_CHANNEL_USERNAME.strip().lower() not in FORCE_JOIN_DISABLED_VALUES
 
 CAPTCHA_TIMEOUT_SECONDS = 180  # ۳ دقیقه فرصت برای تایید عضو جدید
 
@@ -4508,7 +4515,7 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
     # 📢 مرحله‌ی اول Gate: عضویت کانال (از کش سریع — چک زنده‌ی API فقط سر
     # /start و دکمه‌ی «بررسی عضویت» انجام می‌شه تا هر پیام یه Call جدا به
     # Telegram API نزنه و ریت‌لیمیت نخوریم).
-    channel_ok = await db_run(_is_channel_verified_cached, user.id)
+    channel_ok = True if not FORCE_JOIN_ENABLED else await db_run(_is_channel_verified_cached, user.id)
     phone_ok = channel_ok and await db_run(_is_phone_verified, user.id)
 
     if channel_ok and phone_ok:
@@ -4558,7 +4565,7 @@ async def _permission_gate_callback(update: Update, context: ContextTypes.DEFAUL
     if user.id == OWNER_ID:
         return
 
-    channel_ok = await db_run(_is_channel_verified_cached, user.id)
+    channel_ok = True if not FORCE_JOIN_ENABLED else await db_run(_is_channel_verified_cached, user.id)
     if not channel_ok:
         try:
             await query.answer(CHANNEL_JOIN_PROMPT_TEXT.replace("*", ""), show_alert=True)
