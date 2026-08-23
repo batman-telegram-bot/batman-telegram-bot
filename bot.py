@@ -129,21 +129,109 @@ log = logging.getLogger("batbot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
-# 🩺 Persistence diagnostic — این لاگ تنها راهیه که از رو Railway Logs (بدون نیاز
-# به SSH/دسترسی به فایل‌سیستم) می‌شه فهمید DB داره رو یه Volume دائمی ذخیره
-# می‌شه یا رو فایل‌سیستم موقتِ کانتینر (که با هر Redeploy/Restart پاک می‌شه).
-# کد این پروژه از قبل درست بود (CREATE TABLE IF NOT EXISTS، بدون DROP/Reset)؛
-# اگه اطلاعات بعد از Update پاک می‌شن، علتش تقریباً همیشه همینه: تو داشبورد
-# Railway هیچ Volume‌ای به مسیر /data وصل نشده. راه‌حل کد نیست، تنظیمِ سرویسه:
-# Railway → سرویس → Volumes → یه Volume بساز و Mount Path رو /data بذار.
-if os.path.isdir("/data"):
+
+# =========================================================
+#  🗄️ DATABASE BACKEND — SQLite (فایل محلی/Volume) یا PostgreSQL دائمی
+# =========================================================
+# اگه DATABASE_URL ست شده باشه (مثلاً Railway PostgreSQL Plugin)، همه‌ی
+# جدول‌های اصلی (users، chats، user_chat_memberships، start_events، players،
+# verified_users، group_lists، mod_log، gotham_events، ...) روی همون Postgres
+# دائمی ذخیره می‌شن — چون Postgres خودش یه سرویس جدا از فایل‌سیستم کانتینره،
+# با هیچ Restart/Redeploy/Update/Crash‌ای پاک نمی‌شه، حتی بدون Volume.
+# اگه DATABASE_URL ست نشده باشه، سیستم دقیقاً مثل قبل رو SQLite (DB_PATH) کار
+# می‌کنه — یعنی این تغییر Backward-Compatible‌ه و چیزی رو برای دیپلوی‌های
+# فعلی که فقط SQLite دارن نمی‌شکنه.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+IS_POSTGRES = bool(DATABASE_URL)
+
+if IS_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+
+    # Railway (و بیشتر ارائه‌دهنده‌ها) گاهی scheme رو postgres:// می‌دن که
+    # psycopg2 جدید بهش گیر می‌ده؛ postgresql:// همیشه امنه.
+    _PG_DSN = DATABASE_URL
+    if _PG_DSN.startswith("postgres://"):
+        _PG_DSN = "postgresql://" + _PG_DSN[len("postgres://"):]
+
+    class _PGCursor:
+        """کورسر سازگار با رابط sqlite3 که تو کل این فایل استفاده شده: همون
+        placeholder سبک '?'، همون row["col"] برای خوندن نتیجه (با
+        RealDictCursor)."""
+
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, params=()):
+            pg_sql = sql.replace("?", "%s") if "?" in sql else sql
+            self._cur.execute(pg_sql, params)
+            return self
+
+        def executemany(self, sql, seq_of_params):
+            pg_sql = sql.replace("?", "%s") if "?" in sql else sql
+            self._cur.executemany(pg_sql, seq_of_params)
+            return self
+
+        def fetchone(self):
+            return self._cur.fetchone()
+
+        def fetchall(self):
+            return self._cur.fetchall()
+
+        def __getitem__(self, key):
+            # بعضی‌جاها مستقیم c.execute(...)[...] استفاده نشده، ولی برای
+            # ایمنی رابط رو کامل‌تر نگه می‌داریم.
+            return self._cur[key]
+
+    class _PGConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def cursor(self):
+            return _PGCursor(self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor))
+
+        def commit(self):
+            self._conn.commit()
+
+        def rollback(self):
+            self._conn.rollback()
+
+        def close(self):
+            self._conn.close()
+
+    def _pg_connect():
+        conn = psycopg2.connect(_PG_DSN)
+        return conn
+
+
+def _upsert_sql(table, cols, conflict_cols):
+    """SQL درست برای INSERT-یا-UPDATE، مستقل از بک‌اند — روی SQLite از
+    INSERT OR REPLACE و روی Postgres از INSERT ... ON CONFLICT DO UPDATE
+    استفاده می‌کنه (سینتکس OR REPLACE تو Postgres وجود نداره)."""
+    col_list = ",".join(cols)
+    if IS_POSTGRES:
+        ph = ",".join(["%s"] * len(cols))
+        update_cols = [c for c in cols if c not in conflict_cols]
+        set_clause = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+        conflict = ",".join(conflict_cols)
+        return f"INSERT INTO {table} ({col_list}) VALUES ({ph}) ON CONFLICT ({conflict}) DO UPDATE SET {set_clause}"
+    ph = ",".join(["?"] * len(cols))
+    return f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({ph})"
+
+
+# 🩺 Persistence diagnostic — این لاگ‌ها تنها راهی هستن که از رو Railway Logs
+# (بدون نیاز به SSH/دسترسی به فایل‌سیستم) می‌شه فهمید DB داره رو یه مکان دائمی
+# ذخیره می‌شه یا رو فایل‌سیستم موقتِ کانتینر (که با هر Redeploy/Restart پاک می‌شه).
+if IS_POSTGRES:
+    log.info("💾 DATABASE_URL پیدا شد — همه‌ی جدول‌های اصلی روی PostgreSQL دائمی ذخیره می‌شن (بهترین حالت، نیازی به Volume نیست).")
+elif os.path.isdir("/data"):
     log.info(f"💾 DB_PATH = {DB_PATH} — پوشه‌ی /data پیدا شد؛ اگه Volume Railway واقعاً به همین مسیر Mount شده باشه، دیتابیس با Restart/Redeploy حفظ می‌شه.")
 else:
     log.warning(
-        f"⚠️ DB_PATH = {DB_PATH} — پوشه‌ی /data پیدا نشد! دیتابیس داره رو فایل‌سیستم موقتِ کانتینر ذخیره "
-        "می‌شه و با هر Redeploy/Restart روی Railway از بین می‌ره. رفع دائمی: تو داشبورد Railway برای این "
-        "سرویس یه Volume بساز با Mount Path=/data (یا env var DB_PATH رو به مسیر داخل همون Volume ست کن) "
-        "و بعد Redeploy کن."
+        f"⚠️ DB_PATH = {DB_PATH} — نه DATABASE_URL ست شده، نه پوشه‌ی /data پیدا شد! دیتابیس داره رو فایل‌سیستم موقتِ کانتینر ذخیره "
+        "می‌شه و با هر Redeploy/Restart روی Railway از بین می‌ره. رفع دائمی (یکی از این دو): "
+        "۱) یه Plugin از نوع PostgreSQL به سرویس اضافه کن (Railway خودش DATABASE_URL رو ست می‌کنه)، یا "
+        "۲) تو داشبورد Railway برای این سرویس یه Volume بساز با Mount Path=/data. بعد Redeploy کن."
     )
 # =========================================================
 #  PERSONAS
@@ -469,12 +557,22 @@ _db_lock = asyncio.Lock()
 
 
 def _connect():
+    if IS_POSTGRES:
+        return _PGConn(_pg_connect())
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+_AUTOINC_PK = "id SERIAL PRIMARY KEY" if IS_POSTGRES else "id INTEGER PRIMARY KEY AUTOINCREMENT"
+
+
 def _init_db():
+    """راه‌اندازی/مهاجرت Schema. طبق قانون پروژه:
+    - فقط CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD COLUMN (idempotent، non-destructive)
+    - هرگز DROP TABLE یا DELETE FROM هیچ جدول کاربر/گروه/شمارنده‌ای اینجا انجام نمی‌شه
+    - اجرای چندباره‌ی این تابع (هر Restart/Redeploy) نباید هیچ داده‌ای رو پاک کنه
+    """
     conn = _connect()
     c = conn.cursor()
     c.execute("""
@@ -523,9 +621,9 @@ def _init_db():
             PRIMARY KEY (chat_id, list_type, item_key)
         )
     """)
-    c.execute("""
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS mod_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {_AUTOINC_PK},
             chat_id INTEGER,
             admin_name TEXT,
             action TEXT,
@@ -533,6 +631,9 @@ def _init_db():
             ts REAL
         )
     """)
+    # ⚠️ جدول قدیمیِ bot_starters — دیگه ازش برای نوشتن استفاده نمی‌شه (جدول
+    # جدید `users` جایگزینش شده)، ولی طبق قانون Migration امن هرگز حذف/خالی
+    # نمی‌شه؛ فقط یه‌بار (پایین‌تر) محتواش به‌صورت غیرمخرب به `users` منتقل می‌شه.
     c.execute("""
         CREATE TABLE IF NOT EXISTS bot_starters (
             user_id INTEGER PRIMARY KEY,
@@ -541,14 +642,103 @@ def _init_db():
             started_at REAL
         )
     """)
-    c.execute("""
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS gotham_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {_AUTOINC_PK},
             event_text TEXT,
             dialogue_text TEXT,
             ts REAL
         )
     """)
+    # =====================================================
+    # 👥 USERS — ذخیره‌ی دائمیِ هر کسی که ربات رو Start زده یا حضورش تو یه
+    # گروه دیده شده. telegram_user_id کلید یکتاست؛ هیچ رکورد تکراری‌ای برای
+    # یه کاربر ساخته نمی‌شه، فقط UPDATE می‌شه (نگاه کن به _register_start_event
+    # و _touch_user_in_group).
+    # =====================================================
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_user_id BIGINT PRIMARY KEY,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            last_name TEXT DEFAULT '',
+            first_seen_at REAL DEFAULT 0,
+            last_seen_at REAL DEFAULT 0,
+            start_count INTEGER DEFAULT 0,
+            private_chat_seen INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            created_at REAL DEFAULT 0,
+            updated_at REAL DEFAULT 0
+        )
+    """ if IS_POSTGRES else """
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_user_id INTEGER PRIMARY KEY,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            last_name TEXT DEFAULT '',
+            first_seen_at REAL DEFAULT 0,
+            last_seen_at REAL DEFAULT 0,
+            start_count INTEGER DEFAULT 0,
+            private_chat_seen INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            created_at REAL DEFAULT 0,
+            updated_at REAL DEFAULT 0
+        )
+    """)
+    # =====================================================
+    # 🔗 USER ↔ GROUP MEMBERSHIP — رابطه‌ی هر کاربر با هر گروهی که توش دیده
+    # شده؛ اگه کاربر از گروه خارج بشه رکورد حذف نمی‌شه، فقط is_active صفر می‌شه
+    # (تاریخچه‌ی کامل حفظ می‌مونه، طبق خواسته‌ی پروژه).
+    # =====================================================
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_chat_memberships (
+            user_id BIGINT,
+            chat_id BIGINT,
+            first_seen_at REAL DEFAULT 0,
+            last_seen_at REAL DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """ if IS_POSTGRES else """
+        CREATE TABLE IF NOT EXISTS user_chat_memberships (
+            user_id INTEGER,
+            chat_id INTEGER,
+            first_seen_at REAL DEFAULT 0,
+            last_seen_at REAL DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    """)
+    # =====================================================
+    # 🚀 START EVENTS — تاریخچه‌ی کامل هر بار /start (کی، کِی، کجا)؛
+    # start_count روی users برای آمار سریع، این جدول برای تاریخچه‌ی کامله.
+    # =====================================================
+    c.execute(f"""
+        CREATE TABLE IF NOT EXISTS start_events (
+            event_id {"SERIAL" if IS_POSTGRES else "INTEGER"} PRIMARY KEY {"" if IS_POSTGRES else "AUTOINCREMENT"},
+            telegram_user_id BIGINT,
+            chat_id BIGINT,
+            ts REAL,
+            payload TEXT DEFAULT ''
+        )
+    """ if IS_POSTGRES else f"""
+        CREATE TABLE IF NOT EXISTS start_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_user_id INTEGER,
+            chat_id INTEGER,
+            ts REAL,
+            payload TEXT DEFAULT ''
+        )
+    """)
+    # ایندکس‌ها برای صفحه‌ها و آمارهای پنل مدیریت (سینتکس هر دو بک‌اند یکیه)
+    for idx_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_memberships_chat ON user_chat_memberships (chat_id)",
+        "CREATE INDEX IF NOT EXISTS idx_memberships_user ON user_chat_memberships (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_start_events_user ON start_events (telegram_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_start_events_ts ON start_events (ts)",
+        "CREATE INDEX IF NOT EXISTS idx_users_start_count ON users (start_count)",
+    ):
+        c.execute(idx_sql)
     # 📱 احراز اجباری شماره تلفن — وضعیت تاییدشده‌ها اینجا ذخیره می‌شه تا کاربر
     # مجبور نباشه هر بار دوباره شماره‌ش رو بفرسته.
     c.execute("""
@@ -568,25 +758,62 @@ def _init_db():
             verified_at REAL
         )
     """)
-    # مهاجرت برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو ندارن
-    for col, ddl in (
-        ("game_wins", "ALTER TABLE players ADD COLUMN game_wins INTEGER DEFAULT 0"),
-        ("game_losses", "ALTER TABLE players ADD COLUMN game_losses INTEGER DEFAULT 0"),
-        ("message_count", "ALTER TABLE players ADD COLUMN message_count INTEGER DEFAULT 0"),
-        ("streak_days", "ALTER TABLE players ADD COLUMN streak_days INTEGER DEFAULT 0"),
-        ("last_active_date", "ALTER TABLE players ADD COLUMN last_active_date TEXT DEFAULT ''"),
-        ("week_message_count", "ALTER TABLE players ADD COLUMN week_message_count INTEGER DEFAULT 0"),
-        ("week_start_date", "ALTER TABLE players ADD COLUMN week_start_date TEXT DEFAULT ''"),
-        ("first_seen_ts", "ALTER TABLE players ADD COLUMN first_seen_ts REAL DEFAULT 0"),
-        ("title", "ALTER TABLE chats ADD COLUMN title TEXT DEFAULT ''"),
-        ("chat_type", "ALTER TABLE chats ADD COLUMN chat_type TEXT DEFAULT ''"),
-        ("first_seen_ts_chat", "ALTER TABLE chats ADD COLUMN first_seen_ts REAL DEFAULT 0"),
-        ("last_seen_ts", "ALTER TABLE chats ADD COLUMN last_seen_ts REAL DEFAULT 0"),
-    ):
-        try:
-            c.execute(ddl)
-        except sqlite3.OperationalError:
-            pass  # ستون از قبل هست
+    # مهاجرت برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو ندارن. غیرمخرب و
+    # idempotent‌ه: اجرای چندباره‌ش (هر Startup) فقط ستون‌های نبود رو اضافه
+    # می‌کنه، هیچ داده‌ای رو دست نمی‌زنه یا پاک نمی‌کنه.
+    _migration_columns = [
+        ("players", "game_wins", "INTEGER DEFAULT 0"),
+        ("players", "game_losses", "INTEGER DEFAULT 0"),
+        ("players", "message_count", "INTEGER DEFAULT 0"),
+        ("players", "streak_days", "INTEGER DEFAULT 0"),
+        ("players", "last_active_date", "TEXT DEFAULT ''"),
+        ("players", "week_message_count", "INTEGER DEFAULT 0"),
+        ("players", "week_start_date", "TEXT DEFAULT ''"),
+        ("players", "first_seen_ts", "REAL DEFAULT 0"),
+        ("chats", "title", "TEXT DEFAULT ''"),
+        ("chats", "chat_type", "TEXT DEFAULT ''"),
+        ("chats", "first_seen_ts", "REAL DEFAULT 0"),
+        ("chats", "last_seen_ts", "REAL DEFAULT 0"),
+        # 🆕 ستون‌های جدید برای ردیابی دائمی گروه‌ها (بخش «گروه‌ها» طبق خواسته):
+        # username عمومی گروه (اگه داشته باشه)، is_active (بدون حذف رکورد،
+        # فقط این فلگ صفر می‌شه اگه ربات دیگه عضو نباشه)، created_at/updated_at.
+        ("chats", "username", "TEXT DEFAULT ''"),
+        ("chats", "is_active", "INTEGER DEFAULT 1"),
+        ("chats", "created_at", "REAL DEFAULT 0"),
+        ("chats", "updated_at", "REAL DEFAULT 0"),
+    ]
+    if IS_POSTGRES:
+        # Postgres از ADD COLUMN IF NOT EXISTS پشتیبانی می‌کنه — نیازی به
+        # try/except نیست (تو Postgres یه خطا وسط تراکنش، کل تراکنش رو
+        # می‌بره تو حالت aborted و باید rollback بشه؛ با IF NOT EXISTS اصلاً
+        # به اون مسیر نمی‌ریم).
+        for table, col, ddl_type in _migration_columns:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl_type}")
+    else:
+        for table, col, ddl_type in _migration_columns:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl_type}")
+            except sqlite3.OperationalError:
+                pass  # ستون از قبل هست
+    conn.commit()
+
+    # =====================================================
+    # 🔁 Migration امن و یک‌باره: انتقال کاربران قدیمیِ bot_starters به جدول
+    # جدید users — فقط برای کاربرهایی که هنوز تو users نیستن (INSERT ... WHERE
+    # NOT EXISTS)، هیچ رکورد موجودی تو users بازنویسی/پاک نمی‌شه، و خودِ
+    # bot_starters هم دست‌نخورده باقی می‌مونه (برای Rollback/بررسی دستی).
+    # اجرای چندباره‌ی این کوئری کاملاً بی‌خطره (Idempotent).
+    # =====================================================
+    c.execute("""
+        INSERT INTO users (telegram_user_id, username, first_name, last_name,
+                            first_seen_at, last_seen_at, start_count,
+                            private_chat_seen, is_active, created_at, updated_at)
+        SELECT b.user_id, COALESCE(b.username, ''), COALESCE(b.first_name, ''), '',
+               COALESCE(b.started_at, 0), COALESCE(b.started_at, 0), 1,
+               1, 1, COALESCE(b.started_at, 0), COALESCE(b.started_at, 0)
+        FROM bot_starters b
+        WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.telegram_user_id = b.user_id)
+    """)
     conn.commit()
     conn.close()
 
@@ -616,13 +843,15 @@ def _get_mod_log(chat_id, limit=15):
 
 
 def _log_bot_starter(user):
-    """اگه کاربر اولین‌باره /start می‌زنه، ثبتش می‌کنه و True برمی‌گردونه (برای اطلاع به اونر)."""
+    """⚠️ Legacy — جدول users/start_events جایگزینش شده (نگاه کن به
+    _register_start_event). دیگه از start() صدا زده نمی‌شه؛ فقط برای
+    سازگاری با کد قدیمی/دیباگ دستی نگه داشته شده، جدولش هم پاک نمی‌شه."""
     conn = _connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM bot_starters WHERE user_id=?", (user.id,))
     is_new = c.fetchone() is None
     c.execute(
-        "INSERT OR REPLACE INTO bot_starters (user_id, username, first_name, started_at) VALUES (?,?,?,?)",
+        _upsert_sql("bot_starters", ["user_id", "username", "first_name", "started_at"], ["user_id"]),
         (user.id, user.username or "", user.first_name or "", time.time()),
     )
     conn.commit()
@@ -631,18 +860,21 @@ def _log_bot_starter(user):
 
 
 def _get_bot_starters(limit=30):
+    """⚠️ الان از جدول دائمیِ `users` می‌خونه (نه bot_starters قدیمی که دیگه
+    نوشته نمی‌شه) — اسم تابع برای سازگاری با صدازننده‌های قدیمی نگه داشته شده."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT username, first_name, started_at FROM bot_starters ORDER BY started_at DESC LIMIT ?", (limit,))
+    c.execute("SELECT username, first_name, first_seen_at as started_at FROM users ORDER BY first_seen_at DESC LIMIT ?", (limit,))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
 def _count_bot_starters():
+    """⚠️ الان تعداد ردیف‌های `users` رو برمی‌گردونه (نه bot_starters قدیمی)."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) as n FROM bot_starters")
+    c.execute("SELECT COUNT(*) as n FROM users")
     n = c.fetchone()["n"]
     conn.close()
     return n
@@ -681,7 +913,7 @@ def _set_channel_verified(user_id):
     conn = _connect()
     c = conn.cursor()
     c.execute(
-        "INSERT OR REPLACE INTO channel_verified (user_id, verified_at) VALUES (?,?)",
+        _upsert_sql("channel_verified", ["user_id", "verified_at"], ["user_id"]),
         (user_id, time.time()),
     )
     conn.commit()
@@ -696,10 +928,12 @@ def _clear_channel_verified(user_id):
     conn.close()
 
 
-def _track_group_chat(chat_id, title, chat_type):
-    """اطلاعات نمایشی گروه (عنوان/نوع/آخرین‌فعالیت) رو برای داشبورد Owner
-    به‌روز نگه می‌داره. ردیف از قبل با _get_chat ساخته می‌شه؛ اینجا فقط
-    ستون‌های جدید رو آپدیت می‌کنیم (سیستم دیتابیس موازی نساختیم)."""
+def _track_group_chat(chat_id, title, chat_type, username=""):
+    """اطلاعات دائمیِ گروه (عنوان/نوع/یوزرنیم/آخرین‌فعالیت/is_active) رو
+    به‌روز نگه می‌داره. ردیف از قبل ممکنه با _get_chat ساخته شده باشه؛ اینجا
+    فقط ستون‌های ردیابی رو آپدیت می‌کنیم (سیستم دیتابیس موازی نساختیم).
+    is_active همیشه اینجا 1 می‌شه چون این تابع فقط وقتی صدا زده می‌شه که یه
+    Update واقعی از این چت رسیده — یعنی ربات هنوز اونجاست."""
     conn = _connect()
     c = conn.cursor()
     now = time.time()
@@ -707,18 +941,291 @@ def _track_group_chat(chat_id, title, chat_type):
     row = c.fetchone()
     if row is None:
         c.execute(
-            "INSERT INTO chats (chat_id, next_switch_at, next_battle_at, title, chat_type, first_seen_ts, last_seen_ts) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (chat_id, random.randint(8, 15), random.randint(10, 20), title or "", chat_type or "", now, now),
+            "INSERT INTO chats (chat_id, next_switch_at, next_battle_at, title, chat_type, username, "
+            "first_seen_ts, last_seen_ts, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+            (chat_id, random.randint(8, 15), random.randint(10, 20), title or "", chat_type or "",
+             username or "", now, now, now, now),
         )
     else:
         first_seen = row["first_seen_ts"] or now
         c.execute(
-            "UPDATE chats SET title=?, chat_type=?, first_seen_ts=?, last_seen_ts=? WHERE chat_id=?",
-            (title or "", chat_type or "", first_seen, now, chat_id),
+            "UPDATE chats SET title=?, chat_type=?, username=?, first_seen_ts=?, last_seen_ts=?, "
+            "is_active=1, updated_at=? WHERE chat_id=?",
+            (title or "", chat_type or "", username or "", first_seen, now, now, chat_id),
         )
     conn.commit()
     conn.close()
+
+
+def _deactivate_chat(chat_id):
+    """وقتی ربات از گروه حذف/بن می‌شه یا Leave می‌کنه: ردیف چت هرگز پاک نمی‌شه
+    (طبق قانون پروژه)، فقط is_active صفر می‌شه تا تاریخچه حفظ بمونه."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("UPDATE chats SET is_active=0, updated_at=? WHERE chat_id=?", (time.time(), chat_id))
+    conn.commit()
+    conn.close()
+
+
+def _delete_chat_row(chat_id):
+    """⚠️ حذف واقعی و دائمیِ یه گروه — طبق قانون پروژه فقط با دستور مدیریتیِ
+    صریحِ Owner باید صدا زده بشه (مثلاً /forgetchat)، هرگز به‌صورت خودکار
+    (نه تو Startup، نه وقتی ربات از گروه خارج می‌شه — برای اون حالت
+    _deactivate_chat استفاده می‌شه)."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM user_chat_memberships WHERE chat_id=?", (chat_id,))
+    c.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
+# =========================================================
+#  👥 USERS / 🔗 MEMBERSHIPS / 🚀 START EVENTS — لایه‌ی ماندگاری اصلی
+#  (نگاه کن به بخش ۱ تا ۵ خواسته‌ی پروژه: هیچ‌کدوم از این توابع رکورد رو
+#  با Restart/Redeploy/Crash از دست نمی‌دن؛ همه چیز مستقیم رو دیتابیسه، نه
+#  رو RAM/فایل موقت.)
+# =========================================================
+
+def _register_start_event(user, chat_id, payload=""):
+    """هر بار /start واقعی: کاربر رو تو users بسازه/آپدیت کنه (start_count
+    اتمیک با UPDATE ... = start_count + 1 زیاد می‌شه، نه با Select-then-write
+    تو پایتون)، و یه ردیف تو start_events برای تاریخچه‌ی کامل ثبت کنه.
+    خروجی: (is_new_user: bool, new_start_count: int)"""
+    conn = _connect()
+    c = conn.cursor()
+    now = time.time()
+    c.execute("SELECT telegram_user_id FROM users WHERE telegram_user_id=?", (user.id,))
+    is_new = c.fetchone() is None
+    if is_new:
+        c.execute(
+            "INSERT INTO users (telegram_user_id, username, first_name, last_name, first_seen_at, "
+            "last_seen_at, start_count, private_chat_seen, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,1,1,1,?,?)",
+            (user.id, user.username or "", user.first_name or "", user.last_name or "", now, now, now, now),
+        )
+    else:
+        # 🔒 اتمیک: افزایش شمارنده مستقیم تو خودِ دستور SQL، نه با
+        # Select→+1→Update تو کد پایتون — اگه چند درخواست هم‌زمان برسن
+        # (چند Worker/Process رو یه Postgres مشترک)، شمارنده خراب نمی‌شه.
+        c.execute(
+            "UPDATE users SET username=?, first_name=?, last_name=?, last_seen_at=?, "
+            "start_count = start_count + 1, private_chat_seen=1, is_active=1, updated_at=? "
+            "WHERE telegram_user_id=?",
+            (user.username or "", user.first_name or "", user.last_name or "", now, now, user.id),
+        )
+    c.execute(
+        "INSERT INTO start_events (telegram_user_id, chat_id, ts, payload) VALUES (?,?,?,?)",
+        (user.id, chat_id, now, payload or ""),
+    )
+    conn.commit()
+    c.execute("SELECT start_count FROM users WHERE telegram_user_id=?", (user.id,))
+    new_count = c.fetchone()["start_count"]
+    conn.close()
+    return is_new, new_count
+
+
+def _touch_user_in_group(user_id, username, first_name, last_name, chat_id):
+    """وقتی حضور یه کاربر تو یه گروه دیده می‌شه (هر پیام عادی): هم ردیف
+    دائمیِ users رو بسازه/تازه کنه (بدون افزایش start_count — این /start
+    نیست)، هم رابطه‌ی user_chat_memberships رو. هر دو تو یه Connection انجام
+    می‌شن تا رو مسیر پرتردد (هر پیام گروه) اورهد اضافه نداشته باشیم."""
+    conn = _connect()
+    c = conn.cursor()
+    now = time.time()
+
+    c.execute("SELECT telegram_user_id FROM users WHERE telegram_user_id=?", (user_id,))
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO users (telegram_user_id, username, first_name, last_name, first_seen_at, "
+            "last_seen_at, start_count, private_chat_seen, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,0,0,1,?,?)",
+            (user_id, username or "", first_name or "", last_name or "", now, now, now, now),
+        )
+    else:
+        c.execute(
+            "UPDATE users SET username=?, first_name=?, last_name=?, last_seen_at=?, is_active=1, "
+            "updated_at=? WHERE telegram_user_id=?",
+            (username or "", first_name or "", last_name or "", now, now, user_id),
+        )
+
+    c.execute("SELECT user_id FROM user_chat_memberships WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO user_chat_memberships (user_id, chat_id, first_seen_at, last_seen_at, is_active) "
+            "VALUES (?,?,?,?,1)",
+            (user_id, chat_id, now, now),
+        )
+    else:
+        c.execute(
+            "UPDATE user_chat_memberships SET last_seen_at=?, is_active=1 WHERE user_id=? AND chat_id=?",
+            (now, user_id, chat_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _set_membership_inactive(user_id, chat_id):
+    """کاربر از گروه خارج/اخراج شد — رکورد عضویت حذف نمی‌شه، فقط is_active
+    صفر می‌شه تا تاریخچه حفظ بمونه (طبق بخش ۴ خواسته‌ی پروژه)."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE user_chat_memberships SET is_active=0, last_seen_at=? WHERE user_id=? AND chat_id=?",
+        (time.time(), user_id, chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_user_groups(user_id):
+    """لیست گروه‌هایی که این کاربر توشون دیده شده (چه الان عضو باشه چه نه)،
+    برای صفحه‌ی «پروفایل کاربر» تو پنل Owner."""
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("""
+        SELECT c.chat_id, c.title, c.chat_type, m.first_seen_at, m.last_seen_at, m.is_active
+        FROM user_chat_memberships m
+        JOIN chats c ON c.chat_id = m.chat_id
+        WHERE m.user_id=?
+        ORDER BY m.last_seen_at DESC
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _get_user_start_history(user_id, limit=15):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT chat_id, ts, payload FROM start_events WHERE telegram_user_id=? ORDER BY ts DESC LIMIT ?",
+        (user_id, limit),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _get_user_by_id(user_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE telegram_user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _search_users(query, limit=10):
+    """جستجوی کاربر با Telegram ID (دقیق) یا username/first_name (شامل‌شونده،
+    Case-insensitive) — برای بخش «جستجوی کاربر» تو پنل Owner."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    conn = _connect()
+    c = conn.cursor()
+    if query.lstrip("-").isdigit():
+        c.execute("SELECT * FROM users WHERE telegram_user_id=?", (int(query),))
+        rows = c.fetchall()
+        if rows:
+            conn.close()
+            return rows
+    like = f"%{query.lstrip('@')}%"
+    if IS_POSTGRES:
+        c.execute(
+            "SELECT * FROM users WHERE username ILIKE ? OR first_name ILIKE ? OR last_name ILIKE ? "
+            "ORDER BY last_seen_at DESC LIMIT ?",
+            (like, like, like, limit),
+        )
+    else:
+        c.execute(
+            "SELECT * FROM users WHERE username LIKE ? COLLATE NOCASE OR first_name LIKE ? COLLATE NOCASE "
+            "OR last_name LIKE ? COLLATE NOCASE ORDER BY last_seen_at DESC LIMIT ?",
+            (like, like, like, limit),
+        )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def _count_users_total():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM users")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_users_active():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM users WHERE is_active=1")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_users_inactive():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM users WHERE is_active=0")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_users_since(ts):
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM users WHERE first_seen_at >= ?", (ts,))
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_start_events_total():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM start_events")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_start_events_between(ts_from, ts_to=None):
+    conn = _connect(); c = conn.cursor()
+    if ts_to is None:
+        c.execute("SELECT COUNT(*) as n FROM start_events WHERE ts >= ?", (ts_from,))
+    else:
+        c.execute("SELECT COUNT(*) as n FROM start_events WHERE ts >= ? AND ts < ?", (ts_from, ts_to))
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _get_top_users_by_start(limit=10):
+    conn = _connect(); c = conn.cursor()
+    c.execute(
+        "SELECT telegram_user_id, username, first_name, start_count FROM users "
+        "ORDER BY start_count DESC LIMIT ?",
+        (limit,),
+    )
+    rows = c.fetchall(); conn.close(); return rows
+
+
+def _count_active_groups():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0 AND is_active=1")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_all_groups_ever():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_previously_seen_groups():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0 AND is_active=0")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_distinct_users_across_groups():
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT user_id) as n FROM user_chat_memberships")
+    n = c.fetchone()["n"]; conn.close(); return n
+
+
+def _count_group_members(chat_id):
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) as n FROM user_chat_memberships WHERE chat_id=? AND is_active=1", (chat_id,))
+    n = c.fetchone()["n"]; conn.close(); return n
 
 
 USERS_PER_PAGE = 10
@@ -727,14 +1234,16 @@ PHONES_PER_PAGE = 10
 
 
 def _get_users_page(offset, limit):
+    """صفحه‌بندی کاربران — از جدول دائمیِ `users` (نه bot_starters قدیمی)."""
     conn = _connect()
     c = conn.cursor()
     c.execute("""
-        SELECT b.user_id, b.username, b.first_name, b.started_at,
+        SELECT u.telegram_user_id as user_id, u.username, u.first_name, u.first_seen_at as started_at,
+               u.start_count, u.is_active,
                CASE WHEN v.user_id IS NOT NULL THEN 1 ELSE 0 END as phone_verified
-        FROM bot_starters b
-        LEFT JOIN verified_users v ON v.user_id = b.user_id
-        ORDER BY b.started_at DESC
+        FROM users u
+        LEFT JOIN verified_users v ON v.user_id = u.telegram_user_id
+        ORDER BY u.first_seen_at DESC
         LIMIT ? OFFSET ?
     """, (limit, offset))
     rows = c.fetchall()
@@ -745,11 +1254,12 @@ def _get_users_page(offset, limit):
 def _get_groups_page(offset, limit):
     """فقط گروه/سوپرگروه‌های واقعی (chat_id منفی طبق قرارداد تلگرام) — چت‌های
     خصوصی که به‌خاطر استفاده‌ی مشترک _get_chat تو جدول chats ثبت می‌شن، اینجا
-    حساب نمی‌شن تا شمارش گروه‌ها واقعی بمونه."""
+    حساب نمی‌شن تا شمارش گروه‌ها واقعی بمونه. شامل گروه‌های غیرفعال (که ربات
+    ازشون خارج شده) هم می‌شه — تاریخچه‌ی کامل، وضعیت با is_active مشخصه."""
     conn = _connect()
     c = conn.cursor()
     c.execute("""
-        SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts
+        SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts, is_active
         FROM chats WHERE chat_id < 0
         ORDER BY last_seen_ts DESC LIMIT ? OFFSET ?
     """, (limit, offset))
@@ -759,9 +1269,12 @@ def _get_groups_page(offset, limit):
 
 
 def _count_real_groups():
+    """تعداد گروه‌هایی که ربات *الان* فعالانه توشونه (is_active=1) — برای
+    آمار «فعال» تو داشبورد. نگاه کن به _count_all_groups_ever برای مجموع
+    تاریخی و _count_previously_seen_groups برای گروه‌های ترک‌شده."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0")
+    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0 AND is_active=1")
     n = c.fetchone()["n"]
     conn.close()
     return n
@@ -793,7 +1306,7 @@ def _set_phone_verified(user_id, phone_number):
     conn = _connect()
     c = conn.cursor()
     c.execute(
-        "INSERT OR REPLACE INTO verified_users (user_id, phone_number, verified_at) VALUES (?,?,?)",
+        _upsert_sql("verified_users", ["user_id", "phone_number", "verified_at"], ["user_id"]),
         (user_id, phone_number or "", time.time()),
     )
     conn.commit()
@@ -1048,8 +1561,8 @@ def _list_add(chat_id, list_type, item_key, item_value=""):
     conn = _connect()
     c = conn.cursor()
     c.execute(
-        "INSERT OR REPLACE INTO group_lists (chat_id, list_type, item_key, item_value, added_at) "
-        "VALUES (?,?,?,?,?)",
+        _upsert_sql("group_lists", ["chat_id", "list_type", "item_key", "item_value", "added_at"],
+                    ["chat_id", "list_type", "item_key"]),
         (chat_id, list_type, str(item_key), str(item_value), time.time()),
     )
     conn.commit()
@@ -2055,7 +2568,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await try_resume_after_start(update, context)
         except Exception as e:
             log.info(f"start: card room resume failed (harmless): {e}")
-    is_new = await db_run(_log_bot_starter, user)
+    payload = context.args[0] if context.args else ""
+    is_new, start_count = await db_run(_register_start_event, user, update.effective_chat.id, payload)
     if is_new and user.id != OWNER_ID:
         try:
             uname = f"@{user.username}" if user.username else "بدون یوزرنیم"
@@ -2341,27 +2855,17 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _get_all_group_chat_ids():
-    """طبق قرارداد تلگرام، chat_id گروه/سوپرگروه همیشه منفیه و چت خصوصی مثبت؛
-    قبلاً این کوئری فیلتر نداشت و اگه یه چت خصوصی هم تو جدول chats (که با
-    _get_chat برای هر نوع چتی ساخته می‌شه) ثبت می‌شد، تو شمارش/broadcast
-    گروه‌ها هم حساب می‌شد — این فیلتر همون باگ رو رفع می‌کنه."""
+    """طبق قرارداد تلگرام، chat_id گروه/سوپرگروه همیشه منفیه و چت خصوصی مثبت.
+    فقط گروه‌هایی که ربات *الان* توشون فعاله (is_active=1) برمی‌گرده — برای
+    Broadcast/پیام نیمه‌شب — چون دیگه با خروج ربات رکورد گروه پاک نمی‌شه (فقط
+    is_active صفر می‌شه، تاریخچه حفظ می‌مونه)، این فیلتر لازمه که Broadcast
+    برای گروه‌هایی که ربات دیگه توشون نیست نره."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0")
+    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0 AND is_active=1")
     ids = [row["chat_id"] for row in c.fetchall()]
     conn.close()
     return ids
-
-
-def _delete_chat_row(chat_id):
-    """وقتی ربات از یه گروه حذف/بن می‌شه، ردیفش رو از جدول chats پاک می‌کنیم تا
-    شمارش «تعداد گروه‌های ربات» و لیست broadcast/midnight همیشه واقعی بمونن،
-    نه شامل گروه‌هایی که ربات دیگه توشون نیست."""
-    conn = _connect()
-    c = conn.cursor()
-    c.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,))
-    conn.commit()
-    conn.close()
 
 
 async def groupscount_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2796,9 +3300,9 @@ def _bump_daily_activity(chat_id):
     row = c.fetchone()
     count = int(row["item_value"]) + 1 if row else 1
     c.execute(
-        "INSERT OR REPLACE INTO group_lists (chat_id, list_type, item_key, item_value, added_at) "
-        "VALUES (?,'daily_activity',?,?,?)",
-        (chat_id, today, str(count), time.time()),
+        _upsert_sql("group_lists", ["chat_id", "list_type", "item_key", "item_value", "added_at"],
+                    ["chat_id", "list_type", "item_key"]),
+        (chat_id, "daily_activity", today, str(count), time.time()),
     )
     conn.commit()
     conn.close()
@@ -2834,17 +3338,23 @@ async def security_code_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_bot_removed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی ربات از یه گروه حذف/بن می‌شه. توجه: تلگرام معمولاً اجازه‌ی ارسال پیام بعد
-    از حذف رو نمی‌ده، پس این تلاش بهترین‌تلاشه، نه یه تضمین."""
+    """وقتی وضعیت عضویتِ خودِ ربات تو یه گروه عوض می‌شه (اضافه/حذف/بن).
+    توجه: تلگرام معمولاً اجازه‌ی ارسال پیام بعد از حذف رو نمی‌ده، پس تلاش
+    برای پیام خداحافظی صرفاً best-effort‌ه، نه تضمین.
+
+    ⚠️ رفع باگ مهم: قبلاً اینجا با _delete_chat_row رکورد گروه رو کامل از
+    دیتابیس پاک می‌کرد — یعنی اگه ربات یه‌بار از گروهی Kick/Leave می‌شد،
+    کل تاریخچه‌ی اون گروه (عنوان، اولین/آخرین‌فعالیت، اعضایی که توش دیده
+    شدن) برای همیشه از بین می‌رفت؛ این دقیقاً همون چیزیه که پروژه گفته
+    "هرگز نباید اتفاق بیفته". الان فقط is_active صفر/یک می‌شه، رکورد هرگز
+    حذف نمی‌شه (نگاه کن به _deactivate_chat)."""
     result = update.my_chat_member
     if not result:
         return
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
     if old_status in ("member", "administrator") and new_status in ("left", "kicked"):
-        # ردیف این چت رو از جدول chats پاک می‌کنیم تا شمارش «تعداد گروه‌های
-        # ربات» و لیست broadcast/پیام نیمه‌شب واقعی بمونن.
-        await db_run(_delete_chat_row, result.chat.id)
+        await db_run(_deactivate_chat, result.chat.id)
         try:
             await context.bot.send_message(
                 chat_id=result.chat.id,
@@ -2852,6 +3362,12 @@ async def handle_bot_removed(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         except Exception:
             pass  # معمولاً بعد از اخراج، ارسال پیام دیگه ممکن نیست — طبیعیه
+    elif old_status in ("left", "kicked") and new_status in ("member", "administrator"):
+        # ربات دوباره به یه گروهی اضافه شده که قبلاً توش بوده — بلافاصله
+        # is_active=1 و اطلاعات چت رو تازه می‌کنیم (به‌جای منتظر موندن برای
+        # اولین پیام عادی بعدی).
+        chat = result.chat
+        await db_run(_track_group_chat, chat.id, chat.title or "", chat.type)
 
 
 async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4358,11 +4874,27 @@ async def handle_photo_sticker(update: Update, context: ContextTypes.DEFAULT_TYP
 #  کپچای اعضای جدید (ضد ربات/اسپم‌بات)
 # =========================================================
 
+async def handle_member_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """یه عضو عادی از گروه خارج/اخراج شد — رکورد عضویتش تو
+    user_chat_memberships هرگز پاک نمی‌شه، فقط is_active صفر می‌شه تا اگه
+    برگشت، تاریخچه‌ی «اولین‌بار دیده‌شدن» حفظ بمونه."""
+    left = update.message.left_chat_member if update.message else None
+    if not left or left.is_bot:
+        return
+    chat_id = update.effective_chat.id
+    await db_run(_set_membership_inactive, left.id, chat_id)
+
+
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
-            # خود ربات به یه گروه جدید اضافه شده — کپچا لازم نداره، فقط خوش‌آمد بگه
+            # خود ربات به یه گروه جدید اضافه شده — کپچا لازم نداره، فقط خوش‌آمد بگه.
+            # این پیام سرویسیِ new_chat_members تو _permission_gate_message
+            # نادیده گرفته می‌شه (چون سرویسیه، نه پیام عادی)، پس ردیابی چت رو
+            # همینجا مستقیم انجام می‌دیم تا معطل اولین پیام عادی بعدی نمونه.
+            chat = update.effective_chat
+            await db_run(_track_group_chat, chat.id, chat.title or "", chat.type)
             group_name = update.effective_chat.title or "این گروه"
             await update.message.reply_text(
                 "🦇 *به دنیای بتمن خوش اومدی*\n\n"
@@ -4374,6 +4906,13 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         if member.is_bot:
             continue
+
+        # 🔗 عضویت این کاربر تو این گروه رو دائمی ثبت می‌کنیم (تاریخچه، حتی
+        # اگه بعداً Leave کنه پاک نمی‌شه — نگاه کن به handle_member_left).
+        await db_run(
+            _touch_user_in_group, member.id, member.username or "", member.first_name or "",
+            member.last_name or "", chat_id,
+        )
 
         ban_count = int(_list_get_one(chat_id, "ban_count", member.id) or 0)
         if ban_count >= 2:
@@ -4493,49 +5032,61 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
     if msg.text and msg.text.startswith("/start"):
         return  # /start خودش مسئول نمایش درخواست شماره‌ست
 
-    # 🏠 ردیابی گروه (عنوان/آخرین‌فعالیت) برای داشبورد Owner — قبل از هر Gate
-    # ای انجام می‌شه چون فقط یه UPDATE سبکه، ربطی به احراز کاربر نداره.
+    # 🏠 ردیابی گروه (عنوان/آخرین‌فعالیت/is_active) + ردیابی دائمیِ حضور این
+    # کاربر تو این گروه (users + user_chat_memberships) — قبل از هر Gate‌ای
+    # انجام می‌شه چون ربطی به احراز شماره/کانال نداره؛ این دقیقاً همون «ربات
+    # حضورش رو تو گروه دیده» ئه که باید بدون Restart/Redeploy از بین نره.
     chat = update.effective_chat
     if chat and chat.type != ChatType.PRIVATE:
         try:
             await db_run(_track_group_chat, chat.id, chat.title or "", chat.type)
+            await db_run(
+                _touch_user_in_group, user.id, user.username or "", user.first_name or "",
+                user.last_name or "", chat.id,
+            )
         except Exception:
             pass
 
     if user.id == OWNER_ID:
         return
 
+    is_private = update.effective_chat and update.effective_chat.type == ChatType.PRIVATE
+
     # 📢 مرحله‌ی اول Gate: عضویت کانال (از کش سریع — چک زنده‌ی API فقط سر
     # /start و دکمه‌ی «بررسی عضویت» انجام می‌شه تا هر پیام یه Call جدا به
-    # Telegram API نزنه و ریت‌لیمیت نخوریم).
+    # Telegram API نزنه و ریت‌لیمیت نخوریم). این چک همیشه (چه پیوی، چه گروه)
+    # اجباریه.
     channel_ok = await db_run(_is_channel_verified_cached, user.id)
-    phone_ok = channel_ok and await db_run(_is_phone_verified, user.id)
+
+    # 📱 چک شماره تلفن: طبق تصمیم پروژه، فقط تو پیوی خودِ ربات اجباریه، نه تو
+    # گروه‌ها — تو گروه فقط عضویت کانال کافیه. برای همینه که تو گروه
+    # phone_ok رو همیشه True در نظر می‌گیریم (یعنی این چک رو دور می‌زنیم).
+    phone_ok = True if not is_private else await db_run(_is_phone_verified, user.id)
 
     if channel_ok and phone_ok:
         return
 
     # از اینجا به بعد: کاربر تاییدنشده داره یه Command/Message دیگه (غیر از
     # /start و ارسال Contact) اجرا می‌کنه — باید بلاک بشه.
-    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
+    if is_private:
         if not channel_ok:
             await msg.reply_text(CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown")
         else:
             await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
     else:
-        # تو گروه نمی‌شه دکمه‌ی request_contact امن نمایش داد (شماره تو چت
-        # عمومی افشا می‌شه)، پس کاربر رو به پیوی ربات ارجاع می‌دیم.
+        # تو گروه فقط عضویت کانال چک می‌شه؛ اگه بهش نرسیده (channel_ok=False)
+        # کاربر رو به پیوی ربات ارجاع می‌دیم تا عضویتش رو تایید کنه.
         key = (update.effective_chat.id, user.id)
         now = time.time()
         if now - _GATE_GROUP_COOLDOWN.get(key, 0) >= _GATE_GROUP_COOLDOWN_SECONDS:
             _GATE_GROUP_COOLDOWN[key] = now
             try:
                 bot_username = context.bot.username
-                label = "📢 عضویت و تایید در پیوی ربات" if not channel_ok else "📱 تایید شماره در پیوی ربات"
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(label, url=f"https://t.me/{bot_username}?start=verify")
+                    InlineKeyboardButton("📢 عضویت و تایید در پیوی ربات", url=f"https://t.me/{bot_username}?start=verify")
                 ]])
                 await msg.reply_text(
-                    "🔒 برای استفاده از قابلیت‌های ربات، اول باید تو پیوی ربات عضویت/شماره‌ت رو تایید کنی.",
+                    "🔒 برای استفاده از قابلیت‌های ربات تو گروه، اول باید تو پیوی ربات عضویتِ کانال رسمی رو تایید کنی.",
                     reply_markup=kb,
                 )
             except Exception:
@@ -4565,6 +5116,12 @@ async def _permission_gate_callback(update: Update, context: ContextTypes.DEFAUL
         except Exception:
             pass
         raise ApplicationHandlerStop
+
+    # 📱 چک شماره تلفن فقط تو پیوی ربات اجباریه؛ روی دکمه‌هایی که تو گروه زده
+    # می‌شن (مثلاً منوی بازی‌ها) فقط عضویت کانال کافیه.
+    is_private = update.effective_chat and update.effective_chat.type == ChatType.PRIVATE
+    if not is_private:
+        return
 
     if await db_run(_is_phone_verified, user.id):
         return
@@ -4686,6 +5243,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_member_left))
     app.add_handler(MessageHandler(filters.ANIMATION, handle_gif))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Sticker.ALL, handle_photo_sticker))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
