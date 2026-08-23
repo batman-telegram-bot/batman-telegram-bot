@@ -589,6 +589,16 @@ def _init_db():
         ("chat_type", "ALTER TABLE chats ADD COLUMN chat_type TEXT DEFAULT ''"),
         ("first_seen_ts_chat", "ALTER TABLE chats ADD COLUMN first_seen_ts REAL DEFAULT 0"),
         ("last_seen_ts", "ALTER TABLE chats ADD COLUMN last_seen_ts REAL DEFAULT 0"),
+        # 🏠 ماندگاری گروه‌ها: به‌جای DELETE کردن ردیف گروه وقتی ربات Kick/Leave
+        # می‌شه، فقط is_active=0 می‌کنیم — تاریخچه‌ی گروه برای همیشه می‌مونه و اگه
+        # دوباره اضافه شد، همون ردیف Update می‌شه (نه ردیف تکراری جدید).
+        ("is_active", "ALTER TABLE chats ADD COLUMN is_active INTEGER DEFAULT 1"),
+        ("bot_status", "ALTER TABLE chats ADD COLUMN bot_status TEXT DEFAULT 'member'"),
+        # 👥 ماندگاری start_count: قبلاً هر بار /start با INSERT OR REPLACE کامل
+        # جایگزین می‌شد و started_at (تاریخ اولین Start) هر بار پاک می‌شد؛ الان
+        # start_count واقعی نگه داشته می‌شه و با هر Redeploy/Restart صفر نمی‌شه.
+        ("start_count", "ALTER TABLE bot_starters ADD COLUMN start_count INTEGER DEFAULT 1"),
+        ("last_seen_ts_starter", "ALTER TABLE bot_starters ADD COLUMN last_seen_ts REAL DEFAULT 0"),
     ):
         try:
             c.execute(ddl)
@@ -623,15 +633,31 @@ def _get_mod_log(chat_id, limit=15):
 
 
 def _log_bot_starter(user):
-    """اگه کاربر اولین‌باره /start می‌زنه، ثبتش می‌کنه و True برمی‌گردونه (برای اطلاع به اونر)."""
+    """اگه کاربر اولین‌باره /start می‌زنه، ثبتش می‌کنه و True برمی‌گردونه (برای اطلاع به اونر).
+
+    قبلاً از INSERT OR REPLACE استفاده می‌شد که با هر /start دوباره، کل ردیف
+    (از جمله started_at یعنی تاریخ اولین Start) رو پاک و بازنویسی می‌کرد و هیچ
+    شمارنده‌ای برای تعداد Startها وجود نداشت. الان: started_at (اولین Start)
+    دست‌نخورده می‌مونه، start_count واقعی افزایش پیدا می‌کنه، و last_seen_ts
+    آپدیت می‌شه — این‌ها هیچ‌وقت با Restart/Redeploy/Update کد صفر نمی‌شن، چون
+    از همون دیتابیس دائمی (SQLite رو Volume Railway) خونده/نوشته می‌شن."""
     conn = _connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM bot_starters WHERE user_id=?", (user.id,))
     is_new = c.fetchone() is None
-    c.execute(
-        "INSERT OR REPLACE INTO bot_starters (user_id, username, first_name, started_at) VALUES (?,?,?,?)",
-        (user.id, user.username or "", user.first_name or "", time.time()),
-    )
+    now = time.time()
+    if is_new:
+        c.execute(
+            "INSERT INTO bot_starters (user_id, username, first_name, started_at, start_count, last_seen_ts) "
+            "VALUES (?,?,?,?,1,?)",
+            (user.id, user.username or "", user.first_name or "", now, now),
+        )
+    else:
+        c.execute(
+            "UPDATE bot_starters SET username=?, first_name=?, "
+            "start_count=COALESCE(start_count,1)+1, last_seen_ts=? WHERE user_id=?",
+            (user.username or "", user.first_name or "", now, user.id),
+        )
     conn.commit()
     conn.close()
     return is_new
@@ -738,6 +764,8 @@ def _get_users_page(offset, limit):
     c = conn.cursor()
     c.execute("""
         SELECT b.user_id, b.username, b.first_name, b.started_at,
+               COALESCE(b.start_count, 1) as start_count,
+               COALESCE(b.last_seen_ts, b.started_at) as last_seen_ts,
                CASE WHEN v.user_id IS NOT NULL THEN 1 ELSE 0 END as phone_verified
         FROM bot_starters b
         LEFT JOIN verified_users v ON v.user_id = b.user_id
@@ -752,23 +780,34 @@ def _get_users_page(offset, limit):
 def _get_groups_page(offset, limit):
     """فقط گروه/سوپرگروه‌های واقعی (chat_id منفی طبق قرارداد تلگرام) — چت‌های
     خصوصی که به‌خاطر استفاده‌ی مشترک _get_chat تو جدول chats ثبت می‌شن، اینجا
-    حساب نمی‌شن تا شمارش گروه‌ها واقعی بمونه."""
+    حساب نمی‌شن تا شمارش گروه‌ها واقعی بمونه.
+
+    این لیست تاریخچه‌ی کامله (فعال + غیرفعال) — چون ردیف گروه دیگه هیچ‌وقت
+    DELETE نمی‌شه، فقط is_active=0 می‌شه؛ گروه‌های فعال اول لیست میان."""
     conn = _connect()
     c = conn.cursor()
     c.execute("""
-        SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts
+        SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts,
+               COALESCE(is_active, 1) as is_active, COALESCE(bot_status, 'member') as bot_status
         FROM chats WHERE chat_id < 0
-        ORDER BY last_seen_ts DESC LIMIT ? OFFSET ?
+        ORDER BY is_active DESC, last_seen_ts DESC LIMIT ? OFFSET ?
     """, (limit, offset))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def _count_real_groups():
+def _count_real_groups(active_only=True):
+    """پیش‌فرض فقط گروه‌هایی که ربات الان توشونه (is_active=1) می‌شمره —
+    برای «تعداد گروه‌هایی که ربات در آن‌ها فعال است» تو داشبورد. برای دیدن
+    تاریخچه‌ی کامل (شامل گروه‌هایی که ربات ازشون خارج شده)، active_only=False
+    بده."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0")
+    if active_only:
+        c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0 AND is_active = 1")
+    else:
+        c.execute("SELECT COUNT(*) as n FROM chats WHERE chat_id < 0")
     n = c.fetchone()["n"]
     conn.close()
     return n
@@ -1986,7 +2025,14 @@ async def send_profile(update: Update, chat, player, edit=False):
 
 async def _is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id) -> bool:
     """بررسی *زنده* عضویت کاربر تو کانال اجباری از خود Telegram API — هیچ حدس
-    یا کشی اینجا نیست، دقیقاً طبق قانون پروژه."""
+    یا کشی اینجا نیست، دقیقاً طبق قانون پروژه.
+
+    اگه FORCE_JOIN_ENABLED خاموش باشه (REQUIRED_CHANNEL=off رو Railway)، اصلاً
+    Call نمی‌زنیم و مستقیم True برمی‌گردونیم — وگرنه با REQUIRED_CHANNEL خاموش،
+    get_chat_member رو یه یوزرنیم نامعتبر (@off) صدا زده می‌شد و همیشه False
+    برمی‌گردوند، یعنی خاموش‌کردن گیت عملاً باعث قفل‌شدن /start می‌شد."""
+    if not FORCE_JOIN_ENABLED:
+        return True
     try:
         member = await context.bot.get_chat_member(f"@{REQUIRED_CHANNEL_USERNAME}", user_id)
         return member.status in ("member", "administrator", "creator")
@@ -2351,22 +2397,40 @@ def _get_all_group_chat_ids():
     """طبق قرارداد تلگرام، chat_id گروه/سوپرگروه همیشه منفیه و چت خصوصی مثبت؛
     قبلاً این کوئری فیلتر نداشت و اگه یه چت خصوصی هم تو جدول chats (که با
     _get_chat برای هر نوع چتی ساخته می‌شه) ثبت می‌شد، تو شمارش/broadcast
-    گروه‌ها هم حساب می‌شد — این فیلتر همون باگ رو رفع می‌کنه."""
+    گروه‌ها هم حساب می‌شد — این فیلتر همون باگ رو رفع می‌کنه.
+
+    is_active=1 هم فیلتر شده: از وقتی گروه‌ها دیگه هیچ‌وقت DELETE نمی‌شن (فقط
+    is_active=0 می‌شن)، این فیلتر لازمه تا Broadcast/پیام نیمه‌شب سراغ
+    گروه‌هایی که ربات دیگه توشون نیست نره."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0")
+    c.execute("SELECT chat_id FROM chats WHERE chat_id < 0 AND is_active = 1")
     ids = [row["chat_id"] for row in c.fetchall()]
     conn.close()
     return ids
 
 
-def _delete_chat_row(chat_id):
-    """وقتی ربات از یه گروه حذف/بن می‌شه، ردیفش رو از جدول chats پاک می‌کنیم تا
-    شمارش «تعداد گروه‌های ربات» و لیست broadcast/midnight همیشه واقعی بمونن،
-    نه شامل گروه‌هایی که ربات دیگه توشون نیست."""
+def _set_chat_active(chat_id, title, chat_type, is_active: bool, bot_status: str):
+    """گروه رو is_active=1/0 می‌کنه بدون این‌که هیچ‌وقت ردیفش رو پاک کنه — این‌جوری
+    اگه ربات از یه گروه Kick/Leave و دوباره اضافه بشه، تاریخچه (از جمله
+    first_seen واقعی) دست‌نخورده می‌مونه و ردیف تکراری هم ساخته نمی‌شه."""
     conn = _connect()
     c = conn.cursor()
-    c.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,))
+    now = time.time()
+    c.execute("SELECT first_seen_ts FROM chats WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    if row is None:
+        c.execute(
+            "INSERT INTO chats (chat_id, next_switch_at, next_battle_at, title, chat_type, "
+            "first_seen_ts, last_seen_ts, is_active, bot_status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (chat_id, random.randint(8, 15), random.randint(10, 20), title or "", chat_type or "",
+             now, now, 1 if is_active else 0, bot_status),
+        )
+    else:
+        c.execute(
+            "UPDATE chats SET title=?, chat_type=?, last_seen_ts=?, is_active=?, bot_status=? WHERE chat_id=?",
+            (title or "", chat_type or "", now, 1 if is_active else 0, bot_status, chat_id),
+        )
     conn.commit()
     conn.close()
 
@@ -2418,8 +2482,10 @@ def _build_users_list_page(page: int):
         uname = f"@{r['username']}" if r["username"] else "بدون یوزرنیم"
         pv = "✅" if r["phone_verified"] else "❌"
         dt = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d")
+        sc = r["start_count"] if "start_count" in r.keys() else 1
         lines.append(
-            f"{start_num + i}. {r['first_name'] or 'بی‌نام'} ({uname}) — ID: `{r['user_id']}` — 📱{pv} — {dt}"
+            f"{start_num + i}. {r['first_name'] or 'بی‌نام'} ({uname}) — ID: `{r['user_id']}` — "
+            f"📱{pv} — 🔁 {sc} بار Start — اولین: {dt}"
         )
     if len(rows) == 0:
         lines.append("(هیچ کاربری ثبت نشده)")
@@ -2442,16 +2508,26 @@ async def userslist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _build_groups_list_page(page: int):
-    total = _count_real_groups()
+    """لیست کامل تاریخچه‌ی گروه‌ها (فعال + غیرفعال — چون دیگه هیچ ردیفی DELETE
+    نمی‌شه). هر گروه یه دکمه‌ی «مدیریت» داره که به صفحه‌ی جزئیات همون گروه
+    می‌ره (اطلاعات کامل + گزینه‌ی خروج ربات)."""
+    total = _count_real_groups(active_only=False)
     total_pages = max(1, (total + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
     rows = _get_groups_page(page * GROUPS_PER_PAGE, GROUPS_PER_PAGE)
-    lines = [f"🏠 *گروه‌های گاتهام*\nTotal: {total}\n"]
+    active_n = _count_real_groups(active_only=True)
+    lines = [f"🏠 *گروه‌های گاتهام*\nمجموع (تاریخچه‌ی کامل): {total} — فعال الان: {active_n}\n"]
+    kb_rows = []
     for r in rows:
         title = r["title"] or "(بدون عنوان)"
         ctype = r["chat_type"] or "-"
+        is_active = bool(r["is_active"])
+        status_label = "🟢 فعال" if is_active else f"🔴 غیرفعال ({r['bot_status']})"
         last_seen = datetime.fromtimestamp(r["last_seen_ts"]).strftime("%Y-%m-%d %H:%M") if r["last_seen_ts"] else "-"
-        lines.append(f"• {title}\n  Chat ID: `{r['chat_id']}` — نوع: {ctype} — آخرین فعالیت: {last_seen}")
+        lines.append(
+            f"• {title} — {status_label}\n  Chat ID: `{r['chat_id']}` — نوع: {ctype} — آخرین فعالیت: {last_seen}"
+        )
+        kb_rows.append([InlineKeyboardButton(f"⚙️ {title[:24]}", callback_data=f"gdetail:{r['chat_id']}:{page}")])
     if len(rows) == 0:
         lines.append("(هیچ گروهی ثبت نشده)")
     text = "\n\n".join(lines)
@@ -2461,7 +2537,52 @@ def _build_groups_list_page(page: int):
     kb_row.append(InlineKeyboardButton(f"صفحه {page + 1}/{total_pages}", callback_data="noop"))
     if page < total_pages - 1:
         kb_row.append(InlineKeyboardButton("➡️", callback_data=f"glist:{page + 1}"))
-    return text, InlineKeyboardMarkup([kb_row])
+    kb_rows.append(kb_row)
+    return text, InlineKeyboardMarkup(kb_rows)
+
+
+def _get_chat_row(chat_id):
+    conn = _connect()
+    c = conn.cursor()
+    c.execute(
+        "SELECT chat_id, title, chat_type, first_seen_ts, last_seen_ts, "
+        "COALESCE(is_active,1) as is_active, COALESCE(bot_status,'member') as bot_status "
+        "FROM chats WHERE chat_id=?",
+        (chat_id,),
+    )
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def _build_group_detail(chat_id, back_page):
+    r = _get_chat_row(chat_id)
+    if r is None:
+        return "⚠️ این گروه تو دیتابیس پیدا نشد.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"glist:{back_page}")]]
+        )
+    title = r["title"] or "(بدون عنوان)"
+    is_active = bool(r["is_active"])
+    status_label = "🟢 فعال — ربات الان عضو این گروهه" if is_active else f"🔴 غیرفعال — ربات دیگه عضو نیست ({r['bot_status']})"
+    first_seen = datetime.fromtimestamp(r["first_seen_ts"]).strftime("%Y-%m-%d %H:%M") if r["first_seen_ts"] else "-"
+    last_seen = datetime.fromtimestamp(r["last_seen_ts"]).strftime("%Y-%m-%d %H:%M") if r["last_seen_ts"] else "-"
+    text = (
+        f"🏠 *{title}*\n\n"
+        f"Chat ID: `{r['chat_id']}`\n"
+        f"نوع: {r['chat_type'] or '-'}\n"
+        f"وضعیت: {status_label}\n"
+        f"اولین بار دیده شده: {first_seen}\n"
+        f"آخرین فعالیت: {last_seen}\n\n"
+        f"📩 برای ارسال پیام به این گروه، تو پیوی بنویس:\n"
+        f"`/msggroup {r['chat_id']} متن پیام`\n\n"
+        "🚫 برای بن/آنبن یا مدیریت اعضای این گروه، از همون داخل گروه (با ریپلای "
+        "و دستورهای مدیریتی موجود) استفاده کن — این عملیات نیاز به دسترسی ادمین "
+        "ربات تو همون گروهه."
+    )
+    rows = [[InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f"glist:{back_page}")]]
+    if is_active:
+        rows.insert(0, [InlineKeyboardButton("🚪 خروج ربات از این گروه", callback_data=f"gleave:{chat_id}:{back_page}")])
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def groupslist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2493,6 +2614,43 @@ async def list_pagination_callback(update: Update, context: ContextTypes.DEFAULT
         page = int(data.split(":")[1])
         text, kb = await db_run(_build_groups_list_page, page)
         await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+    if data.startswith("gdetail:"):
+        _, chat_id_s, back_page_s = data.split(":")
+        text, kb = await db_run(_build_group_detail, int(chat_id_s), int(back_page_s))
+        await query.answer()
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+    if data.startswith("gleave:"):
+        _, chat_id_s, back_page_s = data.split(":")
+        chat_id = int(chat_id_s)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله، خارج شو", callback_data=f"gleaveconfirm:{chat_id}:{back_page_s}")],
+            [InlineKeyboardButton("❌ انصراف", callback_data=f"gdetail:{chat_id}:{back_page_s}")],
+        ])
+        await query.answer()
+        await query.edit_message_text(
+            "⚠️ مطمئنی می‌خوای ربات از این گروه خارج بشه؟ این کار قابل بازگشت نیست "
+            "(باید دوباره دستی اد بشه).", reply_markup=kb,
+        )
+        return
+    if data.startswith("gleaveconfirm:"):
+        _, chat_id_s, back_page_s = data.split(":")
+        chat_id = int(chat_id_s)
+        try:
+            await context.bot.leave_chat(chat_id)
+            # my_chat_member آپدیت جداگونه از تلگرام میاد و is_active رو خودکار
+            # صفر می‌کنه؛ ولی برای اطمینان همینجا هم مستقیم آپدیت می‌کنیم که اگه
+            # اون آپدیت به هر دلیلی دیر رسید، پنل بلافاصله وضعیت درست رو نشون بده.
+            row = await db_run(_get_chat_row, chat_id)
+            title = row["title"] if row else ""
+            ctype = row["chat_type"] if row else ""
+            await db_run(_set_chat_active, chat_id, title, ctype, False, "left")
+            await query.answer("✅ ربات از گروه خارج شد.", show_alert=True)
+        except Exception as e:
+            await query.answer(f"⚠️ نتونستم خارج بشم: {e}", show_alert=True)
+        text, kb = await db_run(_build_groups_list_page, int(back_page_s))
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
         return
 
@@ -2557,11 +2715,13 @@ def _build_ownerinfo_users_page(page: int):
             name = r["first_name"] or "بی‌نام"
             uname = f"@{r['username']}" if r["username"] else "بدون یوزرنیم"
             dt = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d %H:%M") if r["started_at"] else "-"
+            sc = r["start_count"] if "start_count" in r.keys() else 1
             lines.append(
                 f"{start_num + i}️⃣ {name}\n"
                 f"🆔 `{r['user_id']}`\n"
                 f"🔗 {uname}\n"
-                f"🕐 {dt}\n"
+                f"🔁 تعداد Start: {sc}\n"
+                f"🕐 اولین Start: {dt}\n"
             )
     else:
         lines.append("(هنوز کسی ربات رو استارت نکرده)")
@@ -2607,8 +2767,9 @@ def _build_ownerinfo_chats_page(page: int):
                 datetime.fromtimestamp(r["last_seen_ts"]).strftime("%Y-%m-%d %H:%M")
                 if r["last_seen_ts"] else "-"
             )
+            status = "🟢 فعال" if bool(r["is_active"]) else "🔴 غیرفعال"
             lines.append(
-                f"{start_num + i}️⃣ 🏠 {title}\n"
+                f"{start_num + i}️⃣ 🏠 {title} — {status}\n"
                 f"🆔 `{r['chat_id']}`\n"
                 f"📌 {ctype}\n"
                 f"🕐 اولین بار: {first_seen}\n"
@@ -2741,6 +2902,29 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ اعلامیه به {sent} گروه فرستاده شد.")
 
 
+async def msggroup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-Only: /msggroup <chat_id> <متن> — پیام مستقیم به یه گروه خاص، از
+    داخل پنل «لیست گروه‌ها» لینک می‌شه."""
+    if not _is_owner(update):
+        await update.message.reply_text("⛔️ این دستور فقط برای سازنده‌ی ربات فعاله.")
+        return
+    parts = (update.effective_message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await update.message.reply_text("✏️ استفاده: /msggroup <chat_id> متن پیام")
+        return
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        await update.message.reply_text("⚠️ chat_id باید عددی باشه.")
+        return
+    text = parts[2]
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+        await update.message.reply_text("✅ پیام فرستاده شد.")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ نتونستم پیام رو بفرستم: {e}")
+
+
 async def gotham_archive_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await db_run(_get_gotham_events, 5)
     if not rows:
@@ -2841,24 +3025,32 @@ async def security_code_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_bot_removed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """وقتی ربات از یه گروه حذف/بن می‌شه. توجه: تلگرام معمولاً اجازه‌ی ارسال پیام بعد
-    از حذف رو نمی‌ده، پس این تلاش بهترین‌تلاشه، نه یه تضمین."""
+    """وقتی وضعیت عضویت ربات تو یه گروه عوض می‌شه (اضافه/حذف/ارتقا به ادمین و...).
+
+    قبلاً وقتی ربات Kick/Leave می‌شد، ردیف گروه از جدول chats کامل DELETE
+    می‌شد — یعنی تاریخچه‌ی گروه برای همیشه از بین می‌رفت و اگه ربات دوباره به
+    همون گروه اضافه می‌شد، یه ردیف کاملاً جدید (با first_seen غلط) ساخته می‌شد.
+    الان: هیچ‌وقت DELETE نمی‌کنیم؛ فقط is_active/bot_status رو آپدیت می‌کنیم،
+    پس تاریخچه‌ی کامل گروه (از جمله first_seen واقعی) همیشه می‌مونه."""
     result = update.my_chat_member
     if not result:
         return
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
+    chat = result.chat
     if old_status in ("member", "administrator") and new_status in ("left", "kicked"):
-        # ردیف این چت رو از جدول chats پاک می‌کنیم تا شمارش «تعداد گروه‌های
-        # ربات» و لیست broadcast/پیام نیمه‌شب واقعی بمونن.
-        await db_run(_delete_chat_row, result.chat.id)
+        await db_run(_set_chat_active, chat.id, chat.title or "", chat.type, False, new_status)
         try:
             await context.bot.send_message(
-                chat_id=result.chat.id,
+                chat_id=chat.id,
                 text="🌑 من رفتم... ولی سایه‌ی گاتهام همیشه یه‌جایی هست.",
             )
         except Exception:
             pass  # معمولاً بعد از اخراج، ارسال پیام دیگه ممکن نیست — طبیعیه
+    elif new_status in ("member", "administrator"):
+        # ورود اولیه یا ورود دوباره (Rejoin) بعد از یه Kick/Leave قبلی — همون
+        # ردیف قبلی رو Update می‌کنیم، ردیف تکراری نمی‌سازیم.
+        await db_run(_set_chat_active, chat.id, chat.title or "", chat.type, True, new_status)
 
 
 async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4512,6 +4704,19 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
     if user.id == OWNER_ID:
         return
 
+    # 📥 قانون Downloader: تو گروه، برای لینک‌های یوتیوب/اینستاگرام/تیک‌تاک/
+    # ایکس/پینترست/ساندکلاود هیچ‌وقت نه شماره نه عضویت اجباری خواسته نمی‌شه —
+    # این Gate فقط مخصوص /start تو پیویه. اینجا Gate رو کامل رد می‌کنیم تا
+    # downloader_link_handler (که تو یه Handler-group جدا ثبت شده) بدون هیچ
+    # مانعی پیام رو پردازش کنه.
+    if chat and chat.type != ChatType.PRIVATE and msg.text:
+        try:
+            from downloader import text_contains_supported_link
+            if text_contains_supported_link(msg.text):
+                return
+        except Exception:
+            pass
+
     # 📢 مرحله‌ی اول Gate: عضویت کانال (از کش سریع — چک زنده‌ی API فقط سر
     # /start و دکمه‌ی «بررسی عضویت» انجام می‌شه تا هر پیام یه Call جدا به
     # Telegram API نزنه و ریت‌لیمیت نخوریم).
@@ -4588,8 +4793,18 @@ async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     یعنی هر خطای پیش‌بینی‌نشده (مثلاً تو دیتابیس یا هر جای دیگه) کاملاً بی‌صدا
     گم می‌شد: نه پیامی به کاربر، نه هیچ اطلاعی به مالک ربات. این باعث می‌شد
     باگ‌هایی مثل «لیست بازی‌ها نمیاد» بدون هیچ ردی رد بشن. حالا هر خطا هم لاگ
-    می‌شه، هم (اگه ممکن باشه) خلاصه‌ش برای مالک ربات فرستاده می‌شه."""
+    می‌شه، هم (اگه ممکن باشه) خلاصه‌ش برای مالک ربات فرستاده می‌شه.
+
+    یه استثنا: Conflict (409 - terminated by other getUpdates request) کاملاً
+    طبیعیه و خودش چند ثانیه بعد از هر Redeploy حل می‌شه (نسخه‌ی قدیمی هنوز کامل
+    خاموش نشده، نسخه‌ی جدید بالا اومده). خودِ python-telegram-bot به‌صورت
+    خودکار Retry می‌کنه و نیازی به دخالت نیست؛ برای همین این خطا رو گزارش
+    نمی‌کنیم تا لاگ/پیام به مالک با نویز بی‌ربط شلوغ نشه."""
     err = context.error
+    from telegram.error import Conflict as TgConflict
+    if isinstance(err, TgConflict):
+        log.warning("Conflict گذرا حین ری‌دیپلوی — نادیده گرفته شد (خودکار حل می‌شه)")
+        return
     log.exception("خطای پیش‌بینی‌نشده در پردازش یک آپدیت", exc_info=err)
     try:
         chat_id = update.effective_chat.id if isinstance(update, Update) and update.effective_chat else None
@@ -4668,6 +4883,7 @@ def main():
     app.add_handler(CommandHandler("userslist", userslist_cmd))
     app.add_handler(CommandHandler("groupslist", groupslist_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("msggroup", msggroup_cmd))
     app.add_handler(CommandHandler("archive", gotham_archive_cmd))
     app.add_handler(CommandHandler("riddle", riddle_cmd))
     app.add_handler(CommandHandler("securitycode", security_code_cmd))
@@ -4688,7 +4904,10 @@ def main():
     # نگه داشتیم برای وضوح بیشتر.
     app.add_handler(CallbackQueryHandler(captcha_verify_callback, pattern=r"^captcha:"))
     app.add_handler(CallbackQueryHandler(checkjoin_callback, pattern=r"^checkjoin$"))
-    app.add_handler(CallbackQueryHandler(list_pagination_callback, pattern=r"^(ulist:|glist:|noop)"))
+    app.add_handler(CallbackQueryHandler(
+        list_pagination_callback,
+        pattern=r"^(ulist:|glist:|noop|gdetail:|gleave:|gleaveconfirm:)"
+    ))
     app.add_handler(CallbackQueryHandler(owner_control_callback, pattern=r"^ownerinfo:"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_shared_contact))
