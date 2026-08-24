@@ -2119,8 +2119,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # 📢 مرحله‌ی اول: عضویت اجباری در کانال رسمی — قبل از هر چیز دیگه (حتی
-    # قبل از احراز شماره) چک می‌شه، طبق ترتیب دقیقِ خواسته‌شده.
+    # 🔓 قانون مطلق: تو گروه/سوپرگروه، /start (و هر Command دیگه‌ای) هیچ‌وقت
+    # شماره یا عضویت کانال نمی‌خواد — این دو تا Gate فقط مخصوص پیویه.
+    if update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
+        await _send_main_start_content(update, context)
+        return
+
+    # 📢 مرحله‌ی اول (فقط پیوی): عضویت اجباری در کانال رسمی — قبل از هر چیز
+    # دیگه (حتی قبل از احراز شماره) چک می‌شه، طبق ترتیب دقیقِ خواسته‌شده.
     if user.id != OWNER_ID and not await _is_channel_member(context, user.id):
         await update.effective_message.reply_text(
             CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown"
@@ -4689,6 +4695,14 @@ _GATE_GROUP_COOLDOWN_SECONDS = 30  # جلوگیری از Flood اگه کاربر
 
 
 async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قانون نهایی دسترسی:
+
+    - گروه/سوپرگروه: هیچ Gate ای اصلاً اجرا نمی‌شه — نه شماره، نه عضویت
+      کانال، نه هیچ پیام «اول تو پیوی تایید کن». کاربر مستقیم به هر Handler
+      دیگه‌ای (دانلودر، بازی‌ها، ابزارها، هرچی) دسترسی داره.
+    - پیوی: عضویت کانال فقط اگه REQUIRED_CHANNEL روشن باشه چک می‌شه؛ شماره
+      تلفن، صرف‌نظر از REQUIRED_CHANNEL، همیشه و بدون استثنا اجباریه.
+    """
     msg = update.message
     user = update.effective_user
     if not msg or not user:
@@ -4700,12 +4714,6 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
             or msg.migrate_to_chat_id or msg.migrate_from_chat_id):
         return
 
-    if msg.contact:
-        return  # بذار handle_shared_contact خودش پردازشش کنه
-
-    if msg.text and msg.text.startswith("/start"):
-        return  # /start خودش مسئول نمایش درخواست شماره‌ست
-
     # 🏠 ردیابی گروه (عنوان/آخرین‌فعالیت) برای داشبورد Owner — قبل از هر Gate
     # ای انجام می‌شه چون فقط یه UPDATE سبکه، ربطی به احراز کاربر نداره.
     chat = update.effective_chat
@@ -4714,66 +4722,51 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
             await db_run(_track_group_chat, chat.id, chat.title or "", chat.type)
         except Exception:
             pass
+        # 🔓 قانون مطلق: تو گروه/سوپرگروه هیچ Gate ای اجرا نمی‌شه — نه شماره،
+        # نه عضویت کانال. کاربر مستقیم به بقیه‌ی Handlerها می‌ره.
+        return
+
+    if msg.contact:
+        return  # بذار handle_shared_contact خودش پردازشش کنه
+
+    if msg.text and msg.text.startswith("/start"):
+        return  # /start خودش مسئول نمایش درخواست شماره‌ست
 
     if user.id == OWNER_ID:
         return
 
-    # 📥 قانون Downloader: تو گروه، برای لینک‌های یوتیوب/اینستاگرام/تیک‌تاک/
-    # ایکس/پینترست/ساندکلاود هیچ‌وقت نه شماره نه عضویت اجباری خواسته نمی‌شه —
-    # این Gate فقط مخصوص /start تو پیویه. اینجا Gate رو کامل رد می‌کنیم تا
-    # downloader_link_handler (که تو یه Handler-group جدا ثبت شده) بدون هیچ
-    # مانعی پیام رو پردازش کنه.
-    if chat and chat.type != ChatType.PRIVATE and msg.text:
-        try:
-            from downloader import text_contains_supported_link
-            if text_contains_supported_link(msg.text):
-                return
-        except Exception:
-            pass
-
-    # 📢 مرحله‌ی اول Gate: عضویت کانال (از کش سریع — چک زنده‌ی API فقط سر
-    # /start و دکمه‌ی «بررسی عضویت» انجام می‌شه تا هر پیام یه Call جدا به
-    # Telegram API نزنه و ریت‌لیمیت نخوریم).
+    # 📢 مرحله‌ی اول Gate (فقط پیوی): عضویت کانال — فقط اگه REQUIRED_CHANNEL
+    # روشن باشه چک می‌شه (از کش سریع؛ چک زنده‌ی API فقط سر /start و دکمه‌ی
+    # «بررسی عضویت» انجام می‌شه تا ریت‌لیمیت نخوریم).
     channel_ok = True if not FORCE_JOIN_ENABLED else await db_run(_is_channel_verified_cached, user.id)
+
+    # 📱 مرحله‌ی دوم Gate (فقط پیوی): شماره تلفن — صرف‌نظر از وضعیت
+    # REQUIRED_CHANNEL، همیشه اجباریه؛ فقط وقتی چک می‌شه که مرحله‌ی کانال رد
+    # شده باشه (وگرنه کاربر باید اول کانال رو جواب بده).
     phone_ok = channel_ok and await db_run(_is_phone_verified, user.id)
 
     if channel_ok and phone_ok:
         return
 
-    # از اینجا به بعد: کاربر تاییدنشده داره یه Command/Message دیگه (غیر از
-    # /start و ارسال Contact) اجرا می‌کنه — باید بلاک بشه.
-    if update.effective_chat and update.effective_chat.type == ChatType.PRIVATE:
-        if not channel_ok:
-            await msg.reply_text(CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown")
-        else:
-            await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
+    if not channel_ok:
+        await msg.reply_text(CHANNEL_JOIN_PROMPT_TEXT, reply_markup=_channel_join_keyboard(), parse_mode="Markdown")
     else:
-        # تو گروه نمی‌شه دکمه‌ی request_contact امن نمایش داد (شماره تو چت
-        # عمومی افشا می‌شه)، پس کاربر رو به پیوی ربات ارجاع می‌دیم.
-        key = (update.effective_chat.id, user.id)
-        now = time.time()
-        if now - _GATE_GROUP_COOLDOWN.get(key, 0) >= _GATE_GROUP_COOLDOWN_SECONDS:
-            _GATE_GROUP_COOLDOWN[key] = now
-            try:
-                bot_username = context.bot.username
-                label = "📢 عضویت و تایید در پیوی ربات" if not channel_ok else "📱 تایید شماره در پیوی ربات"
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(label, url=f"https://t.me/{bot_username}?start=verify")
-                ]])
-                await msg.reply_text(
-                    "🔒 برای استفاده از قابلیت‌های ربات، اول باید تو پیوی ربات عضویت/شماره‌ت رو تایید کنی.",
-                    reply_markup=kb,
-                )
-            except Exception:
-                pass
+        await msg.reply_text(PHONE_VERIFY_PROMPT_TEXT, reply_markup=_phone_request_keyboard())
     raise ApplicationHandlerStop
 
 
 async def _permission_gate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """همون قانون _permission_gate_message، برای کلیک روی دکمه‌ها هم اعمال
+    می‌شه: تو گروه/سوپرگروه هیچ Gate ای نیست؛ فقط تو پیوی، و شماره همیشه
+    اجباریه صرف‌نظر از REQUIRED_CHANNEL."""
     query = update.callback_query
     user = update.effective_user
     if not query or not user:
         return
+
+    chat = update.effective_chat
+    if chat and chat.type != ChatType.PRIVATE:
+        return  # 🔓 گروه/سوپرگروه: هیچ Gate ای روی هیچ دکمه‌ای اعمال نمی‌شه
 
     data = query.data or ""
     if data.startswith("captcha:"):
