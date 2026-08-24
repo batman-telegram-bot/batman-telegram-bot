@@ -16,6 +16,7 @@ Midnight Gotham Announcement
 """
 
 import time as time_module
+import logging
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -208,8 +209,8 @@ async def midnight_announcement(context):
     try:
         import bot as _bot
         _bot._log_gotham_event(event, line)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"ثبت رویداد نیمه‌شب گاتهام شکست خورد: {e}")
 
     # 🏆 اول هر ماه (میلادی)، شوالیه‌ی ماه رو برای هر گروه اعلام کن
     if now.day == 1:
@@ -276,8 +277,14 @@ async def check_quiet_groups(context):
                     text=f"🌑 گاتهام مدتیه ساکته... کسی نیست؟\n«{gotham_signature_line()}»",
                 )
                 _bot._list_add(chat_id, "meta", "quiet_notified", last)
-        except Exception:
-            pass
+        except Exception as e:
+            # قبلاً این خطا کاملاً بی‌صدا گم می‌شد. نکته‌ی مهم: اگه فقط ثبتِ
+            # «قبلاً اطلاع دادیم» شکست بخوره (نه خودِ ارسال پیام)، این گروه هر
+            # ۲ ساعت دوباره همون پیام «گاتهام ساکته» رو می‌گیره تا وقتی ثبتش
+            # موفق بشه — این لاگ حداقل قابل‌ردیابی می‌کنه که چرا این تکرار شده.
+            logging.getLogger(__name__).warning(
+                f"بررسی/اطلاع‌رسانی گروه ساکت برای chat_id={chat_id} با خطا مواجه شد: {e}"
+            )
 
 
 def register_midnight_job(application):

@@ -18,8 +18,11 @@ ttt_gotham.py
 """
 
 import random
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
+
+log = logging.getLogger(__name__)
 
 TRIGGER_TEXT = "دوز گاتهام"
 
@@ -199,8 +202,8 @@ def _gttt_record_result(game, winner_uid, loser_uid):
     try:
         import bot as _bot
         _bot._record_game_result(game["chat_id"], winner_uid, loser_uid)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"ثبت نتیجه‌ی بازی دوز گاتهام (ttt_gotham) شکست خورد: {e}")
 
 
 async def gotham_ttt_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

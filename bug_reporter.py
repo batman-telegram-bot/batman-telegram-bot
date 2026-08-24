@@ -38,7 +38,15 @@ def _categorize(kind: str) -> str:
 
 def _clean(value, limit=1200):
     text = str(value or "").replace("`", "'")
-    for secret_name in ("GROQ_API_KEY", "BOT_TOKEN"):
+    # قبلاً فقط GROQ_API_KEY و BOT_TOKEN سانسور می‌شدن؛ GROQ_API_KEY هیچ‌جای
+    # پروژه استفاده نمی‌شه (باقی‌مونده‌ی یه تغییر قبلیه) و کلید واقعی که همه‌جا
+    # به کار می‌ره (OPENROUTER_API_KEY) اصلاً تو این لیست نبود — یعنی اگه یه
+    # خطای شبکه/HTTP متن کلید واقعی رو تو خودش داشت (مثلاً تو URL یا هدر)،
+    # بدون سانسور مستقیم به پیام خطای اونر می‌رفت. الان همه‌ی کلیدهای حساس
+    # پروژه سانسور می‌شن.
+    for secret_name in (
+        "OPENROUTER_API_KEY", "BOT_TOKEN", "TMDB_API_KEY", "AUDD_API_TOKEN", "GROQ_API_KEY",
+    ):
         secret = os.getenv(secret_name)
         if secret:
             text = text.replace(secret, "[REDACTED]")
@@ -178,8 +186,14 @@ async def health_check_text(context) -> str:
     except Exception as e:
         checks.append(("Downloader", "🔴 ERROR", _clean(e, 120)))
 
-    # AI (کلید GROQ)
-    checks.append(("AI", "🟢 OK" if os.getenv("GROQ_API_KEY") else "🟡 WARNING (بدون کلید API)", ""))
+    # AI — قبلاً این چک روی GROQ_API_KEY بود، در حالی که موتور واقعی AI تو کل
+    # پروژه (bot.py: call_ai، و media_recognition.py: تشخیص فیلم/آهنگ/خلاصه)
+    # همه‌جا از OPENROUTER_API_KEY استفاده می‌کنن و GROQ_API_KEY هیچ‌جای دیگه‌ای
+    # به کار نمی‌ره. نتیجه‌ی این باگ: حتی وقتی AI کاملاً سالم و فعال بود (چون
+    # OPENROUTER_API_KEY ست شده)، این صفحه دروغ می‌گفت و WARNING نشون می‌داد.
+    checks.append((
+        "AI", "🟢 OK" if os.getenv("OPENROUTER_API_KEY") else "🟡 WARNING (بدون کلید OPENROUTER_API_KEY)", ""
+    ))
 
     # Bug Reporter — همیشه OK چون داریم توش اجرا می‌شیم
     checks.append(("Bug Reporter", f"🟢 OK ({len(RECENT_ERRORS)} خطای اخیر تو حافظه)", ""))

@@ -3105,8 +3105,19 @@ async def lockdown_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.set_chat_permissions(chat_id, ChatPermissions(can_send_messages=True))
             await context.bot.send_message(chat_id, "🔓 قرنطینه تموم شد. گاتهام دوباره باز شد.")
-        except Exception:
-            pass
+        except Exception as e:
+            # قبلاً این خطا کاملاً بی‌صدا گم می‌شد — یعنی اگه رفع قرنطینه‌ی
+            # خودکار شکست می‌خورد (مثلاً چون ربات دیگه دسترسی ادمین نداره)،
+            # گروه برای همیشه قفل می‌موند و هیچ‌کس (حتی اونر) خبردار نمی‌شد.
+            log.warning(f"رفع خودکار قرنطینه‌ی گروه {chat_id} شکست خورد: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=f"⚠️ نتونستم قرنطینه‌ی گروه `{chat_id}` رو خودکار رفع کنم:\n{e}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
     asyncio.create_task(_lift())
 
@@ -4581,8 +4592,11 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"🚫 {member.first_name} قبلاً {ban_count} بار از گاتهام اخراج شده — راهش نمی‌دیم."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                # قبلاً این خطا کاملاً بی‌صدا گم می‌شد — یعنی اگه بن یه مجرم
+                # سابقه‌دار به‌خاطر نبود دسترسی ادمین شکست می‌خورد، هیچ ادمینی
+                # خبردار نمی‌شد که این کاربر بدون بن وارد گروه شده.
+                log.warning(f"بن خودکار عضو سابقه‌دار {member.id} تو گروه {chat_id} شکست خورد: {e}")
             continue
 
         # 🔁 کاربری که قبلاً همین‌جا کپچا رو پاس کرده (مثلاً Leave و دوباره Join

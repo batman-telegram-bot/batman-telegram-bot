@@ -321,8 +321,11 @@ async def uno_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     import bot as _bot
                     _bot._record_game_result(game["chat_id"], uid, loser_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # قبلاً این خطا کاملاً بی‌صدا گم می‌شد — یعنی اگه ثبت امتیاز
+                    # شکست می‌خورد، هیچ ردی ازش نمی‌موند و کسی متوجه نمی‌شد چرا
+                    # جدول امتیازات با نتیجه‌ی واقعی بازی‌ها نمی‌خونه.
+                    log.warning(f"ثبت نتیجه‌ی بازی یونو (uno) شکست خورد: {e}")
             await q.edit_message_text(f"🃏 یونو تمام شد!\n\n🏆 برنده: {game['names'][uid]}\n🎉 کارت‌هاش تموم شد!")
             del UNO_GAMES[gid]; await q.answer(); return
         if card[0] == "W":
