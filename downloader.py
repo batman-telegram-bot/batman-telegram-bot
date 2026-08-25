@@ -989,14 +989,29 @@ def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                filepath = ydl.prepare_filename(info)
-                # وقتی merge اتفاق افتاده (صدا+تصویر جدا بودن)، پسوند خروجی نهایی
-                # طبق merge_output_format عوض می‌شه؛ prepare_filename گاهی پسوند
-                # منبع رو برمی‌گردونه نه پسوند merge‌شده — این‌جا تصحیحش می‌کنیم.
-                if opts.get("merge_output_format") and not os.path.exists(filepath):
-                    alt = os.path.splitext(filepath)[0] + "." + opts["merge_output_format"]
-                    if os.path.exists(alt):
-                        filepath = alt
+                # 🐛 باگ واقعی مسیر فایل: prepare_filename() اسم رو از روی
+                # info_dict *قبل* از دانلود می‌سازه و از postprocessorها
+                # (merge/remux/re-encode) خبر نداره، پس اگه پسوند نهایی عوض
+                # بشه (مثلاً ویدیو bestvideo[webm]+bestaudio[m4a] بوده و بعد
+                # merge به mp4 شده) یه مسیر با پسوند غلط/ناموجود برمی‌گردونه.
+                # منبع درست و رسمیِ خودِ yt-dlp برای مسیر واقعیِ فایل روی دیسک
+                # بعد از دانلود، کلید info["requested_downloads"] هست (لیستی
+                # از دیکشنری‌ها با کلید filepath/filename که *بعد* از تمام
+                # postprocessing پر می‌شه) — این‌جا اول اون رو امتحان می‌کنیم.
+                filepath = None
+                requested = info.get("requested_downloads") if isinstance(info, dict) else None
+                if requested:
+                    cand = requested[-1].get("filepath") or requested[-1].get("_filename") or requested[-1].get("filename")
+                    if cand and os.path.exists(cand):
+                        filepath = cand
+                if not filepath:
+                    filepath = ydl.prepare_filename(info)
+                    # همون منطق قبلی به‌عنوان Fallback دوم، برای نسخه‌های
+                    # yt-dlp که requested_downloads رو پر نمی‌کنن.
+                    if opts.get("merge_output_format") and not os.path.exists(filepath):
+                        alt = os.path.splitext(filepath)[0] + "." + opts["merge_output_format"]
+                        if os.path.exists(alt):
+                            filepath = alt
             return filepath, info
         except Exception as e:
             last_err = e
