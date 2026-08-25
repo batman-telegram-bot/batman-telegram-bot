@@ -23,6 +23,7 @@ downloader.py
 import os
 import re
 import json
+import glob
 import time
 import uuid
 import shutil
@@ -942,6 +943,39 @@ def _fix_video_for_telegram(filepath: str, job_id: str = None):
     return final_path, final_duration, final_width, final_height
 
 
+# 🐛 رفع باگ «پلتفرم فایل خروجی معتبری برنگردوند» (بدون Exception از yt-dlp،
+# ولی filepath محاسبه‌شده رو دیسک وجود نداره): این معمولاً وقتی رخ می‌ده که
+# yt-dlp واقعاً چیزی روی دیسک نوشته، ولی مسیر واقعی‌ش با هیچ‌کدوم از دو روش
+# قبلی (requested_downloads / prepare_filename+merge_output_format) یکی
+# درنمیاد — مثلاً وقتی entry از یه ساختار Playlist/Mix/Tab برمی‌گرده (حتی
+# برای یه لینک تک‌ویدیوی یوتیوب که یوتیوب داخلی به‌عنوان بخشی از یه Mix
+# می‌شناستش) یا وقتی نسخه‌ی yt-dlp کلید filepath رو تو requested_downloads
+# پر نمی‌کنه. آخرین راه قبل از تسلیم‌شدن: خودِ outdir (که مخصوص همین Job‌ه،
+# هیچ فایل قدیمی توش نیست) رو می‌گردیم و بزرگ‌ترین فایل رسانه‌ایِ واقعی
+# (نه فایل‌های جانبیِ .part/.ytdl/.json/.jpg) رو به‌عنوان خروجی واقعی برمی‌گردونیم.
+_SIDECAR_EXTS = (".part", ".ytdl", ".description", ".json", ".jpg", ".jpeg", ".png", ".webp", ".txt")
+
+
+def _find_downloaded_file(outdir: str, prefer_id: str = None):
+    try:
+        candidates = [
+            p for p in glob.glob(os.path.join(outdir, "*"))
+            if os.path.isfile(p) and not p.lower().endswith(_SIDECAR_EXTS)
+        ]
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    if prefer_id:
+        id_matches = [p for p in candidates if prefer_id in os.path.basename(p)]
+        if id_matches:
+            candidates = id_matches
+    try:
+        return max(candidates, key=os.path.getsize)
+    except Exception:
+        return candidates[0]
+
+
 def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
     """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
 
@@ -1012,6 +1046,17 @@ def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
                         alt = os.path.splitext(filepath)[0] + "." + opts["merge_output_format"]
                         if os.path.exists(alt):
                             filepath = alt
+                if not filepath or not os.path.exists(filepath):
+                    # 🩹 Fallback سوم و آخر: هر دو روش بالا مسیر درستی ندادن،
+                    # ولی احتمالاً yt-dlp واقعاً یه فایل تو همین outdir نوشته —
+                    # مستقیم رو دیسک می‌گردیم به‌جای اینکه بی‌دلیل «خروجی
+                    # معتبر نیست» اعلام کنیم.
+                    vid = info.get("id") if isinstance(info, dict) else None
+                    found = _find_downloaded_file(outdir, prefer_id=vid)
+                    if found:
+                        log.info(f"yt-dlp filepath fallback via directory scan: {found!r} "
+                                  f"(computed path was {filepath!r})")
+                        filepath = found
             return filepath, info
         except Exception as e:
             last_err = e
