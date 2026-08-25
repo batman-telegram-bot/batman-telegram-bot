@@ -425,12 +425,19 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
         "geo_bypass": True,
     }
     if platform == "youtube":
-        # وقتی صدا/تصویر جدان، باید merge بشن؛ merge بدون ffmpeg خطای واضح می‌ده
-        # نه فایل خراب (چون بدون این خط، yt-dlp خودش merge رو سایلنت skip می‌کنه
-        # و یه فایل فقط-تصویر یا فقط-صدا می‌مونه که تلگرام یا رد می‌کنه یا صداش قطعه).
-        opts["merge_output_format"] = "mp4"
+        # 🐛 رفع «پلتفرم فایل خروجی معتبری برنگردوند»: merge_output_format فقط
+        # وقتی ست می‌شه که ffmpeg واقعاً در دسترسه. قبلاً merge_output_format
+        # همیشه ست می‌شد، حتی بدون ffmpeg؛ تو اون حالت yt-dlp merge رو سایلنت
+        # Skip می‌کنه و بسته به فرمت انتخابی ممکنه فقط جریان تصویر (بدون صدا)
+        # یا هیچ فایل واحد قابل‌شناساییِ نهایی روی دیسک نمونه — دقیقاً همون
+        # خطایی که کاربر می‌دید. بدون ffmpeg، format رو به یه گزینه‌ی
+        # progressive (صدا+تصویر از قبل تو یه فایل، بدون نیاز به merge) محدود
+        # می‌کنیم تا حداقل یه فایل واحد و سالم (هرچند کیفیت پایین‌تر) بشه.
         if _FFMPEG_BIN:
+            opts["merge_output_format"] = "mp4"
             opts["ffmpeg_location"] = _FFMPEG_BIN
+        else:
+            opts["format"] = "best[ext=mp4]/best"
         # ⚡ سرعت یوتیوب: فرمت‌های DASH (بالای ۳۶۰p) به‌صورت چندتکه (fragment)
         # سرو می‌شن؛ پیش‌فرض yt-dlp این تکه‌ها رو یکی‌یکی و پشت‌سرهم دانلود
         # می‌کنه. با دانلود موازیِ چند فرگمنت هم‌زمان، سرعت واقعی دانلود (نه
@@ -1035,9 +1042,25 @@ def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
                 filepath = None
                 requested = info.get("requested_downloads") if isinstance(info, dict) else None
                 if requested:
-                    cand = requested[-1].get("filepath") or requested[-1].get("_filename") or requested[-1].get("filename")
-                    if cand and os.path.exists(cand):
-                        filepath = cand
+                    # 🐛 قبلاً فقط آخرین entry (requested[-1]) چک می‌شد. بسته به
+                    # نسخه‌ی yt-dlp و این‌که merge/remux کدوم entry رو دقیقاً
+                    # آپدیت می‌کنه (اول یا آخر لیست)، این می‌تونست همون entryِ
+                    # معتبرِ بعد از postprocessing رو از دست بده و باعث «خروجی
+                    # معتبر نیست» بشه با این‌که فایل واقعاً روی دیسک بود. حالا
+                    # همه‌ی entryها (از آخر به اول) چک می‌شن.
+                    for entry in reversed(requested):
+                        cand = entry.get("filepath") or entry.get("_filename") or entry.get("filename")
+                        if cand and os.path.exists(cand):
+                            filepath = cand
+                            break
+                if not filepath:
+                    # بعضی نسخه‌های yt-dlp بعد از تمام postprocessing، مسیر
+                    # نهایی رو مستقیم رو خودِ info_dict سطح‌بالا هم می‌ذارن.
+                    for key in ("filepath", "_filename"):
+                        cand = info.get(key) if isinstance(info, dict) else None
+                        if cand and os.path.exists(cand):
+                            filepath = cand
+                            break
                 if not filepath:
                     filepath = ydl.prepare_filename(info)
                     # همون منطق قبلی به‌عنوان Fallback دوم، برای نسخه‌های
@@ -1215,7 +1238,11 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
     msg = update.effective_message
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    text = (msg.text or "").strip()
+    # 🐛 لینک داخل caption (عکس/ویدیوی فرستاده‌شده با کپشن حاوی لینک) قبلاً
+    # اصلاً چک نمی‌شد چون فقط msg.text خونده می‌شد؛ caption روی msg.text نیست،
+    # روی msg.caption‌ه. لینک فوروارد‌شده (از جمله از Saved Messages) هم متن/
+    # کپشن خودش رو حفظ می‌کنه، پس نیازی به منطق جدا نداره — همین‌جا پوشش داده می‌شه.
+    text = (msg.text or msg.caption or "").strip()
 
     match = URL_RE.search(text)
     if not match:
@@ -1803,5 +1830,10 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
 def register_downloader(app):
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^\s*(دانلودر|دانلود)\s*$"), downloader_menu), group=6)
     app.add_handler(CallbackQueryHandler(downloader_pick_callback, pattern=r"^dl:pick:"), group=6)
-    # این هندلر با هر پیام متنی چک می‌کنه که آیا لینک‌شده و منتظرشیم؛ وگرنه هیچ کاری نمی‌کنه
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader_link_handler), group=6)
+    # این هندلر با هر پیام متنی یا هر پیام دارای caption (عکس/ویدیو با کپشن
+    # لینک‌دار) چک می‌کنه که آیا لینک پشتیبانی‌شده‌ای توشه؛ وگرنه هیچ کاری نمی‌کنه
+    # و بی‌صدا به بقیه‌ی هندلرها سپرده می‌شه (بدون هیچ اثری روی پیام‌های غیرمرتبط).
+    app.add_handler(
+        MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, downloader_link_handler),
+        group=6,
+    )
