@@ -430,6 +430,12 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
         opts["merge_output_format"] = "mp4"
         if _FFMPEG_BIN:
             opts["ffmpeg_location"] = _FFMPEG_BIN
+        # ⚡ سرعت یوتیوب: فرمت‌های DASH (بالای ۳۶۰p) به‌صورت چندتکه (fragment)
+        # سرو می‌شن؛ پیش‌فرض yt-dlp این تکه‌ها رو یکی‌یکی و پشت‌سرهم دانلود
+        # می‌کنه. با دانلود موازیِ چند فرگمنت هم‌زمان، سرعت واقعی دانلود (نه
+        # کیفیت، نه فرمت) به‌طور محسوس بالا می‌ره، بدون اینکه هیچ رفتار دیگه‌ای
+        # عوض بشه.
+        opts["concurrent_fragment_downloads"] = 4
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -1217,9 +1223,17 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         )
 
     # 📊 پیش‌نمایش Metadata (عنوان/مدت/حجم تقریبی) قبل از شروع دانلود واقعی —
-    # فقط برای یوتیوب/ساندکلاود که extract_info(download=False) سریع و قابل‌اتکاست.
-    # Best-effort‌ه: اگه شکست خورد یا طول کشید، بی‌سروصدا رد می‌شیم سراغ دانلود اصلی.
-    if platform in ("youtube", "soundcloud") and yt_dlp is not None:
+    # فقط برای ساندکلاود.
+    # ⚡ برای یوتیوب عمداً حذف شد: این یه extract_info(download=False) کامل و
+    # جدا بود که دقیقاً همون استخراج Metadataای که خودِ دانلود واقعی
+    # (extract_info(download=True) تو _yt_dlp_download) انجام می‌ده رو یه‌بار
+    # دیگه از اول تکرار می‌کرد — یعنی هر لینک یوتیوب قبل از این‌که حتی یه بایت
+    # از ویدیو دانلود بشه، دو بار کامل Extract می‌شد. حذفش دقیقاً همون
+    # «دانلود/درخواست غیرضروری» است. محدودیت حجم همچنان از طریق فیلتر
+    # filesize تو selector فرمت (_YOUTUBE_FORMAT) و گزینه‌ی max_filesize حین
+    # دانلود واقعی اعمال می‌شه، پس هیچ حفاظتی از دست نرفت — فقط یه Round-trip
+    # اضافه حذف شد.
+    if platform == "soundcloud" and yt_dlp is not None:
         try:
             probe_info = await asyncio.wait_for(
                 asyncio.to_thread(_yt_dlp_probe, url, platform), timeout=15
