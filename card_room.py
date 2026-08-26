@@ -430,6 +430,33 @@ def active_card_games_for_user(user_id):
     return results
 
 
+def _safe_game_callback(fn):
+    """دور هر Callback بازیِ کارتی رو می‌گیره تا:
+    ۱) اگه Exception ای رخ داد، هیچ‌وقت بی‌صدا گم نشه — لاگ کامل با traceback ثبت می‌شه.
+    ۲) کاربر همیشه یه پاسخ ببینه (نه یه Spinner که فقط خودش تایم‌اوت می‌شه) —
+       یه Alert کوتاه «❌ بازی با خطا مواجه شد» نشونش می‌دیم.
+    ۳) بعدش Exception رو دوباره raise می‌کنیم تا global_error_handler (تو bot.py،
+       که همین الان به OWNER_ID پیام می‌ده) هم طبق روال عادی خودش خبردار بشه.
+    این یعنی دفعه‌ی بعد که یه بازی «هیچ واکنشی نشون نده»، یا خطا لاگ/به Owner
+    گزارش می‌شه، یا اگه واقعاً هیچ Exception ای رخ نده، معلوم می‌شه مشکل اصلاً
+    اینجا (تو خودِ این Handler) نیست، جای دیگه‌ست.
+    """
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        try:
+            return await fn(update, context)
+        except Exception as e:
+            log.exception(f"card_room: خطای پیش‌بینی‌نشده تو {fn.__name__} (data={getattr(q, 'data', '?')})")
+            try:
+                await q.answer("❌ بازی با خطا مواجه شد. دوباره امتحان کن.", show_alert=True)
+            except Exception:
+                pass
+            raise
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+@_safe_game_callback
 async def card_room_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -608,6 +635,7 @@ async def _war_timeout(context: ContextTypes.DEFAULT_TYPE):
         await _war_play_round(context, gid, q=None, auto=True)
 
 
+@_safe_game_callback
 async def war_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -763,6 +791,7 @@ async def _bj21_timeout(context: ContextTypes.DEFAULT_TYPE):
     await _bj21_render_turn(context, gid, state, note=f"⏱️ {state['names'][uid]} دیر کرد — خودکار Stand شد.")
 
 
+@_safe_game_callback
 async def bj21_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     action, gid = q.data.split(":")[1], q.data.split(":")[2]
@@ -956,6 +985,7 @@ async def _blackjack_timeout(context: ContextTypes.DEFAULT_TYPE):
     await _blackjack_render_turn(context, gid, state, note=f"⏱️ {state['names'][uid]} دیر کرد — خودکار Stand شد.")
 
 
+@_safe_game_callback
 async def blackjack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     action, gid = q.data.split(":")[1], q.data.split(":")[2]
@@ -1163,6 +1193,7 @@ def _hokm_resolve_trick(state):
     return winner
 
 
+@_safe_game_callback
 async def hokm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -1539,6 +1570,7 @@ async def _haft_turn_timeout(context: ContextTypes.DEFAULT_TYPE):
     await _haft_execute_turn(context, gid, uid, auto=True)
 
 
+@_safe_game_callback
 async def haft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -1754,6 +1786,7 @@ async def _charbarg_timeout(context: ContextTypes.DEFAULT_TYPE):
     await _charbarg_render_or_finish(context, gid, state, note=f"⏱️ {state['names'][uid]} دیر کرد — {note}")
 
 
+@_safe_game_callback
 async def charbarg_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -2006,6 +2039,7 @@ async def _rummy_timeout(context: ContextTypes.DEFAULT_TYPE):
         _schedule_timeout(context.application, "rummy", gid, _rummy_timeout)
 
 
+@_safe_game_callback
 async def rummy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
@@ -2370,6 +2404,7 @@ async def _poker_timeout(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+@_safe_game_callback
 async def poker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     parts = q.data.split(":")
