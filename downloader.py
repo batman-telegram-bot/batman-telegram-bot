@@ -405,10 +405,40 @@ _YOUTUBE_FORMAT = (
 _DEFAULT_FORMAT = "best[ext=mp4]/best"
 
 
-def _base_ydl_opts(outdir: str, platform: str) -> dict:
+def _format_selector_for_quality(quality) -> str:
+    """🦇 PHASE 2/3: format selector یوتیوب بر اساس کیفیت انتخابیِ کاربر.
+
+    quality می‌تونه یکی از این‌ها باشه:
+        - "audio"   -> بهترین صدای خام (بدون Re-encode، دقیقاً همون الگویی
+                       که همین الان برای SoundCloud استفاده می‌شه — سازگار
+                       با معماری فعلی، بدون نیاز به postprocessor جدید).
+        - عدد (360/480/720/1080) -> بهترین ویدیو تا همون ارتفاع + بهترین
+          صدا، با همون زنجیره‌ی fallback سه‌سطحیِ الگوی فعلی (_YOUTUBE_FORMAT)
+          ولی این‌بار سقف‌خورده به height به‌جای اینکه فقط filesize محدودش کنه.
+    اگه quality چیزی غیر از این دو حالت باشه (یا None)، این تابع اصلاً صدا
+    زده نمی‌شه — فراخوان (پایین‌تر) در اون حالت از همون _YOUTUBE_FORMAT
+    پیش‌فرض استفاده می‌کنه، دقیقاً رفتار قبل از Phase 2."""
+    if quality == "audio":
+        return "bestaudio/best"
+    height = int(quality)
+    return (
+        f"bestvideo[height<={height}][ext=mp4][filesize<{MAX_TELEGRAM_UPLOAD_BYTES}]+bestaudio[ext=m4a]/"
+        f"bestvideo[height<={height}]+bestaudio/"
+        f"best[height<={height}]/best"
+    )
+
+
+def _base_ydl_opts(outdir: str, platform: str, quality=None) -> dict:
+    """🦇 پارامتر quality (Phase 2/3) کاملاً اختیاریه — پیش‌فرضش None است،
+    یعنی همه‌ی فراخوان‌های فعلی/قبلی این تابع (بدون دادن این آرگومان) دقیقاً
+    همون رفتار قبل از Phase 2 رو دارن، بدون هیچ تغییری."""
     opts = {
         "outtmpl": os.path.join(outdir, "%(id)s.%(ext)s"),
-        "format": _YOUTUBE_FORMAT if platform == "youtube" else _DEFAULT_FORMAT,
+        "format": (
+            _format_selector_for_quality(quality)
+            if (platform == "youtube" and quality is not None)
+            else (_YOUTUBE_FORMAT if platform == "youtube" else _DEFAULT_FORMAT)
+        ),
         "quiet": True,
         "no_warnings": True,
         # noplaylist=True یعنی «فقط یه آیتم رو بگیر، نه کل لیست». برای یوتیوب لازمه
@@ -437,7 +467,14 @@ def _base_ydl_opts(outdir: str, platform: str) -> dict:
             opts["merge_output_format"] = "mp4"
             opts["ffmpeg_location"] = _FFMPEG_BIN
         else:
-            opts["format"] = "best[ext=mp4]/best"
+            # 🦇 بدون ffmpeg نمی‌شه merge کرد؛ اگه کیفیت مشخصی خواسته شده،
+            # همون سقف height رو روی فرمت progressive هم حفظ می‌کنیم (نه
+            # اینکه بی‌قید و شرط به «best» برگردیم و انتخاب کاربر نادیده
+            # گرفته بشه). برای quality=None دقیقاً رفتار قبلی حفظ شده.
+            if quality is not None and quality != "audio":
+                opts["format"] = f"best[height<={int(quality)}][ext=mp4]/best[height<={int(quality)}]/best[ext=mp4]/best"
+            else:
+                opts["format"] = "best[ext=mp4]/best"
         # ⚡ سرعت یوتیوب: فرمت‌های DASH (بالای ۳۶۰p) به‌صورت چندتکه (fragment)
         # سرو می‌شن؛ پیش‌فرض yt-dlp این تکه‌ها رو یکی‌یکی و پشت‌سرهم دانلود
         # می‌کنه. با دانلود موازیِ چند فرگمنت هم‌زمان، سرعت واقعی دانلود (نه
@@ -983,8 +1020,12 @@ def _find_downloaded_file(outdir: str, prefer_id: str = None):
         return candidates[0]
 
 
-def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
+def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None, quality=None):
     """بلاک‌کننده‌ست — حتماً باید تو asyncio.to_thread صدا زده بشه.
+
+    🦇 پارامتر quality (Phase 2/3): کاملاً اختیاری، پیش‌فرض None. فقط وقتی
+    مسیر جدیدِ انتخاب کیفیت (Phase 2) صدا می‌زنه مقدار می‌گیره؛ برای همه‌ی
+    فراخوان‌های قبلی/فعلی (بدون این آرگومان) رفتار دقیقاً مثل قبل می‌مونه.
 
     برای یوتیوب چند تا player_client رو پشت‌سرهم امتحان می‌کنیم، چون بعضی‌هاشون
     (مثل android/ios) گاهی قفل «Sign in to confirm you're not a bot» رو دور
@@ -995,7 +1036,7 @@ def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None):
     client ثابت باعث می‌شد اگه هر سه با نسخه‌ی نصب‌شده‌ی yt-dlp ناسازگار بودن،
     دانلود کلاً شکست بخوره بدون این‌که راه‌حل پیش‌فرض/جدیدتر امتحان بشه.
     """
-    base = _base_ydl_opts(outdir, platform)
+    base = _base_ydl_opts(outdir, platform, quality=quality)
     attempts = [{}]
     if platform == "youtube":
         attempts = [
@@ -1158,16 +1199,19 @@ def _classify_download_error(err_text: str):
     return ("❌ خطای نامشخص در دانلود؛ جزئیاتش تو لاگ ربات ثبت شد.", False)
 
 
-async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str, progress_state=None):
+async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str, progress_state=None, quality=None):
     """دور _yt_dlp_download رو با Timeout و Retry-با-Backoff (فقط برای خطاهای
     موقت) می‌پیچه. خطاهای دائمی (Private/Deleted/Invalid/...) بدون تلف‌کردن وقت
-    فوراً بالا پرتاب می‌شن."""
+    فوراً بالا پرتاب می‌شن.
+
+    🦇 پارامتر quality (Phase 2/3) اختیاریه؛ فراخوان‌های فعلی/قبلی بدون این
+    آرگومان دقیقاً همون رفتار قبلی (فرمت پیش‌فرض پلتفرم) رو دارن."""
     attempt = 0
     while True:
         attempt += 1
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform, progress_state),
+                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform, progress_state, quality),
                 timeout=JOB_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
@@ -1293,6 +1337,18 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
             "فقط دانلود تک‌ویدیو/Shorts پشتیبانی می‌شه — لینک مستقیم همون ویدیویی که می‌خوای رو بفرست."
         )
         return
+
+    # 🦇 PHASE 2 — Quality UI: فقط برای یوتیوب، به‌جای دانلود فوری با فرمت
+    # پیش‌فرض، اول تلاش می‌کنیم منوی انتخاب کیفیت (360/480/720/1080/Audio)
+    # رو نشون بدیم. این بخش کاملاً «افزوده» است: اگه probe به هر دلیلی
+    # شکست بخوره یا هیچ کیفیت/صدایی برنگردونه، handled=False می‌شه و کد
+    # دقیقاً به همون مسیر قدیمیِ زیر (دانلود مستقیم با فرمت پیش‌فرض فعلی)
+    # سقوط می‌کنه — یعنی هیچ رفتار قبلی از دست نمی‌ره، فقط یه لایه‌ی UI
+    # اختیاری روی مسیر یوتیوب اضافه شده.
+    if platform == "youtube":
+        handled = await _offer_youtube_quality_menu(update, context, url, job_id)
+        if handled:
+            return
 
     # 🐛 رفع باگ «کاربر لینک می‌فرسته و ربات کاملاً ساکت می‌مونه»: قبلاً این
     # reply_text مستقیم و بدون try/except بود؛ اگه به هر دلیلی (مثلاً پیام
@@ -1827,9 +1883,471 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
 
 
+# =========================================================
+#  🦇 BATMAN DOWNLOADER — PHASE 1: YouTube Quality Probe
+# =========================================================
+# این بخش کاملاً افزوده (additive) است و به هیچ Handler یا مسیر فعلی وصل
+# نشده — یعنی رفتار دانلودر فعلی (منو، لینک مستقیم، دانلود، ارسال، Fallback)
+# دقیقاً دست‌نخورده می‌ماند. فقط زیرساختی که Phase 2 (UI انتخاب کیفیت) و
+# Phase 3 (دانلود با کیفیت انتخابی) بهش نیاز دارن، اینجا آماده می‌شه.
+#
+# هدف Phase 1: از روی فرمت‌های واقعیِ yt-dlp (با extract_info و
+# download=False — یعنی بدون دانلود واقعی، دقیقاً طبق قانون پروژه) یک
+# لیست تمیز از کیفیت‌های واقعاً موجود (360/480/720/1080 + Audio) بسازیم.
+# هیچ کیفیت فیک/حدسی ساخته نمی‌شه: اگه یه سطح (مثلاً 480) واقعاً تو
+# فرمت‌های ویدیو نبود، اصلاً تو خروجی این تابع هم نمی‌آد — همون‌طور که
+# قرار بود Phase 2 دکمه‌ش رو نسازه.
+
+_QUALITY_BUCKETS = (360, 480, 720, 1080)
+
+
+def _closest_quality_bucket(height):
+    """نزدیک‌ترین سطح استاندارد (360/480/720/1080) به یه height واقعی رو
+    برمی‌گردونه (مثلاً 640x360 -> 360). اختلاف مجاز تا ۲۰٪ height هدفه تا
+    از یه طرف height های نامتعارف (240p قدیمی، 4K) به یه باکت غلط
+    نچسبن، از طرف دیگه height های خیلی‌نزدیک-ولی-نه-دقیق (مثل 714 برای
+    720p) درست تشخیص داده بشن. اگه به هیچ باکتی نزدیک نبود، None
+    برمی‌گردونه (یعنی این فرمت اصلاً تو منو نشون داده نمی‌شه)."""
+    if not height:
+        return None
+    best, best_diff = None, None
+    for bucket in _QUALITY_BUCKETS:
+        diff = abs(height - bucket)
+        if diff <= bucket * 0.2 and (best_diff is None or diff < best_diff):
+            best, best_diff = bucket, diff
+    return best
+
+
+def _extract_quality_options(info: dict) -> dict:
+    """از خروجی خامِ yt-dlp (extract_info با download=False) یه dict تمیز
+    و مصرف‌محورِ Phase 2/3 می‌سازه.
+
+    خروجی:
+        {
+          "title": str یا None,
+          "duration": ثانیه (float/int) یا None,
+          "thumbnail": URL یا None,
+          "qualities": [
+              {"height": 360|480|720|1080, "format_id": "...",
+               "ext": "mp4"/"webm"/..., "has_audio": bool,
+               "approx_size": بایت یا None, "fps": عدد یا None},
+              ...
+          ],  # مرتب‌شده از کیفیت پایین به بالا؛ فقط سطح‌های واقعاً موجود
+          "audio_available": bool,  # آیا حداقل یه فرمت audio-only واقعی هست
+        }
+
+    نکته‌ی مهم برای Phase 3: format_id اینجا صرفاً برای شناسایی/نمایشه.
+    خودِ انتخاب نهایی دانلود در Phase 3 باید طبق همون الگوی فعلی پروژه
+    (bestvideo[height<=X]+bestaudio/best...) با fallback ساخته بشه، نه
+    قفل‌شدن مستقیم به یه format_id واحد و شکننده.
+    """
+    if not isinstance(info, dict):
+        return {"title": None, "duration": None, "thumbnail": None,
+                "qualities": [], "audio_available": False}
+
+    formats = info.get("formats") or []
+    by_bucket = {}
+    audio_available = False
+
+    for f in formats:
+        vcodec = f.get("vcodec")
+        acodec = f.get("acodec")
+
+        is_audio_only = (vcodec in (None, "none")) and acodec not in (None, "none")
+        if is_audio_only:
+            audio_available = True
+            continue
+
+        if vcodec in (None, "none"):
+            continue  # نه ویدیو نه صدای مستقل (مثلاً storyboard/mhtml) — رد کن
+
+        bucket = _closest_quality_bucket(f.get("height"))
+        if bucket is None:
+            continue
+
+        candidate = {
+            "height": bucket,
+            "real_height": f.get("height"),
+            "format_id": f.get("format_id"),
+            "ext": f.get("ext"),
+            "has_audio": acodec not in (None, "none"),
+            "approx_size": f.get("filesize") or f.get("filesize_approx"),
+            "fps": f.get("fps"),
+        }
+
+        prev = by_bucket.get(bucket)
+        if prev is None:
+            by_bucket[bucket] = candidate
+            continue
+        # اگه چند فرمت رو یه باکت افتادن (مثلاً چند رمزینه‌ی مختلف برای
+        # همون 720p)، اولویت با اونی که approx_size مشخص‌تر/fps بالاتر
+        # داره — نماینده‌ی مطمئن‌تری برای Phase 3 خواهد بود.
+        prev_score = (prev["approx_size"] or 0, prev["fps"] or 0)
+        cur_score = (candidate["approx_size"] or 0, candidate["fps"] or 0)
+        if cur_score > prev_score:
+            by_bucket[bucket] = candidate
+
+    qualities = [by_bucket[b] for b in _QUALITY_BUCKETS if b in by_bucket]
+
+    thumb = info.get("thumbnail")
+    if not thumb:
+        thumbs = info.get("thumbnails") or []
+        if thumbs:
+            thumb = thumbs[-1].get("url")
+
+    return {
+        "title": (info.get("title") or "").strip() or None,
+        "duration": info.get("duration"),
+        "thumbnail": thumb,
+        "qualities": qualities,
+        "audio_available": audio_available,
+    }
+
+
+async def probe_youtube_qualities(url: str, timeout: int = 20):
+    """Phase 1 — فقط برای YouTube. Metadata کامل + همه‌ی فرمت‌های واقعی رو
+    بدون دانلود واقعی (download=False) می‌گیره و با _extract_quality_options
+    به یه لیست کیفیت تمیز تبدیل می‌کنه.
+
+    عمداً از _yt_dlp_probe فعلی (که فقط برای پیش‌نمایش SoundCloud صدا زده
+    می‌شه، بدون formats کامل) جدا نوشته شده — تا هیچ رفتار فعلی (منو/لینک
+    مستقیم/دانلود/ارسال/SoundCloud preview) تغییر نکنه. این یه تابع کاملاً
+    جدید و افزوده‌ست که فعلاً به هیچ Handler وصل نیست؛ Phase 2 آن را به UI
+    وصل خواهد کرد.
+
+    خروجی موفق: dict طبق _extract_quality_options.
+    خروجی شکست (لینک نامعتبر/شبکه/Timeout و ...): None — فراخوان (Phase 2)
+    باید حالت «کیفیت‌ها قابل‌دریافت نیست» را خودش با پیام مناسب مدیریت کند؛
+    این تابع هیچ Exception خامی رو بیرون نمی‌ده."""
+    if yt_dlp is None:
+        return None
+
+    opts = {**_base_ydl_opts(tempfile.gettempdir(), "youtube"), "skip_download": True}
+    # سقف حجم (max_filesize) و format selector فقط برای دانلود واقعی
+    # معنی دارن (Phase 3)؛ اینجا فقط داریم لیست فرمت‌ها رو می‌خونیم، پس
+    # هیچ‌کدوم نباید جلوی extract_info رو بگیرن.
+    opts.pop("max_filesize", None)
+    opts.pop("format", None)
+
+    def _run():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout)
+    except Exception as e:
+        log.info(f"[quality-probe] youtube probe failed for {url!r}: {e}")
+        return None
+
+    if not isinstance(info, dict):
+        return None
+
+    return _extract_quality_options(info)
+
+
+# =========================================================
+#  🦇 BATMAN DOWNLOADER — PHASE 2: Quality Selection UI (YouTube)
+# =========================================================
+# این بخش هم کاملاً افزوده است. مسیرهای قبلی (پینترست، اینستاگرام/توییتر
+# Carousel، تیک‌تاک، ساندکلاود، و حتی خودِ یوتیوب در صورت شکست Probe)
+# دقیقاً همون Pipeline قبلی (تک‌فایل، خط ۱۵۱۶ به بعد) رو طی می‌کنن — این
+# بخش فقط یه مسیر جایگزین و اختیاری برای یوتیوب اضافه می‌کنه.
+
+# token(str) -> {"url","uid","chat_id","qualities","audio_available","title","duration"}
+_QUALITY_SESSIONS = {}
+_QUALITY_SESSION_MAX = 200  # جلوگیری از رشد بی‌نهایت حافظه در RAM Railway؛
+                             # وقتی پر شد، قدیمی‌ترین Session (احتمالاً رهاشده) حذف می‌شه.
+
+
+def _store_quality_session(data: dict) -> str:
+    if len(_QUALITY_SESSIONS) >= _QUALITY_SESSION_MAX:
+        oldest = next(iter(_QUALITY_SESSIONS), None)
+        if oldest is not None:
+            _QUALITY_SESSIONS.pop(oldest, None)
+    token = uuid.uuid4().hex[:10]
+    _QUALITY_SESSIONS[token] = data
+    return token
+
+
+def _quality_menu_markup(token: str, qualities: list, audio_available: bool) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    for q in qualities:
+        row.append(InlineKeyboardButton(f"🦇 {q['height']}P", callback_data=f"dlq:pick:{token}:{q['height']}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if audio_available:
+        rows.append([InlineKeyboardButton("🎧 AUDIO", callback_data=f"dlq:pick:{token}:audio")])
+    rows.append([InlineKeyboardButton("❌ CANCEL", callback_data=f"dlq:cancel:{token}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _quality_preview_text(data: dict) -> str:
+    lines = ["🦇 GOTHAM DOWNLOADER", "", "🎬 Video detected"]
+    title = data.get("title")
+    if title:
+        lines.append(f"Title: {title}")
+    dur = data.get("duration")
+    if dur:
+        total = int(dur)
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        dur_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        lines.append(f"Duration: {dur_str}")
+    lines.append("")
+    lines.append("⚡ SELECT QUALITY")
+    return "\n".join(lines)
+
+
+async def _offer_youtube_quality_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, job_id: str) -> bool:
+    """تلاش می‌کنه منوی انتخاب کیفیت رو برای یه لینک یوتیوب نشون بده.
+
+    خروجی True یعنی «منو با موفقیت نشون داده شد، فراخوان (downloader_link_handler)
+    باید همین‌جا return کنه — ادامه‌ی کار به downloader_quality_callback سپرده
+    شده». خروجی False یعنی «به هر دلیلی (probe شکست خورد، هیچ کیفیتی نبود،
+    یا حتی نمایش خودِ منو شکست خورد) — فراخوان باید دقیقاً به مسیر قدیمیِ
+    دانلود مستقیم با فرمت پیش‌فرض ادامه بده»؛ یعنی این تابع هیچ‌وقت باعث
+    نمی‌شه یه لینک یوتیوبِ معتبر بدون پاسخ بمونه."""
+    msg = update.effective_message
+    try:
+        probe_msg = await msg.reply_text("🦇 GOTHAM DOWNLOADER\n🔍 در حال دریافت اطلاعات ویدیو...")
+    except Exception as e:
+        log.info(f"[dl:{job_id}] quality probe status message failed, falling back to default flow: {e}")
+        return False
+
+    data = await probe_youtube_qualities(url)
+    if not data or (not data["qualities"] and not data["audio_available"]):
+        _log_job(job_id, platform="youtube", url=url, stage="quality-probe-empty")
+        try:
+            await probe_msg.delete()
+        except Exception:
+            pass
+        return False
+
+    session = {
+        "url": url,
+        "uid": update.effective_user.id,
+        "chat_id": update.effective_chat.id,
+        "qualities": data["qualities"],
+        "audio_available": data["audio_available"],
+        "title": data["title"],
+        "duration": data["duration"],
+    }
+    token = _store_quality_session(session)
+    try:
+        await probe_msg.edit_text(
+            _quality_preview_text(data),
+            reply_markup=_quality_menu_markup(token, data["qualities"], data["audio_available"]),
+        )
+    except Exception as e:
+        log.info(f"[dl:{job_id}] quality menu render failed, falling back to default flow: {e}")
+        _QUALITY_SESSIONS.pop(token, None)
+        try:
+            await probe_msg.delete()
+        except Exception:
+            pass
+        return False
+
+    _log_job(job_id, platform="youtube", url=url, stage="quality-menu-shown",
+              qualities=[q["height"] for q in data["qualities"]], audio=data["audio_available"])
+    return True
+
+
+async def _run_youtube_quality_download(context: ContextTypes.DEFAULT_TYPE, chat_id: int, uid: int,
+                                          url: str, quality, job_id: str, status):
+    """🦇 Phase 2/3 orchestration برای مسیر «انتخاب کیفیت». از همون توابع
+    کمکیِ سطح‌پایینِ Pipeline اصلی (validate/fix/thumbnail/retry/classify)
+    استفاده می‌کنه — هیچ منطق پردازش فایل تکراری نوشته نشده، فقط ترتیب
+    فراخوانی برای این مسیر (که با دکمه شروع می‌شه، نه با ریپلای مستقیم به
+    پیام کاربر) پیاده‌سازی شده؛ برای همین از context.bot.send_* به‌جای
+    msg.reply_* استفاده می‌شه — دقیقاً همون الگوی «ارسال بدون reply» که
+    برای حالت‌های لبه‌ای (پیام اصلی حذف‌شده) در Pipeline قدیمی هم وجود داره."""
+    header = "▶️ YouTube"
+    _log_job(job_id, platform="youtube", url=url, user_id=uid, chat_id=chat_id, stage="start", quality=quality)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        progress_state = {"status": "downloading", "total": 0, "downloaded": 0}
+        stop_event = asyncio.Event()
+        ticker = asyncio.create_task(_progress_ticker(status, progress_state, header, stop_event))
+
+        start_ts = time.monotonic()
+        try:
+            filepath, info = await _download_with_retry(url, tmpdir, "youtube", job_id, progress_state, quality=quality)
+        except asyncio.TimeoutError:
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
+            await status.edit_text("❌ دانلود انجام نشد\nعلت: ⏱ زمان دانلود تمام شد.")
+            return
+        except Exception as e:
+            log.exception(f"[dl:{job_id}] quality-download failed url={url} user_id={uid} quality={quality}")
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
+            reason, _ = _classify_download_error(str(e))
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: {reason}")
+            return
+        finally:
+            stop_event.set()
+        try:
+            await ticker
+        except Exception:
+            pass
+
+        if not filepath or not os.path.exists(filepath):
+            log.error(f"[dl:{job_id}] quality-download output missing url={url} user_id={uid} quality={quality}")
+            await status.edit_text("❌ دانلود انجام نشد\nعلت: پلتفرم فایل خروجی معتبری برنگردوند.")
+            return
+
+        real_size = os.path.getsize(filepath)
+        title = (info.get("title") or "").strip() if isinstance(info, dict) else ""
+        caption = f"{title}\n📦 حجم: {_human_size(real_size)}" if title else f"📦 حجم: {_human_size(real_size)}"
+
+        ext = os.path.splitext(filepath)[1].lower()
+        send_path = filepath
+        v_duration = v_width = v_height = None
+        if ext in _VIDEO_EXTS:
+            try:
+                send_path, v_duration, v_width, v_height = await asyncio.to_thread(_fix_video_for_telegram, filepath, job_id)
+            except Exception as e:
+                log.warning(f"[dl:{job_id}] quality video fixup failed, sending raw file: {e}")
+                send_path = filepath
+
+        ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+        if not ok:
+            log.error(f"[dl:{job_id}] quality output failed validation: {reason} path={send_path!r}")
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی سالم نبود ({reason})")
+            return
+
+        v_thumb = None
+        if ext in _VIDEO_EXTS:
+            try:
+                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration, job_id)
+            except Exception as e:
+                log.info(f"[dl:{job_id}] quality thumbnail step failed: {e}")
+
+        thumb_f = None
+        try:
+            if v_thumb and os.path.exists(v_thumb):
+                thumb_f = open(v_thumb, "rb")
+            with open(send_path, "rb") as f:
+                if ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav"):
+                    await context.bot.send_audio(chat_id, f, caption=caption or None, title=title or None)
+                elif ext in _VIDEO_EXTS:
+                    await context.bot.send_video(
+                        chat_id, f, caption=caption or None, supports_streaming=True,
+                        duration=int(v_duration) if v_duration else None,
+                        width=v_width or None, height=v_height or None, thumbnail=thumb_f,
+                    )
+                else:
+                    await context.bot.send_document(chat_id, f, caption=caption or None)
+            _log_job(job_id, platform="youtube", url=url, stage="sent", quality=quality)
+        except Exception as e:
+            log.warning(f"[dl:{job_id}] quality send failed, fallback to document: {e}")
+            try:
+                if thumb_f:
+                    try:
+                        thumb_f.close()
+                    except Exception:
+                        pass
+                    thumb_f = None
+                with open(filepath, "rb") as f:
+                    await context.bot.send_document(chat_id, f, caption=caption or None)
+                _log_job(job_id, platform="youtube", url=url, stage="sent-as-document")
+            except Exception:
+                log.exception(f"[dl:{job_id}] quality document fallback also failed")
+                try:
+                    await status.edit_text(
+                        "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
+                    )
+                except Exception:
+                    pass
+                return
+        finally:
+            if thumb_f:
+                try:
+                    thumb_f.close()
+                except Exception:
+                    pass
+
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+
+async def downloader_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر دکمه‌های منوی کیفیت (dlq:pick:<token>:<height|audio> یا
+    dlq:cancel:<token>). دقیقاً یک‌بار‌مصرف: بعد از اولین کلیک، Session پاک
+    می‌شه تا دوبار دانلود روی یه دکمه اتفاق نیفته."""
+    q = update.callback_query
+    parts = q.data.split(":")
+    action = parts[1] if len(parts) > 1 else None
+    token = parts[2] if len(parts) > 2 else None
+
+    if action == "cancel":
+        _QUALITY_SESSIONS.pop(token, None)
+        try:
+            await q.edit_message_text("❌ لغو شد.")
+        except Exception:
+            pass
+        await q.answer()
+        return
+
+    session = _QUALITY_SESSIONS.get(token)
+    if not session:
+        try:
+            await q.edit_message_text("⚠️ این منو منقضی شده. دوباره لینک رو بفرست.")
+        except Exception:
+            pass
+        await q.answer()
+        return
+
+    if session["uid"] != q.from_user.id:
+        await q.answer("این منو برای شما نیست.", show_alert=True)
+        return
+
+    choice = parts[3] if len(parts) > 3 else None
+    _QUALITY_SESSIONS.pop(token, None)  # یک‌بار‌مصرف
+    await q.answer()
+
+    if choice == "audio":
+        quality = "audio"
+        label = "🎧 Audio"
+    else:
+        try:
+            quality = int(choice)
+        except (TypeError, ValueError):
+            try:
+                await q.edit_message_text("⚠️ گزینه‌ی نامعتبر.")
+            except Exception:
+                pass
+            return
+        label = f"{quality}P"
+
+    job_id = uuid.uuid4().hex[:10]
+    try:
+        status = await q.edit_message_text(f"⏳ در حال دانلود ({label})...")
+    except Exception:
+        status = await context.bot.send_message(session["chat_id"], f"⏳ در حال دانلود ({label})...")
+
+    await _run_youtube_quality_download(
+        context, session["chat_id"], session["uid"], session["url"], quality, job_id, status,
+    )
+
+
 def register_downloader(app):
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^\s*(دانلودر|دانلود)\s*$"), downloader_menu), group=6)
     app.add_handler(CallbackQueryHandler(downloader_pick_callback, pattern=r"^dl:pick:"), group=6)
+    # 🦇 PHASE 2: دکمه‌های منوی انتخاب کیفیت یوتیوب (dlq:pick:.../dlq:cancel:...)
+    app.add_handler(CallbackQueryHandler(downloader_quality_callback, pattern=r"^dlq:"), group=6)
     # این هندلر با هر پیام متنی یا هر پیام دارای caption (عکس/ویدیو با کپشن
     # لینک‌دار) چک می‌کنه که آیا لینک پشتیبانی‌شده‌ای توشه؛ وگرنه هیچ کاری نمی‌کنه
     # و بی‌صدا به بقیه‌ی هندلرها سپرده می‌شه (بدون هیچ اثری روی پیام‌های غیرمرتبط).
