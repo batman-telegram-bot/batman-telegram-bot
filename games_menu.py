@@ -122,6 +122,7 @@ def build_games_menu_root_keyboard() -> InlineKeyboardMarkup:
     # بازی جدیدی ساخته نشده، فقط یه مسیر میان‌بر به همون قابلیتِ از قبل موجوده.
     rows.append([InlineKeyboardButton("⚡ بازی سریع", callback_data="cr:quick"),
                  InlineKeyboardButton("🎮 بازی‌های فعال من", callback_data="panel:active_games")])
+    rows.append([InlineKeyboardButton("🎟️ بازی‌های استیکری بتمن", callback_data="gg:root")])
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")])
     return InlineKeyboardMarkup(rows)
 

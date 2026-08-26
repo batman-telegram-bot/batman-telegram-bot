@@ -66,6 +66,7 @@ from ttt_inline import register_ttt_inline
 from ttt_gotham import register_ttt_gotham
 from games_menu import register_games_menu, GAMES_MENU_MAIN_TEXT, build_games_menu_root_keyboard
 from card_room import register_card_room, active_card_games_for_user
+from gotham_games import register_gotham_games, gotham_status_lines_for_user
 from gotham_content import gotham_signature_line, RIDDLES
 from downloader import register_downloader, dl_menu_markup, DOWNLOADER_HELP_TEXT
 from admin_panel import register_admin_panel
@@ -3620,6 +3621,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             opp = game["opponent_name"] if uid == game["creator_id"] else game["creator_name"]
             phase_note = "⏳ منتظر بازیکن دوم" if game.get("phase") == "waiting" else "⚔️ در حال نبرد"
             lines.append(f"🎮 سنگ‌کاغذقیچی — 👥 {opp} — {phase_note}")
+        gotham_lines = gotham_status_lines_for_user(uid)
+        if gotham_lines:
+            found = True
+            lines.extend(gotham_lines)
         if not found:
             lines.append("فعلاً تو هیچ بازی‌ای نیستی.")
         await query.edit_message_text(
@@ -4997,6 +5002,7 @@ def main():
     register_extra_games3(app)  # یونو / قلمرو / بیلیارد / مسابقه ماشین
     register_group_rps(app)  # سنگ کاغذ قیچی گروهی — PvP واقعی، از منوی بازی‌ها ← 👥 گروهی
     register_card_room(app)  # 🃏 اتاق پاسور: جنگ / بیست‌ویک / بلک‌جک / حکم (دونفره)
+    register_gotham_games(app)  # 🎟️ بازی‌های استیکری بتمن: بازی سریع + نفرین ریدلر
     register_downloader(app)  # دانلودر اینستاگرام / یوتیوب / پینترست
     register_ttt_inline(app)  # دوز inline (۳×۳ تا ۸×۸، با دوست یا با ربات) — نیاز به فعال بودن Inline Mode تو BotFather
     register_ttt_gotham(app)  # دوز گاتهام — با نوشتن کلمه تو چت، بدون نیاز به inline mode
