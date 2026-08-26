@@ -244,7 +244,12 @@ async def _open_lobby(query_or_msg, creator, game_key, edit=False):
         f"⚔️ فقط یه بازیکن دیگه (نه خودِ سازنده) می‌تونه بپیونده."
     )
     if edit:
-        await query_or_msg.edit_message_text(text, reply_markup=_lobby_markup(token))
+        # query_or_msg همیشه یه Message ـه (از q.message پاس داده می‌شه)، نه خودِ
+        # CallbackQuery — و کلاس Message تو python-telegram-bot متد
+        # edit_message_text نداره (فقط Bot و CallbackQuery دارن)، بلکه edit_text
+        # داره. این دقیقاً همون AttributeError ای بود که باعث می‌شد لابیِ حکم/
+        # هفت‌خبیث/... بعد از کلیک هیچ‌وقت ساخته نشه.
+        await query_or_msg.edit_text(text, reply_markup=_lobby_markup(token))
     else:
         await query_or_msg.reply_text(text, reply_markup=_lobby_markup(token))
 
@@ -291,7 +296,9 @@ async def _open_multi_lobby(query_or_msg, creator, game_key, edit=False):
     text = _multi_lobby_text(lobby, game_key)
     markup = _multi_lobby_markup(token, game_key, len(lobby["order"]))
     if edit:
-        await query_or_msg.edit_message_text(text, reply_markup=markup)
+        # همون دلیل _open_lobby: query_or_msg یه Message ـه، edit_text درسته نه
+        # edit_message_text.
+        await query_or_msg.edit_text(text, reply_markup=markup)
     else:
         await query_or_msg.reply_text(text, reply_markup=markup)
 
