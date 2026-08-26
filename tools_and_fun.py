@@ -329,9 +329,13 @@ def register_tools_and_fun(app):
         if text not in ("پسورد", "رمز عبور", "پسورد قوی"):
             return False
         pw = _gen_password()
+        # رمزِ تصادفی می‌تونه شامل * یا _ باشه (تو alphabet هست) که پارسر
+        # Markdown قدیمی تلگرام گاهی وسط بک‌تیک باهاش گیج می‌شه و کل پیام رو
+        # با خطای «can't find end of the entity» رد می‌کنه. چون این فقط یه
+        # رمزِ کپی‌کردنیه و نیازی به فرمت Bold/Italic نداره، بدون parse_mode
+        # (متن ساده) امن‌تره.
         await update.effective_message.reply_text(
-            f"🔑 رمز پیشنهادی:\n`{pw}`\n\nذخیره‌ش کن، بعد از این پیام دیگه جایی نگهش نمی‌داریم.",
-            parse_mode="Markdown",
+            f"🔑 رمز پیشنهادی:\n{pw}\n\nذخیره‌ش کن، بعد از این پیام دیگه جایی نگهش نمی‌داریم.",
         )
         return True
 
@@ -413,7 +417,9 @@ def register_tools_and_fun(app):
         if data == "tool:password":
             pw = _gen_password()
             await query.answer()
-            await query.message.reply_text(f"🔑 رمز پیشنهادی:\n`{pw}`", parse_mode="Markdown")
+            # همون دلیل نمونه‌ی بالا: رمز می‌تونه * یا _ داشته باشه و
+            # parse_mode="Markdown" با بک‌تیک گاهی خطای Parse می‌ده.
+            await query.message.reply_text(f"🔑 رمز پیشنهادی:\n{pw}")
             return
         if data == "tool:howto:translate":
             await query.answer("بنویس «ترجمه <متن>» یا روی پیامی ریپلای کن و بنویس «ترجمه»", show_alert=True)
