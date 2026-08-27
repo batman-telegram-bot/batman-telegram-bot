@@ -170,6 +170,18 @@ JOB_TIMEOUT_SEC = 600
 MAX_TELEGRAM_UPLOAD_BYTES = 49 * 1024 * 1024
 NETWORK_RETRY_DELAYS = (2, 5)
 
+# 🦇 محدودسازی هم‌زمانیِ دانلود واقعی (Concurrency/Queue — چک‌لیست #21):
+# قبلاً هیچ سقفی برای تعداد دانلودهای هم‌زمان (بین همه‌ی کاربران/پلتفرم‌ها)
+# وجود نداشت؛ چند دانلود سنگین هم‌زمان (چند کاربر + چند فرگمنت موازی هرکدوم)
+# می‌تونست RAM/CPU روی Railway رو کامل اشغال کنه. این Semaphore سراسری فقط
+# دور *اجرای واقعی* yt-dlp (تو _download_with_retry) رو می‌گیره — نه پروب
+# متادیتا (probe_youtube_qualities/_yt_dlp_probe) که سبک و بی‌خطره. اگه ظرفیت
+# پر باشه، Job جدید بی‌صدا صبر می‌کنه تا یکی آزاد بشه (نه رد می‌شه، نه خطا
+# می‌ده) — دقیقاً همون رفتار «Queue» که چک‌لیست خواسته، بدون نیاز به پیاده‌سازی
+# یه سیستم صف جداگانه که با معماری فعلی (asyncio + per-job tempdir) رقابت کنه.
+MAX_CONCURRENT_DOWNLOADS = 3
+_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 # 🧪 آیتم ۳ چک‌لیست («تست بسیار مهم Telegram»): وقتی این env var روی "1" ست
 # بشه، بعد از ارسال موفق FINAL FILE به‌صورت send_video، دقیقاً همون فایل
 # یک‌بار دیگه هم به‌صورت send_document فرستاده می‌شه — تا خودِ توسعه‌دهنده
@@ -421,6 +433,13 @@ def _format_selector_for_quality(quality) -> str:
     پیش‌فرض استفاده می‌کنه، دقیقاً رفتار قبل از Phase 2."""
     if quality == "audio":
         return "bestaudio/best"
+    if quality == "best":
+        # ⚡ «بهترین کیفیت»: همون زنجیره‌ی پیش‌فرض فعلی (_YOUTUBE_FORMAT) —
+        # بهترین ویدیو+صدای موجود، با همون سقف MAX_TELEGRAM_UPLOAD_BYTES و
+        # همون سه‌سطح Fallback. یه انتخاب جدا نیست، فقط اسمِ صریح روی همون
+        # رفتاریه که «quality=None» قبلاً بی‌صدا انجام می‌داد — این‌جوری دکمه‌ی
+        # «بهترین کیفیت» تو منو هم از همون مسیر امن و تست‌شده استفاده می‌کنه.
+        return _YOUTUBE_FORMAT
     height = int(quality)
     return (
         f"bestvideo[height<={height}][ext=mp4][filesize<{MAX_TELEGRAM_UPLOAD_BYTES}]+bestaudio[ext=m4a]/"
@@ -472,7 +491,7 @@ def _base_ydl_opts(outdir: str, platform: str, quality=None) -> dict:
             # همون سقف height رو روی فرمت progressive هم حفظ می‌کنیم (نه
             # اینکه بی‌قید و شرط به «best» برگردیم و انتخاب کاربر نادیده
             # گرفته بشه). برای quality=None دقیقاً رفتار قبلی حفظ شده.
-            if quality is not None and quality != "audio":
+            if quality is not None and quality not in ("audio", "best"):
                 opts["format"] = f"best[height<={int(quality)}][ext=mp4]/best[height<={int(quality)}]/best[ext=mp4]/best"
             else:
                 opts["format"] = "best[ext=mp4]/best"
@@ -1334,13 +1353,19 @@ async def _download_with_retry(url: str, tmpdir: str, platform: str, job_id: str
     🦇 پارامتر quality (Phase 2/3) اختیاریه؛ فراخوان‌های فعلی/قبلی بدون این
     آرگومان دقیقاً همون رفتار قبلی (فرمت پیش‌فرض پلتفرم) رو دارن."""
     attempt = 0
+    waited_slot = False
     while True:
         attempt += 1
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform, progress_state, quality),
-                timeout=JOB_TIMEOUT_SEC,
-            )
+            if not waited_slot and _DOWNLOAD_SEMAPHORE.locked():
+                _log_job(job_id, platform=platform, url=url, stage="queued",
+                          max_concurrent=MAX_CONCURRENT_DOWNLOADS)
+            async with _DOWNLOAD_SEMAPHORE:
+                waited_slot = True
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_yt_dlp_download, url, tmpdir, platform, progress_state, quality),
+                    timeout=JOB_TIMEOUT_SEC,
+                )
         except asyncio.TimeoutError:
             _log_job(job_id, platform=platform, url=url, stage="timeout", attempt=attempt)
             raise
@@ -2037,7 +2062,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
 # فرمت‌های ویدیو نبود، اصلاً تو خروجی این تابع هم نمی‌آد — همون‌طور که
 # قرار بود Phase 2 دکمه‌ش رو نسازه.
 
-_QUALITY_BUCKETS = (360, 480, 720, 1080)
+_QUALITY_BUCKETS = (360, 480, 720, 1080, 1440, 2160)
 
 
 def _closest_quality_bucket(height):
@@ -2218,6 +2243,11 @@ def _quality_menu_markup(token: str, qualities: list, audio_available: bool) -> 
             row = []
     if row:
         rows.append(row)
+    # ⚡ «بهترین کیفیت»: انتخاب خودکار بهترین فرمت موجود (مطابق چک‌لیست #6)،
+    # همیشه نشون داده می‌شه وقتی حداقل یه کیفیت ویدیویی موجوده — چون فرمت
+    # پیش‌فرض _YOUTUBE_FORMAT همیشه یه fallback امن (حتی best[ext=mp4]/best) داره.
+    if qualities:
+        rows.append([InlineKeyboardButton("⚡ BEST QUALITY", callback_data=f"dlq:pick:{token}:best")])
     if audio_available:
         rows.append([InlineKeyboardButton("🎧 AUDIO", callback_data=f"dlq:pick:{token}:audio")])
     rows.append([InlineKeyboardButton("❌ CANCEL", callback_data=f"dlq:cancel:{token}")])
@@ -2372,6 +2402,20 @@ async def _run_youtube_quality_download(context: ContextTypes.DEFAULT_TYPE, chat
         title = (info.get("title") or "").strip() if isinstance(info, dict) else ""
         caption = f"{title}\n📦 حجم: {_human_size(real_size)}" if title else f"📦 حجم: {_human_size(real_size)}"
 
+        # ⚠️ اطلاع شفاف «کیفیت فallback» (چک‌لیست #17): وقتی کاربر مثلاً 1080p
+        # رو انتخاب کرده ولی زنجیره‌ی fallback داخلیِ format selector (مثلاً
+        # به‌خاطر سقف حجم تلگرام یا نبودِ اون کیفیت برای این ویدیوی خاص) یه
+        # کیفیت پایین‌تر واقعی برگردونده، این‌جا صراحتاً به کاربر گفته می‌شه —
+        # هیچ‌وقت بی‌صدا/مخفی داون‌گرید نمی‌شه.
+        if isinstance(quality, int) and isinstance(info, dict):
+            actual_height = info.get("height")
+            if actual_height and actual_height < quality * 0.9:
+                actual_bucket = _closest_quality_bucket(actual_height) or actual_height
+                caption = (
+                    f"⚠️ کیفیت {quality}p قابل ارسال نبود.\n"
+                    f"🦇 کیفیت {actual_bucket}p جایگزین شد.\n\n" + caption
+                )
+
         ext = os.path.splitext(filepath)[1].lower()
         send_path = filepath
         v_duration = v_width = v_height = None
@@ -2483,6 +2527,9 @@ async def downloader_quality_callback(update: Update, context: ContextTypes.DEFA
     if choice == "audio":
         quality = "audio"
         label = "🎧 Audio"
+    elif choice == "best":
+        quality = "best"
+        label = "⚡ Best"
     else:
         try:
             quality = int(choice)
