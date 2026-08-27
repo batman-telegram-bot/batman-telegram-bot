@@ -33,44 +33,11 @@ from collections import defaultdict, deque
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 log = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-# 🐛 رفع باگ تکراری تو لاگ (BadRequest: File is too big): تلگرام به بات‌ها
-# اجازه نمی‌ده فایل‌های بزرگ‌تر از ۲۰ مگابایت رو با get_file() دانلود کنن —
-# این یه محدودیت سخت‌گیرانه‌ی خودِ Bot API‌ه (جدا از سقف ۵۰ مگابایتیِ آپلود).
-# قبلاً همه‌ی ۸ تا فراخوانی get_file() تو این فایل بدون try/except بودن، یعنی
-# اگه کاربر رو یه ویدیوی حجیم ریپلای می‌کرد و «تشخیص فیلم/آهنگ» می‌زد، کل
-# Update با یه Exception خام می‌ترکید و کاربر هیچ پیامی نمی‌گرفت. حالا یه چک
-# سایز (اگه تلگرام از قبل file_size رو گفته باشه) + یه try/except دور خودِ
-# get_file() هست تا همیشه یه پیام روشن به کاربر برسه.
-MAX_TG_DOWNLOAD_BYTES = 20 * 1024 * 1024
-
-
-async def _safe_get_file(msg, obj):
-    """گرفتن File از یه عکس/ویدیو/صدا — با پیام روشن به‌جای کرش، اگه فایل
-    بزرگ‌تر از سقف مجاز دانلود بات‌ها (۲۰ مگابایت) باشه."""
-    size = getattr(obj, "file_size", None)
-    if size and size > MAX_TG_DOWNLOAD_BYTES:
-        await msg.reply_text(
-            f"⚠️ این فایل حجمش بیشتر از {MAX_TG_DOWNLOAD_BYTES // (1024*1024)} مگابایته — "
-            "محدودیت خودِ تلگرامه برای بات‌ها، نمی‌تونم دانلودش کنم."
-        )
-        return None
-    try:
-        return await obj.get_file()
-    except BadRequest as e:
-        if "file is too big" in str(e).lower():
-            await msg.reply_text(
-                f"⚠️ این فایل حجمش بیشتر از {MAX_TG_DOWNLOAD_BYTES // (1024*1024)} مگابایته — "
-                "محدودیت خودِ تلگرامه برای بات‌ها، نمی‌تونم دانلودش کنم."
-            )
-            return None
-        raise
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 AUDD_API_TOKEN = os.getenv("AUDD_API_TOKEN")
 
@@ -159,16 +126,12 @@ async def movie_recognize_handler(update: Update, context: ContextTypes.DEFAULT_
     replied = msg.reply_to_message
     photo_file = None
     if replied.photo:
-        photo_file = await _safe_get_file(msg, replied.photo[-1])
-        if photo_file is None:
-            return
+        photo_file = await replied.photo[-1].get_file()
     elif replied.video:
         if not TMDB_API_KEY and not OPENROUTER_API_KEY:
             pass
         await msg.reply_text("🎬 دارم از ویدیو یه فریم می‌گیرم، صبر کن...")
-        vid_file = await _safe_get_file(msg, replied.video)
-        if vid_file is None:
-            return
+        vid_file = await replied.video.get_file()
         with tempfile.TemporaryDirectory() as tmp:
             vid_path = os.path.join(tmp, "in.mp4")
             frame_path = os.path.join(tmp, "frame.jpg")
@@ -262,19 +225,17 @@ async def song_recognize_handler(update: Update, context: ContextTypes.DEFAULT_T
     tg_file = None
     is_video = False
     if replied.voice:
-        tg_file = await _safe_get_file(msg, replied.voice)
+        tg_file = await replied.voice.get_file()
     elif replied.audio:
-        tg_file = await _safe_get_file(msg, replied.audio)
+        tg_file = await replied.audio.get_file()
     elif replied.video:
-        tg_file = await _safe_get_file(msg, replied.video)
+        tg_file = await replied.video.get_file()
         is_video = True
     elif replied.video_note:
-        tg_file = await _safe_get_file(msg, replied.video_note)
+        tg_file = await replied.video_note.get_file()
         is_video = True
     else:
         await msg.reply_text("🎵 رو یه ویس، فایل صوتی یا ویدیو ریپلای کن و «تشخیص آهنگ» بنویس.")
-        return
-    if tg_file is None:
         return
 
     await msg.reply_text("🎵 دارم آهنگ رو تشخیص می‌دم...")
@@ -404,9 +365,7 @@ async def private_media_button_callback(update: Update, context: ContextTypes.DE
     if action == "movie":
         if target_msg.photo:
             import io
-            photo_file = await _safe_get_file(query.message, target_msg.photo[-1])
-            if photo_file is None:
-                return
+            photo_file = await target_msg.photo[-1].get_file()
             buf = io.BytesIO()
             await photo_file.download_to_memory(buf)
             await _run_movie_recognition(query.message, buf.getvalue())
@@ -423,9 +382,7 @@ async def _run_movie_recognition_from_video(msg, video_msg):
     if not _ffmpeg_available():
         await msg.reply_text("⚠️ ffmpeg رو سرور نصب نیست، نمی‌تونم از ویدیو فریم بگیرم.")
         return
-    vid_file = await _safe_get_file(msg, video_msg.video)
-    if vid_file is None:
-        return
+    vid_file = await video_msg.video.get_file()
     with tempfile.TemporaryDirectory() as tmp:
         vid_path = os.path.join(tmp, "in.mp4")
         frame_path = os.path.join(tmp, "frame.jpg")
@@ -452,19 +409,17 @@ async def _run_song_recognition(msg, media_msg):
     tg_file = None
     is_video = False
     if media_msg.voice:
-        tg_file = await _safe_get_file(msg, media_msg.voice)
+        tg_file = await media_msg.voice.get_file()
     elif media_msg.audio:
-        tg_file = await _safe_get_file(msg, media_msg.audio)
+        tg_file = await media_msg.audio.get_file()
     elif media_msg.video:
-        tg_file = await _safe_get_file(msg, media_msg.video)
+        tg_file = await media_msg.video.get_file()
         is_video = True
     elif media_msg.video_note:
-        tg_file = await _safe_get_file(msg, media_msg.video_note)
+        tg_file = await media_msg.video_note.get_file()
         is_video = True
     else:
         await msg.reply_text("⚠️ این پیام صدا/ویدیو نیست.")
-        return
-    if tg_file is None:
         return
 
     await msg.reply_text("🎵 دارم آهنگ رو تشخیص می‌دم...")
