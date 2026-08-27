@@ -488,6 +488,47 @@ def _base_ydl_opts(outdir: str, platform: str, quality=None) -> dict:
 
 
 _VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".ts")
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+_AUDIO_EXTS = (".mp3", ".m4a", ".opus", ".ogg", ".wav")
+
+# 🐛 رفع باگ «اینستاگرام یه Image URL می‌ده ولی Downloader اشتباهاً Video یا
+# فایل نامعتبر تشخیصش می‌ده»: قبلاً تشخیص عکس *فقط* از روی پسوند فایل بود
+# (`ext in (".jpg", ".jpeg", ".png", ".webp")`) — اگه yt-dlp/اینستاگرام یه
+# عکس رو با پسوند غیرمعمول یا بدون پسوند مشخص می‌نوشت، همون else-branch
+# قدیمی بدون چک اضافه به‌عنوان Video فرستاده می‌شد (خطای تلگرام یا فایل
+# نامعتبر). این تابع دقیقاً طبق درخواست («Content-Type/Container را هم
+# بررسی کن، نه فقط Extension») یه لایه‌ی Fallback اضافه می‌کنه:
+#   ۱. اول پسوندهای شناخته‌شده (سریع، بدون هیچ I/O اضافه — رفتار قبلی حفظ).
+#   ۲. اگه پسوند ناشناخته بود، mimetypes (از روی همون اسم فایل) چک می‌شه.
+#   ۳. اگه بازم معلوم نشد، بایت‌های اول فایل (Magic Number واقعی JPEG/PNG/
+#      WEBP/GIF) خونده می‌شه — این دقیقاً «Container واقعی» رو چک می‌کنه، نه
+#      اسم فایل. این I/O فقط برای پسوندهای ناشناخته انجام می‌شه، پس هیچ
+#      overhead ای برای حالت عادی (jpg/mp4 و...) اضافه نمی‌کنه — سرعت حفظ می‌شه.
+def _looks_like_image(filepath: str, ext: str) -> bool:
+    if ext in _IMAGE_EXTS:
+        return True
+    if ext in _VIDEO_EXTS or ext in _AUDIO_EXTS:
+        return False
+    guessed, _ = mimetypes.guess_type(filepath)
+    if guessed:
+        if guessed.startswith("image/"):
+            return True
+        if guessed.startswith("video/") or guessed.startswith("audio/"):
+            return False
+    try:
+        with open(filepath, "rb") as f:
+            head = f.read(16)
+    except Exception:
+        return False
+    if head.startswith(b"\xff\xd8\xff"):
+        return True  # JPEG
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True  # PNG
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True  # WEBP
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return True  # GIF (تلگرام این رو هم به‌عنوان عکس قبول می‌کنه)
+    return False
 
 _FFMPEG_OK = shutil.which("ffmpeg") is not None
 _FFPROBE_OK = shutil.which("ffprobe") is not None
@@ -709,6 +750,59 @@ def _log_ffmpeg_failure(op: str, filepath: str, proc=None, exc=None, timeout=Non
             f"{op} FAILED file={filepath!r} size={size} timeout={timeout} "
             f"rc={proc.returncode} stderr_tail={(proc.stderr or '')[-800:]!r}"
         )
+
+
+def _extract_audio_track(filepath: str, job_id: str = None):
+    """بلاک‌کننده‌ست — تو asyncio.to_thread صدا زده بشه.
+
+    🎵 برای «Instagram Video → Audio» و «TikTok Audio» (هر دو الزامی طبق
+    درخواست): صدای اصلیِ ویدیوی دانلودشده رو استخراج می‌کنه، دقیقاً طبق قانون
+    «Remux رو به Re-encode ترجیح بده / تبدیل غیرضروری انجام نده»:
+        ۱. اول Stream-Copy (بدون Re-encode) به‌عنوان .m4a امتحان می‌شه — اکثر
+           ویدیوهای این پلتفرم‌ها صدای AAC دارن که مستقیم تو container .m4a
+           جا می‌شه، بدون هیچ افت کیفیت/زمان اضافه.
+        ۲. فقط اگه Copy شکست خورد (Codec صوتی با .m4a سازگار نبود — مثلاً
+           Opus)، به mp3 (libmp3lame) Re-encode می‌شیم — تنها موقعی که واقعاً
+           لازمه.
+    خروجی: مسیر فایل صوتی، یا None اگه ffmpeg نصب نباشه یا هر دو روش شکست بخورن."""
+    if not _FFMPEG_BIN:
+        return None
+    base, _ = os.path.splitext(filepath)
+
+    copy_path = base + "_audio.m4a"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", filepath, "-vn", "-acodec", "copy", copy_path],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode == 0 and os.path.exists(copy_path) and os.path.getsize(copy_path) > 0:
+            return copy_path
+        _log_ffmpeg_failure("audio-extract-copy", filepath, proc=proc, timeout=180)
+    except Exception as e:
+        _log_ffmpeg_failure("audio-extract-copy", filepath, exc=e, timeout=180)
+    if os.path.exists(copy_path):
+        try:
+            os.remove(copy_path)
+        except Exception:
+            pass
+
+    mp3_path = base + "_audio.mp3"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", filepath, "-vn", "-acodec", "libmp3lame", "-b:a", "192k", mp3_path],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode == 0 and os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+            return mp3_path
+        _log_ffmpeg_failure("audio-extract-mp3", filepath, proc=proc, timeout=180)
+    except Exception as e:
+        _log_ffmpeg_failure("audio-extract-mp3", filepath, exc=e, timeout=180)
+    if os.path.exists(mp3_path):
+        try:
+            os.remove(mp3_path)
+        except Exception:
+            pass
+    return None
 
 
 def _remux_faststart(filepath: str):
@@ -1350,6 +1444,18 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
         if handled:
             return
 
+    # 🎬🎵 اینستاگرام Video/Reel و تیک‌تاک: طبق درخواست («اگر کاربر Instagram
+    # Video/Reel/Post Video فرستاد، گزینه‌ی 🎵 Audio وجود داشته باشد» — قابلیت
+    # الزامی؛ همین‌طور برای تیک‌تاک). این بخش هم دقیقاً مثل منوی کیفیت یوتیوب
+    # کاملاً «افزوده»‌ست: فقط برای Videoهای تکی (نه عکس، نه Carousel) پیشنهاد
+    # می‌شه؛ اگه probe عکس/Carousel/چیز نامشخصی تشخیص بده یا هر جای دیگه شکست
+    # بخوره، handled=False می‌شه و کد دقیقاً به مسیر قدیمیِ دانلود مستقیم زیر
+    # سقوط می‌کنه — هیچ رفتار فعلی (عکس/Carousel) از دست نمی‌ره.
+    if platform in ("instagram", "tiktok"):
+        handled = await _offer_media_choice_menu(update, context, url, platform, job_id)
+        if handled:
+            return
+
     # 🐛 رفع باگ «کاربر لینک می‌فرسته و ربات کاملاً ساکت می‌مونه»: قبلاً این
     # reply_text مستقیم و بدون try/except بود؛ اگه به هر دلیلی (مثلاً پیام
     # اصلی هم‌زمان توسط یه فیچر دیگه‌ی گروه حذف شده بود) ریپلای‌کردن به همون
@@ -1669,7 +1775,7 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
                                 log.info(f"[dl:{job_id}] carousel thumbnail step failed: {e}")
                         f = open(send_epath, "rb")
                         opened.append(f)
-                        if eext in (".jpg", ".jpeg", ".png", ".webp"):
+                        if _looks_like_image(send_epath, eext):
                             group.append(InputMediaPhoto(f))
                         else:
                             thumb_f = None
@@ -1785,9 +1891,9 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
             این‌که به Document افت کنیم."""
             tf = thumb_f if with_thumb else None
             with open(send_path, "rb") as f:
-                if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                if _looks_like_image(send_path, ext):
                     await msg.reply_photo(f, caption=caption or None)
-                elif platform == "soundcloud" or ext in (".mp3", ".m4a", ".opus", ".ogg", ".wav"):
+                elif platform == "soundcloud" or ext in _AUDIO_EXTS:
                     await msg.reply_audio(f, caption=caption or None, title=title or None)
                 else:
                     await msg.reply_video(
@@ -2137,22 +2243,45 @@ async def _offer_youtube_quality_menu(update: Update, context: ContextTypes.DEFA
         "duration": data["duration"],
     }
     token = _store_quality_session(session)
-    try:
-        await probe_msg.edit_text(
-            _quality_preview_text(data),
-            reply_markup=_quality_menu_markup(token, data["qualities"], data["audio_available"]),
-        )
-    except Exception as e:
-        log.info(f"[dl:{job_id}] quality menu render failed, falling back to default flow: {e}")
-        _QUALITY_SESSIONS.pop(token, None)
+    preview_text = _quality_preview_text(data)
+    markup = _quality_menu_markup(token, data["qualities"], data["audio_available"])
+
+    # 🖼️ رفع کمبود «Thumbnail قبل از دانلود کامل نمایش داده شود»: قبلاً این
+    # منو فقط متن (عنوان/مدت) بود؛ data["thumbnail"] (که _extract_quality_options
+    # از قبل استخراج می‌کرد) هیچ‌جا استفاده نمی‌شد. حالا اگه URL تصویر موجود
+    # باشه، مستقیم با همون URL (بدون دانلود دستی توسط ربات) به‌عنوان عکس
+    # فرستاده می‌شه — تلگرام خودش سریع می‌گیردش، هیچ ffmpeg/درخواست اضافه‌ای
+    # لازم نیست. اگه ارسال عکس به هر دلیلی (URL نامعتبر/شبکه) شکست خورد،
+    # بی‌صدا به همون منوی متنیِ قبلی برمی‌گردیم — منو هیچ‌وقت گم نمی‌شه.
+    thumb_url = data.get("thumbnail")
+    menu_shown = False
+    if thumb_url:
         try:
-            await probe_msg.delete()
-        except Exception:
-            pass
-        return False
+            await msg.reply_photo(photo=thumb_url, caption=preview_text, reply_markup=markup)
+            menu_shown = True
+            try:
+                await probe_msg.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            log.info(f"[dl:{job_id}] thumbnail preview send failed, falling back to text menu: {e}")
+
+    if not menu_shown:
+        try:
+            await probe_msg.edit_text(preview_text, reply_markup=markup)
+            menu_shown = True
+        except Exception as e:
+            log.info(f"[dl:{job_id}] quality menu render failed, falling back to default flow: {e}")
+            _QUALITY_SESSIONS.pop(token, None)
+            try:
+                await probe_msg.delete()
+            except Exception:
+                pass
+            return False
 
     _log_job(job_id, platform="youtube", url=url, stage="quality-menu-shown",
-              qualities=[q["height"] for q in data["qualities"]], audio=data["audio_available"])
+              qualities=[q["height"] for q in data["qualities"]], audio=data["audio_available"],
+              thumbnail_shown=bool(thumb_url))
     return True
 
 
@@ -2343,11 +2472,367 @@ async def downloader_quality_callback(update: Update, context: ContextTypes.DEFA
     )
 
 
+# =========================================================
+#  🎬🎵 اینستاگرام Video/Reel و تیک‌تاک — منوی انتخاب Video/Audio
+# =========================================================
+# دقیقاً همون الگوی PHASE 2 یوتیوب (بالاتر): یه لایه‌ی UI اختیاریِ افزوده.
+# اگه probe شکست بخوره یا عکس/Carousel تشخیص داده بشه، handled=False می‌شه
+# و کد به همون مسیر قدیمیِ دانلود مستقیم (که خودش عکس/Carousel رو درست
+# مدیریت می‌کنه) سقوط می‌کنه — هیچ رفتار فعلی از دست نمی‌ره.
+
+_MEDIA_CHOICE_SESSIONS = {}
+_MEDIA_CHOICE_MAX = 200
+
+
+def _store_media_choice_session(data: dict) -> str:
+    if len(_MEDIA_CHOICE_SESSIONS) >= _MEDIA_CHOICE_MAX:
+        oldest = next(iter(_MEDIA_CHOICE_SESSIONS), None)
+        if oldest is not None:
+            _MEDIA_CHOICE_SESSIONS.pop(oldest, None)
+    token = uuid.uuid4().hex[:10]
+    _MEDIA_CHOICE_SESSIONS[token] = data
+    return token
+
+
+async def _offer_media_choice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str, job_id: str) -> bool:
+    msg = update.effective_message
+    try:
+        probe_msg = await msg.reply_text("🦇 GOTHAM DOWNLOADER\n🔍 در حال دریافت اطلاعات...")
+    except Exception as e:
+        log.info(f"[dl:{job_id}] media-choice probe status failed, falling back to default flow: {e}")
+        return False
+
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_yt_dlp_probe, url, platform), timeout=20)
+    except Exception as e:
+        log.info(f"[dl:{job_id}] media-choice probe failed/timeout: {e}")
+        info = None
+
+    if not isinstance(info, dict):
+        try:
+            await probe_msg.delete()
+        except Exception:
+            pass
+        return False
+
+    # 📚 Carousel (چند entry) — این مسیر UI فقط برای Video تکیه؛ Carousel
+    # دقیقاً با همون منطق قدیمیِ اثبات‌شده (پایین‌تر تو downloader_link_handler)
+    # مدیریت می‌شه، پس همین‌جا بی‌صدا کنار می‌کشیم.
+    entries = info.get("entries")
+    entry = None
+    if entries:
+        try:
+            entries_list = [e for e in entries if e]
+        except Exception:
+            entries_list = []
+        if len(entries_list) > 1:
+            try:
+                await probe_msg.delete()
+            except Exception:
+                pass
+            return False
+        if len(entries_list) == 1:
+            entry = entries_list[0]
+
+    probe_target = entry or info
+    formats = probe_target.get("formats") or []
+    has_video = any((f.get("vcodec") not in (None, "none")) for f in formats)
+    if not has_video:
+        # 🖼️ عکس تکی — مسیر قدیمیِ ارسال مستقیم (reply_photo) دست‌نخورده می‌مونه.
+        try:
+            await probe_msg.delete()
+        except Exception:
+            pass
+        return False
+
+    title = (probe_target.get("title") or probe_target.get("description") or "").strip()
+    if len(title) > 200:
+        title = title[:200]
+    thumb = probe_target.get("thumbnail")
+    if not thumb:
+        thumbs = probe_target.get("thumbnails") or []
+        if thumbs:
+            thumb = thumbs[-1].get("url")
+    duration = probe_target.get("duration")
+
+    session = {
+        "url": url, "platform": platform,
+        "uid": update.effective_user.id, "chat_id": update.effective_chat.id,
+    }
+    token = _store_media_choice_session(session)
+
+    header = "📸 Instagram" if platform == "instagram" else "🎵 TikTok"
+    lines = [f"🦇 {header}", ""]
+    if title:
+        lines.append(title)
+    if duration:
+        total = int(duration)
+        m, s = divmod(total, 60)
+        lines.append(f"⏱ مدت: {m:02d}:{s:02d}")
+    lines.append("")
+    lines.append("گزینه رو انتخاب کن:")
+    preview_text = "\n".join(lines)
+
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Video", callback_data=f"dlm:pick:{token}:video"),
+         InlineKeyboardButton("🎵 Audio", callback_data=f"dlm:pick:{token}:audio")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"dlm:cancel:{token}")],
+    ])
+
+    menu_shown = False
+    if thumb:
+        try:
+            await msg.reply_photo(photo=thumb, caption=preview_text, reply_markup=markup)
+            menu_shown = True
+            try:
+                await probe_msg.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            log.info(f"[dl:{job_id}] media-choice thumbnail send failed, falling back to text menu: {e}")
+
+    if not menu_shown:
+        try:
+            await probe_msg.edit_text(preview_text, reply_markup=markup)
+            menu_shown = True
+        except Exception as e:
+            log.info(f"[dl:{job_id}] media-choice menu render failed, falling back to default flow: {e}")
+            _MEDIA_CHOICE_SESSIONS.pop(token, None)
+            try:
+                await probe_msg.delete()
+            except Exception:
+                pass
+            return False
+
+    _log_job(job_id, platform=platform, url=url, stage="media-choice-menu-shown", thumbnail_shown=bool(thumb))
+    return True
+
+
+async def _send_media_choice_result(context, chat_id, send_path, kind, title, job_id, status,
+                                      v_duration=None, v_width=None, v_height=None, v_thumb=None, note=None):
+    """ارسال نهایی برای مسیر Video/Audio (اینستاگرام/تیک‌تاک) — دقیقاً همون
+    الگوی send+fallback-to-document که مسیر یوتیوب/تک‌فایل هم استفاده می‌کنه."""
+    real_size = os.path.getsize(send_path)
+    caption = f"{title}\n📦 حجم: {_human_size(real_size)}" if title else f"📦 حجم: {_human_size(real_size)}"
+    if note:
+        caption = f"{note}\n{caption}"
+    thumb_f = None
+    try:
+        if v_thumb and os.path.exists(v_thumb):
+            thumb_f = open(v_thumb, "rb")
+        with open(send_path, "rb") as f:
+            if kind == "audio":
+                await context.bot.send_audio(chat_id, f, caption=caption or None, title=title or None)
+            else:
+                await context.bot.send_video(
+                    chat_id, f, caption=caption or None, supports_streaming=True,
+                    duration=int(v_duration) if v_duration else None,
+                    width=v_width or None, height=v_height or None, thumbnail=thumb_f,
+                )
+        _log_job(job_id, stage="sent", kind=kind)
+    except Exception as e:
+        log.warning(f"[dl:{job_id}] media-choice send failed, fallback to document: {e}")
+        try:
+            if thumb_f:
+                try:
+                    thumb_f.close()
+                except Exception:
+                    pass
+                thumb_f = None
+            with open(send_path, "rb") as f:
+                await context.bot.send_document(chat_id, f, caption=caption or None)
+            _log_job(job_id, stage="sent-as-document")
+        except Exception:
+            log.exception(f"[dl:{job_id}] media-choice document fallback also failed")
+            try:
+                await status.edit_text(
+                    "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از محدودیت مجاز است یا تلگرام موقتاً پاسخ نداد."
+                )
+            except Exception:
+                pass
+            return
+    finally:
+        if thumb_f:
+            try:
+                thumb_f.close()
+            except Exception:
+                pass
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+
+async def _run_media_choice_download(context: ContextTypes.DEFAULT_TYPE, chat_id: int, uid: int,
+                                       url: str, platform: str, choice: str, job_id: str, status):
+    header = "📸 Instagram" if platform == "instagram" else "🎵 TikTok"
+    _log_job(job_id, platform=platform, url=url, user_id=uid, chat_id=chat_id, stage="start", choice=choice)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        progress_state = {"status": "downloading", "total": 0, "downloaded": 0}
+        stop_event = asyncio.Event()
+        ticker = asyncio.create_task(_progress_ticker(status, progress_state, header, stop_event))
+
+        try:
+            filepath, info = await _download_with_retry(url, tmpdir, platform, job_id, progress_state)
+        except asyncio.TimeoutError:
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
+            await status.edit_text("❌ دانلود انجام نشد\nعلت: ⏱ زمان دانلود تمام شد.")
+            return
+        except Exception as e:
+            log.exception(f"[dl:{job_id}] media-choice download failed url={url} choice={choice}")
+            stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
+            reason, _ = _classify_download_error(str(e))
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: {reason}")
+            return
+        finally:
+            stop_event.set()
+        try:
+            await ticker
+        except Exception:
+            pass
+
+        if not filepath or not os.path.exists(filepath):
+            log.error(f"[dl:{job_id}] media-choice output missing url={url} choice={choice}")
+            await status.edit_text("❌ دانلود انجام نشد\nعلت: پلتفرم فایل خروجی معتبری برنگردوند.")
+            return
+
+        title = (info.get("title") or "").strip() if isinstance(info, dict) else ""
+        ext = os.path.splitext(filepath)[1].lower()
+
+        if choice == "audio":
+            try:
+                audio_path = await asyncio.to_thread(_extract_audio_track, filepath, job_id)
+            except Exception as e:
+                log.warning(f"[dl:{job_id}] audio extraction crashed: {e}")
+                audio_path = None
+            if not audio_path:
+                # 🛡️ «هیچ فایلی نباید به‌خاطر یک روش ناموفق از بین بره» —
+                # استخراج صدا شکست خورد ولی خودِ ویدیو سالمه؛ به‌جای شکست کامل،
+                # همون ویدیو ارسال می‌شه.
+                log.warning(f"[dl:{job_id}] audio extraction failed, sending video instead")
+                send_path = filepath
+                v_duration = v_width = v_height = None
+                if ext in _VIDEO_EXTS:
+                    try:
+                        send_path, v_duration, v_width, v_height = await asyncio.to_thread(
+                            _fix_video_for_telegram, filepath, job_id
+                        )
+                    except Exception:
+                        send_path = filepath
+                ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+                if not ok:
+                    await status.edit_text(f"❌ استخراج صدا و ارسال ویدیو هم انجام نشد\nعلت: 🩹 فایل سالم نبود ({reason})")
+                    return
+                await _send_media_choice_result(
+                    context, chat_id, send_path, "video", title, job_id, status,
+                    v_duration=v_duration, v_width=v_width, v_height=v_height,
+                    note="⚠️ استخراج صدا امکان‌پذیر نبود؛ ویدیوی اصلی ارسال شد.",
+                )
+                return
+            ok, reason = await asyncio.to_thread(_validate_media_file, audio_path)
+            if not ok:
+                log.error(f"[dl:{job_id}] extracted audio failed validation: {reason}")
+                await status.edit_text(f"❌ استخراج صدا انجام نشد\nعلت: 🩹 فایل صدا سالم نبود ({reason})")
+                return
+            await _send_media_choice_result(context, chat_id, audio_path, "audio", title, job_id, status)
+            return
+
+        # choice == "video"
+        send_path = filepath
+        v_duration = v_width = v_height = None
+        if ext in _VIDEO_EXTS:
+            try:
+                send_path, v_duration, v_width, v_height = await asyncio.to_thread(
+                    _fix_video_for_telegram, filepath, job_id
+                )
+            except Exception as e:
+                log.warning(f"[dl:{job_id}] media-choice video fixup failed, sending raw file: {e}")
+                send_path = filepath
+        ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+        if not ok:
+            log.error(f"[dl:{job_id}] media-choice output failed validation: {reason}")
+            await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی سالم نبود ({reason})")
+            return
+        v_thumb = None
+        if ext in _VIDEO_EXTS:
+            try:
+                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration, job_id)
+            except Exception as e:
+                log.info(f"[dl:{job_id}] media-choice thumbnail step failed: {e}")
+        await _send_media_choice_result(
+            context, chat_id, send_path, "video", title, job_id, status,
+            v_duration=v_duration, v_width=v_width, v_height=v_height, v_thumb=v_thumb,
+        )
+
+
+async def downloader_media_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر دکمه‌های dlm:pick:<token>:<video|audio> و dlm:cancel:<token>.
+    منوی مادر معمولاً یه پیامِ عکسه (Preview)، پس اول edit_message_caption
+    امتحان می‌شه؛ اگه پیام متنی بود (وقتی thumbnail نبوده)، به edit_message_text
+    افت می‌کنه."""
+    q = update.callback_query
+    parts = q.data.split(":")
+    action = parts[1] if len(parts) > 1 else None
+    token = parts[2] if len(parts) > 2 else None
+
+    async def _edit_menu_message(text):
+        try:
+            await q.edit_message_caption(caption=text)
+        except Exception:
+            try:
+                await q.edit_message_text(text)
+            except Exception:
+                pass
+
+    if action == "cancel":
+        _MEDIA_CHOICE_SESSIONS.pop(token, None)
+        await _edit_menu_message("❌ لغو شد.")
+        await q.answer()
+        return
+
+    session = _MEDIA_CHOICE_SESSIONS.get(token)
+    if not session:
+        await _edit_menu_message("⚠️ این منو منقضی شده. دوباره لینک رو بفرست.")
+        await q.answer()
+        return
+
+    if session["uid"] != q.from_user.id:
+        await q.answer("این منو برای شما نیست.", show_alert=True)
+        return
+
+    choice = parts[3] if len(parts) > 3 else None
+    _MEDIA_CHOICE_SESSIONS.pop(token, None)  # یک‌بار‌مصرف
+    await q.answer()
+
+    label = "🎬 Video" if choice == "video" else "🎵 Audio"
+    try:
+        status = await context.bot.send_message(session["chat_id"], f"⏳ در حال دانلود ({label})...")
+    except Exception:
+        status = await q.message.reply_text(f"⏳ در حال دانلود ({label})...")
+
+    job_id = uuid.uuid4().hex[:10]
+    await _run_media_choice_download(
+        context, session["chat_id"], session["uid"], session["url"], session["platform"],
+        choice, job_id, status,
+    )
+
+
 def register_downloader(app):
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^\s*(دانلودر|دانلود)\s*$"), downloader_menu), group=6)
     app.add_handler(CallbackQueryHandler(downloader_pick_callback, pattern=r"^dl:pick:"), group=6)
     # 🦇 PHASE 2: دکمه‌های منوی انتخاب کیفیت یوتیوب (dlq:pick:.../dlq:cancel:...)
     app.add_handler(CallbackQueryHandler(downloader_quality_callback, pattern=r"^dlq:"), group=6)
+    # 🎬🎵 دکمه‌های منوی Video/Audio اینستاگرام و تیک‌تاک (dlm:pick:.../dlm:cancel:...)
+    app.add_handler(CallbackQueryHandler(downloader_media_choice_callback, pattern=r"^dlm:"), group=6)
     # این هندلر با هر پیام متنی یا هر پیام دارای caption (عکس/ویدیو با کپشن
     # لینک‌دار) چک می‌کنه که آیا لینک پشتیبانی‌شده‌ای توشه؛ وگرنه هیچ کاری نمی‌کنه
     # و بی‌صدا به بقیه‌ی هندلرها سپرده می‌شه (بدون هیچ اثری روی پیام‌های غیرمرتبط).
