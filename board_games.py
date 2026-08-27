@@ -99,21 +99,6 @@ def _join_markup(prefix: str, gid: str, count: int = 4):
 
 # ============================== CHESS ==============================
 
-# مهره‌ها قبلاً فقط با گلیف خام یونیکد شطرنج (♔ سفید / ♚ سیاه) نشون داده می‌شدن
-# که رو تم تیره‌ی تلگرام تقریباً هم‌رنگ به‌نظر می‌رسیدن و تشخیص سفید از سیاه سخت
-# بود. الان یه دایره‌ی رنگی (⚪/⚫) جلوی هر مهره اضافه می‌شه که رنگ تیم رو با
-# چشم غیرمسلح هم مشخص می‌کنه، و خونه‌های خالی به‌جای نقطه‌ی ساده، شطرنجی
-# روشن/تیره (▪️/▫️) می‌شن تا کل صفحه حس یه تخته‌ی واقعی رو بده.
-
-def _chess_piece_label(piece):
-    dot = "⚪" if piece.color else "⚫"
-    return f"{dot}{piece.unicode_symbol()}"
-
-
-def _chess_empty_label(file, rank):
-    return "▪️" if (file + rank) % 2 == 0 else "▫️"
-
-
 def _chess_board_text(board, selected=None):
     rows = ["♟️ شطرنج گاتهام", ""]
     for rank in range(7, -1, -1):
@@ -121,7 +106,7 @@ def _chess_board_text(board, selected=None):
         for file in range(8):
             sq = chess.square(file, rank)
             piece = board.piece_at(sq)
-            symbol = _chess_piece_label(piece) if piece else _chess_empty_label(file, rank)
+            symbol = piece.unicode_symbol() if piece else "·"
             if selected == sq:
                 symbol = f"【{symbol}】"
             cells.append(symbol)
@@ -140,7 +125,7 @@ def _chess_markup(gid, board, selected=None):
         for file in range(8):
             sq = chess.square(file, rank)
             piece = board.piece_at(sq)
-            label = _chess_piece_label(piece) if piece else _chess_empty_label(file, rank)
+            label = piece.unicode_symbol() if piece else "·"
             if selected == sq:
                 label = "🎯" + label
             row.append(InlineKeyboardButton(label, callback_data=f"chess:sq:{gid}:{sq}"))
