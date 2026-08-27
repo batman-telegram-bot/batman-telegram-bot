@@ -21,11 +21,17 @@ import tempfile
 import subprocess
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 log = logging.getLogger(__name__)
 
 TRIGGER_RE = filters.Regex(r"(?i)^\s*(متن کن|رونویسی|تبدیل به متن|رونویسی کن)\s*$") & filters.REPLY
+
+# 🐛 رفع باگ تکراری (BadRequest: File is too big): همون محدودیت ۲۰ مگابایتیِ
+# get_file() که تو media_recognition.py هم رفع شد — قبلاً اینجا هم بدون
+# try/except بود.
+MAX_TG_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
 try:
     import speech_recognition as sr
@@ -80,8 +86,25 @@ async def voice_to_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    size = getattr(voice, "file_size", None)
+    if size and size > MAX_TG_DOWNLOAD_BYTES:
+        await update.message.reply_text(
+            f"⚠️ این فایل حجمش بیشتر از {MAX_TG_DOWNLOAD_BYTES // (1024*1024)} مگابایته — "
+            "محدودیت خودِ تلگرامه برای بات‌ها، نمی‌تونم دانلودش کنم."
+        )
+        return
+
     status = await update.message.reply_text("⏳ در حال رونویسی...")
-    tg_file = await voice.get_file()
+    try:
+        tg_file = await voice.get_file()
+    except BadRequest as e:
+        if "file is too big" in str(e).lower():
+            await status.edit_text(
+                f"⚠️ این فایل حجمش بیشتر از {MAX_TG_DOWNLOAD_BYTES // (1024*1024)} مگابایته — "
+                "محدودیت خودِ تلگرامه برای بات‌ها، نمی‌تونم دانلودش کنم."
+            )
+            return
+        raise
 
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path = os.path.join(tmpdir, "voice.ogg")

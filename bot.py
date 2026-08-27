@@ -4745,10 +4745,28 @@ async def _permission_gate_message(update: Update, context: ContextTypes.DEFAULT
     - پیوی: عضویت کانال فقط اگه REQUIRED_CHANNEL روشن باشه چک می‌شه؛ شماره
       تلفن، صرف‌نظر از REQUIRED_CHANNEL، همیشه و بدون استثنا اجباریه.
     """
-    msg = update.message
+    # 🐛 قبلاً اینجا update.message (فقط پیام معمولی) خونده می‌شد؛ برای
+    # پست خالص یه کانال (channel_post، نه پیام گروه)، update.message همیشه
+    # None ئه ولی update.effective_message همون channel_post رو برمی‌گردونه.
+    # با effective_message، هم پست خالص کانال، هم پست خودکارِ کانال
+    # لینک‌شده تو گروه (sender_chat) پوشش داده می‌شه.
+    msg = update.effective_message
     user = update.effective_user
     if not msg or not user:
-        return  # آپدیت‌های بی‌کاربر (مثلاً چنل پست) دست‌نخورده رد می‌شن
+        # 🐛 رفع باگ تکراری تو لاگ (AttributeError: 'NoneType' object has no
+        # attribute 'id'): پیام‌هایی که کاربر واقعی ندارن — پست خالص یه
+        # کانال، پست خودکارِ یه کانال لینک‌شده تو یه گروه، یا پیامی که ادمین
+        # «به نام کانال/گروه» فرستاده (sender_chat پر، from_user خالی) —
+        # قبلاً این تابع فقط از خودش return می‌کرد، ولی چون
+        # ApplicationHandlerStop نمی‌زد، همون Update بدون کاربر به همه‌ی
+        # هندلرهای دیگه (بازی‌ها، دانلودر، ابزارها، ...) هم می‌رسید؛ اونا
+        # همه‌جا فرض می‌کنن update.effective_user همیشه هست، پس با
+        # AttributeError می‌ترکیدن. حالا اگه پیام هست ولی کاربر نیست،
+        # همین‌جا و بی‌صدا کاملاً متوقف می‌شه (این‌جور پیام‌ها اصلاً به
+        # user/امتیاز/بازی وصل نیستن که چیزی از دست بره).
+        if msg and not user:
+            raise ApplicationHandlerStop
+        return  # آپدیت‌های کاملاً بی‌پیام دست‌نخورده رد می‌شن
 
     # پیام‌های سرویسی تلگرام (عضو جدید، خروج عضو، پین و ...) بخشی از سیستم‌های
     # دیگه‌ان (مثلاً کپچای ورود اعضای جدید) و نباید با گیت شماره قاطی بشن.
@@ -4877,7 +4895,19 @@ def main():
 
     _init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # ⏱️ رفع باگ TimedOut مکرر تو لاگ: Timeoutهای پیش‌فرض کتابخانه (۵ ثانیه)
+    # رو شبکه‌ی Railway/تلگرام گاهی کافی نیست، خصوصاً وقتی چند Update پشت‌سرهم
+    # میاد. اینجا فقط Timeout درخواست‌های عادی API (نه خودِ getUpdates که
+    # long-poll جداگونه‌ای داره) رو بالا می‌بریم؛ هیچ رفتار دیگه‌ای عوض نمی‌شه.
+    from telegram.request import HTTPXRequest
+    _api_request = HTTPXRequest(connect_timeout=15.0, read_timeout=20.0, write_timeout=20.0, pool_timeout=10.0)
+    app = ApplicationBuilder().token(BOT_TOKEN).request(_api_request).build()
+
+    # 🛡️ لایه‌ی محافظ روی send_message/edit_message_text — رفع باگ‌های تکراری
+    # تو لاگ (Message text is empty / Message is not modified / Can't parse
+    # entities / RetryAfter / TimedOut) بدون دست‌زدن به منطق هیچ ماژول دیگه‌ای.
+    from tg_resilience import patch_bot_resilience
+    patch_bot_resilience(app)
 
     # قبلاً هیچ error handler سراسری‌ای ثبت نشده بود، یعنی هر خطای پیش‌بینی‌نشده
     # (تو دیتابیس، پارس مارک‌داون، هرچی) کاملاً بی‌صدا گم می‌شد — نه به کاربر
