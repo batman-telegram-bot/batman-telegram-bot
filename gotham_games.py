@@ -31,6 +31,7 @@ import random
 import time
 import uuid
 import logging
+import os
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
@@ -46,6 +47,23 @@ def _name(user) -> str:
     return user.first_name or user.username or "بازیکن"
 
 
+# 👑 OWNER_ID — همون منطق bot.py (اول از Environment Variable، بعد Fallback)
+# تا با چیزی که تو Railway ست شده هماهنگ باشه. برای Owner هیچ قفلی (مثل
+# «همزمان فقط یه بازی فعال») اعمال نمی‌شه.
+_owner_id_env = os.getenv("OWNER_ID", "").strip()
+if _owner_id_env:
+    try:
+        OWNER_ID = int(_owner_id_env)
+    except ValueError:
+        OWNER_ID = 5527941204
+else:
+    OWNER_ID = 5527941204
+
+
+def _is_owner(uid: int) -> bool:
+    return uid == OWNER_ID
+
+
 # =========================================================
 #  ثابت‌ها
 # =========================================================
@@ -55,7 +73,7 @@ MAX_PLAYERS = 4
 LOBBY_SECONDS = 90
 TURN_SECONDS = 30
 ROUNDS_PER_QUICK_GAME = 3
-RC_STAGES = 5
+RC_STAGES = 2
 
 # کلید -> (برچسب، ایموجی واقعیِ Telegram Dice)
 QUICK_GAMES = {
@@ -200,16 +218,18 @@ def _lobby_text(lobby, remaining=LOBBY_SECONDS):
     return "\n".join(lines)
 
 
-def _lobby_markup(token):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 پیوستن", callback_data=f"gg:join:{token}")],
-        [InlineKeyboardButton("❌ لغو گیم", callback_data=f"gg:cancel:{token}")],
-    ])
+def _lobby_markup(lobby):
+    token = lobby["token"]
+    rows = [[InlineKeyboardButton("🟢 پیوستن", callback_data=f"gg:join:{token}")]]
+    if len(lobby["players"]) >= MIN_PLAYERS:
+        rows.append([InlineKeyboardButton("🔥 شروع بازی (سازنده)", callback_data=f"gg:start:{token}")])
+    rows.append([InlineKeyboardButton("❌ لغو گیم", callback_data=f"gg:cancel:{token}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _open_lobby(context, query, creator, kind, game_key=None):
     uid = creator.id
-    if user_has_active_session(uid):
+    if user_has_active_session(uid) and not _is_owner(uid):
         await query.answer("⚠️ تو همین الان تو یه گیم/لابیِ دیگه‌ای، اول اونو تموم کن.", show_alert=True)
         return None
 
@@ -231,7 +251,7 @@ async def _open_lobby(context, query, creator, kind, game_key=None):
     ACTIVE_USERS.add(uid)
     LOBBIES[token] = lobby
 
-    msg = await query.edit_message_text(_lobby_text(lobby), reply_markup=_lobby_markup(token))
+    msg = await query.edit_message_text(_lobby_text(lobby), reply_markup=_lobby_markup(lobby))
     lobby["message_id"] = msg.message_id
 
     # تایمر ۹۰ ثانیه‌ای از همین لحظه‌ی ساخت لابی شروع می‌شه (نه از Join دوم)
@@ -259,7 +279,7 @@ async def _lobby_tick(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.edit_message_text(
             chat_id=lobby["chat_id"], message_id=lobby["message_id"],
             text=_lobby_text(lobby, remaining=data["remaining"]),
-            reply_markup=_lobby_markup(lobby["token"]),
+            reply_markup=_lobby_markup(lobby),
         )
     except Exception:
         pass
@@ -315,7 +335,7 @@ async def gg_join(update, context, token):
     if len(lobby["players"]) >= MAX_PLAYERS:
         await q.answer("⛔ لابی پره (۴ نفر کامله).", show_alert=True)
         return
-    if user_has_active_session(uid):
+    if user_has_active_session(uid) and not _is_owner(uid):
         await q.answer("⚠️ تو همین الان تو یه گیم/لابیِ دیگه‌ای، اول اونو تموم کن.", show_alert=True)
         return
 
@@ -331,7 +351,7 @@ async def gg_join(update, context, token):
         return
 
     try:
-        await q.edit_message_text(_lobby_text(lobby), reply_markup=_lobby_markup(token))
+        await q.edit_message_text(_lobby_text(lobby), reply_markup=_lobby_markup(lobby))
     except Exception:
         pass
     await q.answer("پیوستی ✅")
@@ -358,14 +378,40 @@ async def gg_cancel(update, context, token):
     await q.answer("لغو شد.")
 
 
+async def gg_start(update, context, token):
+    """دکمه‌ی «🔥 شروع بازی» — فقط سازنده، فقط وقتی حداقل ۲ نفر جمع شدن؛
+    برای شروع زودتر از تایمر ۹۰ ثانیه‌ای یا تکمیل ۴ نفر."""
+    q = update.callback_query
+    lobby = LOBBIES.get(token)
+    if not lobby or lobby["cancelled"] or lobby["started"]:
+        await q.answer("این لابی دیگه فعال نیست.", show_alert=True)
+        return
+    if q.from_user.id != lobby["creator_id"]:
+        await q.answer("❌ فقط سازنده گیم می‌تواند بازی رو شروع کنه.", show_alert=True)
+        return
+    if len(lobby["players"]) < MIN_PLAYERS:
+        await q.answer(f"⛔ حداقل {MIN_PLAYERS} نفر لازمه.", show_alert=True)
+        return
+    await q.answer("🔥 بازی شروع شد!")
+    await _launch_lobby(context, lobby)
+
+
 # =========================================================
-#  🎲 بازی سریع — Turn Engine
+#  🎲 بازی سریع — Turn Engine (برد/باخت هر دور، نه جمع امتیاز)
 # =========================================================
 
 def _round_points(game_key, value):
     if game_key == "slot":
         return 6 if value in SLOT_JACKPOT_VALUES else 1
     return value
+
+
+def _history_lines(game):
+    lines = ["📊 روند:"]
+    for uid in game["order"]:
+        marks = "".join(game["history"][uid]) or "—"
+        lines.append(f"👤 {game['names'][uid]}: {marks}")
+    return lines
 
 
 def _quick_turn_text(game):
@@ -376,8 +422,10 @@ def _quick_turn_text(game):
         "",
         f"دور {game['round']}/{ROUNDS_PER_QUICK_GAME}",
         "",
-        f"🎲 نوبت {game['names'][uid]} است.",
     ]
+    lines.extend(_history_lines(game))
+    lines.append("")
+    lines.append(f"🎲 نوبت {game['names'][uid]} است.")
     return "\n".join(lines)
 
 
@@ -395,7 +443,9 @@ async def _start_quick_game(context, lobby):
         "names": dict(lobby["names"]),
         "round": 1,
         "turn_idx": 0,
-        "scores": {uid: 0 for uid in lobby["players"]},
+        "round_values": {},          # uid -> points، فقط برای دور جاری
+        "history": {uid: [] for uid in lobby["players"]},   # uid -> ["🟢","🔴",...]
+        "wins": {uid: 0 for uid in lobby["players"]},        # تعداد دورهایی که برده
         "message_id": None,
         "turn_job": None,
         "finished": False,
@@ -410,9 +460,28 @@ async def _start_quick_game(context, lobby):
     )
 
 
+def _finalize_round(game):
+    """بعد از این‌که همه تو این دور پرتاب کردن: بیشترین امتیاز = 🟢 (برنده‌ی دور)، بقیه 🔴."""
+    values = game["round_values"]
+    if not values:
+        return
+    top = max(values.values())
+    for uid in game["order"]:
+        v = values.get(uid)
+        if v is None:
+            continue  # کسی که این دور Timeout شد و اصلاً پرتاب نکرد، دور رو نمی‌بره و نمی‌بازه
+        if v == top:
+            game["history"][uid].append("🟢")
+            game["wins"][uid] += 1
+        else:
+            game["history"][uid].append("🔴")
+    game["round_values"] = {}
+
+
 async def _advance_quick_turn(context, game):
     game["turn_idx"] += 1
     if game["turn_idx"] >= len(game["order"]):
+        _finalize_round(game)
         game["turn_idx"] = 0
         game["round"] += 1
     if game["round"] > ROUNDS_PER_QUICK_GAME:
@@ -452,9 +521,9 @@ async def gg_roll(update, context, gid):
     dice_msg = await context.bot.send_dice(chat_id=game["chat_id"], emoji=emoji)
     value = dice_msg.dice.value
     points = _round_points(game["game_key"], value)
-    game["scores"][uid] += points
+    game["round_values"][uid] = points
 
-    await q.answer(f"🎲 نتیجه: {value} (+{points} امتیاز)")
+    await q.answer(f"🎲 نتیجه: {value}")
     await _advance_quick_turn(context, game)
 
 
@@ -485,13 +554,13 @@ def _rank_scores(scores: dict, names: dict):
     return result
 
 
-def _result_text(title, ranked):
+def _result_text(title, ranked, unit="امتیاز"):
     lines = [f"🏆 ═══ {title} ═══", ""]
     top_score = ranked[0][3]
     winners = [r for r in ranked if r[3] == top_score]
     for rank, uid, name, score in ranked:
         medal = MEDALS[rank - 1] if rank - 1 < len(MEDALS) else f"{rank}."
-        lines.append(f"{medal} {name} — {score} امتیاز")
+        lines.append(f"{medal} {name} — {score} {unit}")
     lines.append("")
     if len(winners) > 1:
         lines.append("🤝 بازی مساوی شد!")
@@ -502,7 +571,6 @@ def _result_text(title, ranked):
 
 
 def _post_game_markup(gid, order, names, is_rc):
-    prefix = "rc" if is_rc else "gg"
     rows = [[InlineKeyboardButton(f"🎟️ استیکر {names[uid]}", callback_data=f"gg:card:{gid}:{uid}")]
             for uid in order]
     rows.append([
@@ -516,8 +584,9 @@ def _post_game_markup(gid, order, names, is_rc):
 async def _finish_quick_game(context, game):
     game["finished"] = True
     _release_players(game["order"])
-    ranked = _rank_scores(game["scores"], game["names"])
-    text, winners = _result_text("نتیجه گاتهام", ranked)
+    ranked = _rank_scores(game["wins"], game["names"])
+    text, winners = _result_text("نتیجه گاتهام", ranked, unit="برد")
+    text = "\n".join(_history_lines(game)) + "\n\n" + text
     game["winners"] = winners
     game["result_text"] = text
     try:
@@ -866,6 +935,9 @@ async def gg_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if action == "cancel":
         await gg_cancel(update, context, parts[2])
+        return
+    if action == "start":
+        await gg_start(update, context, parts[2])
         return
     if action == "roll":
         await gg_roll(update, context, parts[2])
