@@ -78,6 +78,8 @@ from security_tools import register_security, build_security_text_and_kb
 from tools_and_fun import register_tools_and_fun, TOOLS_TEXT, FUN_TEXT, tools_menu_keyboard, fun_menu_keyboard
 from compress_tools import register_compress
 from voice_to_text import register_voice_to_text
+from post_saz import register_post_saz, postsaz_intercept
+from safe_telegram import install_safe_telegram_patches
 from midnight_announcement import _get_all_chat_ids
 from group_admin_extra import register_group_admin_extra
 from new_features_extra import register_new_features
@@ -4316,6 +4318,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
+    # 🎬 اگه کاربر تو سشن «پست‌ساز گاتهام» فعاله، این پیام مالِ همون ابزاره
+    # (مثلاً ویرایش متن/کپشن) — نباید AI/بازی‌ها روش واکنش نشون بدن.
+    if await postsaz_intercept(update, context):
+        return
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
@@ -4553,6 +4560,10 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.animation:
         return
 
+    # 🎬 اگه کاربر تو سشن «پست‌ساز گاتهام» فعاله، این گیف مالِ همون ابزاره.
+    if await postsaz_intercept(update, context):
+        return
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
@@ -4582,6 +4593,11 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not (update.message.photo or update.message.sticker):
+        return
+
+    # 🎬 اگه کاربر تو سشن «پست‌ساز گاتهام» فعاله، این عکس مالِ همون ابزاره
+    # (استیکر رو دست نمی‌زنیم چون پست‌ساز فقط عکس/ویدیو/گیف/صدا/متن می‌فهمه).
+    if update.message.photo and await postsaz_intercept(update, context):
         return
 
     chat_id = update.effective_chat.id
@@ -4875,6 +4891,11 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN تنظیم نشده! برو تو Railway Variables اضافه‌اش کن.")
 
+    # 🩹 رفع مرکزیِ باگ‌های تکراریِ لاگ (Message text is empty / Message is not
+    # modified / Can't parse entities / RetryAfter / TimedOut) — باید قبل از
+    # هر send/edit دیگه‌ای نصب بشه.
+    install_safe_telegram_patches()
+
     _init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -4995,6 +5016,7 @@ def main():
 
     # --- تبدیل و فشرده‌سازی فایل (ریپلای + «فشرده») ---
     register_compress(app)
+    register_post_saz(app, {"db_path": DB_PATH})  # 🎬 پست‌ساز گاتهام — «🛠 ابزارها»
 
     # --- تبدیل صدا به متن ---
     register_voice_to_text(app)

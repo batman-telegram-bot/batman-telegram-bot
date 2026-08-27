@@ -339,7 +339,14 @@ async def summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def private_media_offer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """تو چت خصوصی، رو هر عکس/ویدیو/صدایی که مستقیم فرستاده بشه، دکمه‌ی تشخیص
-    زیرش میاد — کاربر لازم نیست هیچی تایپ کنه."""
+    زیرش میاد — کاربر لازم نیست هیچی تایپ کنه.
+
+    اگه کاربر تو سشن «🎬 پست‌ساز گاتهام» فعاله، این پیشنهاد نباید هم‌زمان
+    نمایش داده بشه (پست‌ساز خودش داره همین فایل رو تو یه هندلر جدا پردازش
+    می‌کنه؛ اینجا فقط چک سبک/بدون‌عارضه، نه صدا زدن مجدد پردازش)."""
+    from post_saz import is_postsaz_active
+    if is_postsaz_active(context):
+        return
     msg = update.effective_message
     rows = []
     if msg.photo or msg.video:

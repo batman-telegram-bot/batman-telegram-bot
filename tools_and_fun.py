@@ -42,7 +42,8 @@ TOOLS_TEXT = (
     "📱 کیوآر: بنویس «کیوآر <متن یا لینک>» تا عکس بارکد بسازم.\n"
     "🔑 پسورد قوی: بنویس «پسورد» یا «رمز عبور» تا یه رمز تصادفی امن بسازم.\n"
     "📐 تبدیل واحد: بنویس «تبدیل <عدد> <واحد۱> به <واحد۲>» (وزن/طول/دما/ارز).\n"
-    "🧮 ماشین‌حساب: بنویس «حساب <عبارت>» (مثل «حساب (۱۲+۳)*۲» یا «حساب sqrt(81)»)."
+    "🧮 ماشین‌حساب: بنویس «حساب <عبارت>» (مثل «حساب (۱۲+۳)*۲» یا «حساب sqrt(81)»).\n"
+    "🎬 پست‌ساز گاتهام: ویرایش/فشرده‌سازی/لوگو/کپشن برای ویدیو، عکس و گیف — از دکمه‌ی زیر."
 )
 
 PERSIAN_DIGITS_TRANS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
@@ -255,6 +256,7 @@ def tools_menu_keyboard():
         [InlineKeyboardButton("🔑 پسورد تصادفی", callback_data="tool:password")],
         [InlineKeyboardButton("📐 تبدیل واحد", callback_data="tool:howto:convert"),
          InlineKeyboardButton("🧮 ماشین‌حساب", callback_data="tool:howto:calc")],
+        [InlineKeyboardButton("🎬 پست‌ساز گاتهام", callback_data="postsaz:open")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="panel:main")],
     ])
 
