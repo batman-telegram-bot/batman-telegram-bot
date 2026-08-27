@@ -102,7 +102,6 @@ _EXTRA_GAME_TRIGGERS_RE = re.compile(
     r"شطرنج|بازی شطرنج|"
     r"منچ|بازی منچ|"
     r"مار و پله|ماروپله|بازی مار و پله|"
-    r"گو|بازی گو|"
     r"یونو|بازی یونو|"
     r"قلمرو|بازی قلمرو|"
     r"بیلیارد|بازی بیلیارد|"
@@ -1394,7 +1393,7 @@ def build_characters_keyboard(player):
 
 PACK2_WORDS = ["2048", "چراغ‌ها", "حافظه", "نبرد دریایی", "گنج پنهان"]
 PACK4_WORDS = ["مین یاب", "نقطه بازی", "تیکو", "جمشید", "گیر بازار"]
-BOARD_WORDS = ["شطرنج", "منچ", "مار و پله", "گو", "یونو", "قلمرو", "بیلیارد", "مسابقه ماشین"]
+BOARD_WORDS = ["شطرنج", "منچ", "مار و پله", "یونو", "قلمرو", "بیلیارد", "مسابقه ماشین"]
 DOWNLOADER_WORDS = ["دانلودر"]
 PACK3_WORDS = ["لیست پرحرفا", "عضویت پسرا", "عضویت دخترا", "لیست پسرا", "لیست دخترا"]
 
@@ -1409,9 +1408,13 @@ def build_words_panel_text() -> str:
         "",
         "🎮 *بازی‌ها (کافیه اسمشو تو چت بنویسی):*",
         "، ".join(game_words),
+        "«سنگ کاغذ قیچی گروهی» / «پی وی پی سنگ کاغذ قیچی» — RPS چندنفره با جوین دکمه‌ای، ۶۰ ثانیه تایمر",
+        "@نام‌ربات تو هر چتی — دوز اینلاین (سایز دلخواه، بدون نیاز به ادد کردن ربات)",
         "",
         "📥 *دانلودر:*",
         "«دانلودر» — انتخاب پلتفرم (اینستاگرام/یوتیوب/تیک‌تاک/ایکس/پینترست/ساندکلاود) و بعد فرستادن لینک",
+        "یوتیوب: پیش‌نمایش تامبنیل + انتخاب کیفیت (360p/480p/720p/1080p) یا 🎵 Audio",
+        "اینستاگرام Video/Reel و تیک‌تاک: انتخاب 🎬 Video یا 🎵 Audio قبل از دانلود",
         "",
         "🔐 *امنیت (فقط ادمین، از پنل «امکانات جدید ← امنیت»):*",
         "آنتی‌لینک — حذف خودکار لینک/آیدی از غیرادمین‌ها",
@@ -1422,6 +1425,8 @@ def build_words_panel_text() -> str:
         "«کیوآر <متن/لینک>» — ساخت بارکد QR",
         "«پسورد» / «رمز عبور» — ساخت رمز تصادفی امن",
         "ریپلای روی عکس/ویدیو/صدا + «فشرده» — فشرده‌سازی فایل",
+        "«تبدیل <عدد> <واحد۱> به <واحد۲>» — تبدیل واحد (وزن/طول/دما/ارز)",
+        "«حساب <عبارت>» — ماشین‌حساب (مثل «حساب (۱۲+۳)*۲» یا «حساب sqrt(81)»)",
         "",
         "🎉 *سرگرمی:*",
         "«جوک» — یه جوک تصادفی",
@@ -1494,7 +1499,7 @@ def build_words_panel_text() -> str:
     return "\n".join(lines)
 
 
-def build_panel_main_keyboard():
+def build_panel_main_keyboard(is_owner: bool = False):
     """🦇 GOTHAM CONTROL CENTER — چیدمان اصلی طبق مشخصات: ۱۰ دکمه‌ی سطح اول
     (بازی‌ها، شخصیت‌ها، لیست‌ها، دانلودر، رفع باگ، مدیریت گروه، ابزار، سرگرمی،
     امنیت، درباره) + یه ردیف اضافه برای موارد متفرقه‌ای که تو مشخصات ۱۰تایی
@@ -1502,7 +1507,10 @@ def build_panel_main_keyboard():
     امنیت/ابزار/سرگرمی از قبل با callback_data=panel:security/tools/fun تو
     button_handler پیاده‌سازی شده بودن، فقط یه لایه پایین‌تر (زیر «امکانات
     جدید») بودن — الان به سطح اول Control Center منتقل شدن (Integration، نه
-    بازسازی)."""
+    بازسازی).
+
+    🔒 دکمه‌ی «📜 همه کلمات ربات» طبق درخواست فقط برای Owner نمایش داده می‌شه؛
+    is_owner=False (پیش‌فرض) یعنی این دکمه اصلاً تو کیبورد نیست."""
     rows = [
         [InlineKeyboardButton("🎮 بازی‌ها", callback_data="panel:games"),
          InlineKeyboardButton("🎭 شخصیت‌ها", callback_data="panel:persona")],
@@ -1514,9 +1522,11 @@ def build_panel_main_keyboard():
          InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun")],
         [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
-        [InlineKeyboardButton("🧩 امکانات دیگر", callback_data="panel:new"),
-         InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words")],
     ]
+    last_row = [InlineKeyboardButton("🧩 امکانات دیگر", callback_data="panel:new")]
+    if is_owner:
+        last_row.append(InlineKeyboardButton("📜 همه کلمات ربات", callback_data="panel:words"))
+    rows.append(last_row)
     return InlineKeyboardMarkup(rows)
 
 
@@ -2074,26 +2084,32 @@ PHONE_VERIFY_PROMPT_TEXT = (
 
 
 async def _send_main_start_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """متن خوش‌آمدگویی و معرفی اصلی — فقط بعد از تایید شماره نمایش داده می‌شه."""
+    """متن خوش‌آمدگویی و معرفی اصلی — فقط بعد از تایید شماره نمایش داده می‌شه.
+
+    🦇 بازنویسیِ کامل طبق درخواست «به خودش بیاد و کل قابلیت‌هاشو بگه»: قبلاً
+    فقط ۷ خط قدیمی (شخصیت/جنگ/آیتم/سطح/ماموریت/رتبه) بود که خیلی از چیزایی
+    که این ماه‌ها ساخته شده (دانلودر، مدیریت گروه، ابزارها، امنیت، لیست‌های
+    گاتهام، امکانات دیگه) رو اصلاً نشون نمی‌داد. متن جدید دقیقاً روی همون
+    دسته‌بندیِ واقعیِ build_panel_main_keyboard() (که همین الان تو ربات فعاله)
+    سوار شده، پس هیچ قابلیتی که واقعاً وجود نداره ادعا نشده."""
     text = (
-        "🦇 *به دنیای بتمن خوش اومدی*\n\n"
-        "یه رفیقِ تاریکِ گاتهام برای گروهت 🌃\n\n"
-        "⚡️ جواب‌دهی سریع و شخصیت‌های متنوع\n"
-        "🎭 ۱۹ شخصیت قابل انتخاب (بعضیاشون قفلن!)\n"
-        "⚔️ جنگ‌های ناگهانی با شرور‌های گاتهام\n"
-        "🎒 آیتم، کوله‌پشتی و فروشگاه\n"
-        "🎖 سیستم سطح و مقام\n"
-        "📅 ماموریت روزانه با جایزه\n"
-        "🏆 رتبه‌بندی هر گروه\n\n"
-        f"تو گروه فقط کافیه بنویسی «{KEYWORD_POINT}» تا پوینت بگیری، "
-        "یا منشنم کن تا باهات حرف بزنم!\n\n"
-        "/profile برای دیدن وضعیتت\n"
-        "/characters برای عوض کردن شخصیت\n"
-        "/shop فروشگاه آیتم\n"
-        "/bag کوله‌پشتی\n"
-        "/missions ماموریت روزانه\n"
-        "/top رتبه‌بندی گروه\n"
-        "/quote یه جمله بتمنی"
+        "🦇 *GOTHAM AWAKENS* 🦇\n\n"
+        "شهر یه محافظ تازه پیدا کرده. من فقط یه ربات نیستم؛\n"
+        "*نگهبانِ سایه‌های این گروهم* 🌃\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "🎭 *۱۹ شخصیت* قابل انتخاب، هرکدوم یه لحن و رفتار جدا\n"
+        "🎮 *ده‌ها بازی* گروهی و دونفره — از دوز و مار‌وپله تا UNO، بیلیارد، "
+        "قلمرو و سنگ‌کاغذقیچیِ زنده\n"
+        "⚔️ سیستم سطح، مقام، آیتم و فروشگاه گاتهام\n"
+        "📅 ماموریت روزانه، معمای ریدلر، و کد امنیتیِ هر روز\n"
+        "🏆 رتبه‌بندی گروه + «شوالیه‌ی ماه»\n"
+        "📥 *دانلودر گاتهام* — یوتیوب، اینستاگرام (پست/ریل/کروسل)، "
+        "تیک‌تاک و پینترست، با انتخاب کیفیت و صدا\n"
+        "🛡 مدیریت گروه با زبان طبیعی (اخطار/بن/سکوت) + گزارش هفتگی\n"
+        "🎂 یادآور تولد با تقویم شمسیِ دکمه‌ای\n"
+        "🧰 ابزار: تبدیل واحد، ماشین‌حساب، مبدل فایل و بیشتر\n"
+        "🎉 سرگرمی: فال، اعلام نیمه‌شبِ گاتهام، و کلی امکانات دیگه\n"
+        "━━━━━━━━━━━━━━"
     )
     await update.effective_message.reply_text(
         text, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
@@ -2216,7 +2232,10 @@ async def characters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(), parse_mode="Markdown")
+    is_owner = update.effective_user.id == OWNER_ID
+    await update.message.reply_text(
+        PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(is_owner), parse_mode="Markdown"
+    )
 
 
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3070,7 +3089,7 @@ async def intro_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛡 مدیریت گروه کامل: بن/کیک/میوت/اخطار با انقضا، کپچای عضو جدید\n"
         "🌑 پیام نیمه‌شب خودکار، معمای روزانه، کد امنیتی گروه\n"
         "💞 ازدواج، هدیه، نظرسنجی، ریپورت\n\n"
-        "برای دیدن همه‌ی کلمات و دستورها بنویس «کلمات ربات»."
+        "برای دیدن امکانات دکمه‌به‌دکمه بنویس «تنظیمات» یا «پنل»."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -3477,7 +3496,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "panel:main":
-        await query.edit_message_text(PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(), parse_mode="Markdown")
+        is_owner = query.from_user.id == OWNER_ID
+        await query.edit_message_text(
+            PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(is_owner), parse_mode="Markdown"
+        )
         return
 
     if data == "panel:persona":
@@ -3669,17 +3691,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(FUN_TEXT, reply_markup=fun_menu_keyboard(), parse_mode="Markdown")
         return
 
-    if data in ("panel:about", "panel:words"):
-        section = data.split(":", 1)[1]
+    if data == "panel:words":
+        if query.from_user.id != OWNER_ID:
+            await query.answer("⛔ این بخش فقط برای مالک ربات در دسترسه.", show_alert=True)
+            return
         try:
             await query.edit_message_text(
-                PANEL_TEXTS[section], reply_markup=build_back_keyboard(), parse_mode="Markdown"
+                PANEL_TEXTS["words"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
             )
         except Exception:
-            # اگه به هر دلیلی (مثلاً یه کاراکتر خاص تو متن) پارس مارک‌داون خطا بده،
-            # به‌جای اینکه دکمه بی‌صدا هیچ‌کاری نکنه، حداقل متن ساده رو نشون بده.
             await query.edit_message_text(
-                PANEL_TEXTS[section].replace("*", ""), reply_markup=build_back_keyboard()
+                PANEL_TEXTS["words"].replace("*", ""), reply_markup=build_back_keyboard()
+            )
+        return
+
+    if data == "panel:about":
+        try:
+            await query.edit_message_text(
+                PANEL_TEXTS["about"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
+            )
+        except Exception:
+            await query.edit_message_text(
+                PANEL_TEXTS["about"].replace("*", ""), reply_markup=build_back_keyboard()
             )
         return
 
@@ -4340,13 +4373,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- کلیدواژه "تنظیمات"/"پنل" برای باز کردن پنل تنظیمات، حتی بدون منشن ---
     if stripped in ("تنظیمات", "پنل"):
         await update.message.reply_text(
-            PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(), parse_mode="Markdown"
+            PANEL_MAIN_TEXT, reply_markup=build_panel_main_keyboard(_is_owner(update)), parse_mode="Markdown"
         )
         await db_run(_save_player, player)
         return
 
-    # --- کلیدواژه "کلمات ربات"/"لیست کلمات" برای دسترسی مستقیم به بخش کلمات پنل ---
+    # --- کلیدواژه "کلمات ربات"/"لیست کلمات" — طبق درخواست فقط برای Owner ---
     if stripped in ("کلمات ربات", "لیست کلمات", "همه کلمات"):
+        if not _is_owner(update):
+            await db_run(_save_player, player)
+            return  # برای کاربر عادی این کلیدواژه اصلاً وجود نداره (بی‌صدا نادیده گرفته می‌شه)
         try:
             await update.message.reply_text(
                 PANEL_TEXTS["words"], reply_markup=build_back_keyboard(), parse_mode="Markdown"
@@ -4590,7 +4626,7 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🦇 *به دنیای بتمن خوش اومدی*\n\n"
                 f"از امروز، *{group_name}* تحت محافظت گاتهامه.\n"
                 "بازی، مدیریت، و یه‌کم جو گاتهامی — همه رو دارم.\n"
-                "برای شروع بنویس «تنظیمات» یا «کلمات ربات» تا همه‌چی رو ببینی.",
+                "برای شروع بنویس «تنظیمات» تا همه‌چی رو ببینی.",
                 parse_mode="Markdown",
             )
             continue
@@ -4999,7 +5035,7 @@ def main():
     register_extra_games(app)
     register_extra_lists(app)
     register_extra_games2(app)
-    register_board_games(app)  # شطرنج / منچ / مار و پله / گو — فقط با نوشتن اسم بازی
+    register_board_games(app)  # شطرنج / منچ / مار و پله — فقط با نوشتن اسم بازی
     register_extra_games3(app)  # یونو / قلمرو / بیلیارد / مسابقه ماشین
     register_group_rps(app)  # سنگ کاغذ قیچی گروهی — PvP واقعی، از منوی بازی‌ها ← 👥 گروهی
     register_card_room(app)  # 🃏 اتاق پاسور: جنگ / بیست‌ویک / بلک‌جک / حکم (دونفره)

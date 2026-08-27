@@ -32,6 +32,7 @@ import logging
 import mimetypes
 import tempfile
 import subprocess
+import urllib.parse
 
 import httpx
 from telegram import (
@@ -1130,12 +1131,44 @@ def _yt_dlp_download(url: str, outdir: str, platform: str, progress_state=None, 
     client ثابت باعث می‌شد اگه هر سه با نسخه‌ی نصب‌شده‌ی yt-dlp ناسازگار بودن،
     دانلود کلاً شکست بخوره بدون این‌که راه‌حل پیش‌فرض/جدیدتر امتحان بشه.
     """
+    # 🐛 رفع باگ واقعی «Instagram → Media number out of range»: وقتی کاربر یه
+    # عکسِ خاص از یه Carousel رو تو اپ اینستاگرام باز می‌کنه و لینکش رو
+    # می‌فرسته، اینستاگرام خودش به URL یه پارامتر img_index=N اضافه می‌کنه
+    # (یعنی «این آیتم مشخص از Carousel رو نشون بده»). چون تو این پروژه برای
+    # اینستاگرام noplaylist=False هست (تا کل Carousel دانلود بشه، نه فقط یه
+    # آیتم)، yt-dlp سعی می‌کنه هم «کل Carousel» و هم «همون index مشخص» رو
+    # هم‌زمان اعمال کنه؛ اگه شمارش داخلیِ yt-dlp با ایندکس اینستاگرام (که
+    # گاهی 0-based و گاهی با تعداد واقعیِ آیتم‌های برگشتی نمی‌خونه) جور در
+    # نیاد، خطای «Media number out of range» می‌ده و کل دانلود شکست می‌خوره —
+    # درحالی‌که ما اصلاً به این ایندکس نیازی نداریم چون همیشه *کل* Carousel
+    # رو می‌گیریم و می‌فرستیم. راه‌حل: این پارامتر رو قبل از دادن URL به
+    # yt-dlp حذف می‌کنیم تا از کل پست/Carousel (بدون محدودیت به یه ایندکس
+    # خاص) دانلود بشه.
+    if platform == "instagram":
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.query:
+                q = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                q = [(k, v) for k, v in q if k != "img_index"]
+                url = urllib.parse.urlunsplit(
+                    (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(q), parsed.fragment)
+                )
+        except Exception:
+            pass  # اگه پارس URL هر دلیلی شکست خورد، همون URL اصلی بدون تغییر استفاده می‌شه
+
     base = _base_ydl_opts(outdir, platform, quality=quality)
     attempts = [{}]
     if platform == "youtube":
         attempts = [
             {"extractor_args": {"youtube": {"player_client": ["android", "web"]}}},
             {"extractor_args": {"youtube": {"player_client": ["ios"]}}},
+            # 🦇 تلاش اضافه: کلاینت tv_embedded معمولاً مسیر دیگه‌ای رو طی
+            # می‌کنه که بعضی وقتا می‌تونه قفل «Sign in to confirm you're not
+            # a bot» رو برای ویدیوهای عمومی (غیر Age-Restricted) دور بزنه —
+            # بدون نیاز به کوکی. تضمینی نیست (این یه محدودیت سمت یوتیوبه)،
+            # ولی هزینه‌ی این تلاش صفره: اگه شکست بخوره، دقیقاً می‌ره سراغ
+            # تلاش پیش‌فرض بعدی، بدون این‌که چیزی خراب کنه.
+            {"extractor_args": {"youtube": {"player_client": ["tv_embedded"]}}},
             {},  # پیش‌فرض کامل yt-dlp، بدون هیچ محدودیت client
         ]
     if platform == "soundcloud":
