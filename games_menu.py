@@ -20,7 +20,7 @@ from games import (
     tictactoe_start, connect4_start,
 )
 from ttt_gotham import gotham_ttt_start
-from board_games import chess_start, ludo_start, snakes_start
+from board_games import chess_start, ludo_start, snakes_start, go_start
 from games_pack2 import g2048_start, lightsout_start, memory_start, battleship_start, treasure_start
 from games_pack4 import minesweeper_start, dots_start, tiko_start, jamshid_start, bazar_start
 from games_pack5 import uno_start, territory_start, billiards_start, racing_start
@@ -66,6 +66,7 @@ CATEGORIES = [
         ("chess", "♟ شطرنج", chess_start),
         ("ludo", "🎯 منچ", ludo_start),
         ("snake", "🐍 مار و پله", snakes_start),
+        ("go", "⚫⚪ گو (Go)", go_start),
         ("uno", "🎴 یونو", uno_start),
         ("terr", "🗺 قلمرو", territory_start),
         ("bill", "🎱 بیلیارد", billiards_start),

@@ -7,6 +7,9 @@ Games:
 - Snakes & Ladders: 2-player Dark Gotham board with real dice, step-by-step
   movement, per-turn timers/timeout, and rematch — see the SNAKES & LADDERS
   section below for the full implementation.
+- Go (باستانی/Go): 2-player 9x9 board, real capture/liberty rules, suicide
+  ban, simple-ko, pass-to-end, and area scoring with komi — see the GO
+  section below.
 
 All state is in memory for the current bot process. A restart ends active games.
 """
@@ -32,11 +35,16 @@ log = logging.getLogger(__name__)
 CHESS_GAMES: Dict[str, dict] = {}
 LUDO_GAMES: Dict[str, dict] = {}
 SNAKES_GAMES: Dict[str, dict] = {}
+GO_GAMES: Dict[str, dict] = {}
 
 COLORS = ["🔴", "🟢", "🟡", "🔵"]
 LUDO_SAFE = {0, 8, 13, 21, 26, 34, 39, 47}
 LUDO_START = [0, 13, 26, 39]
 LUDO_FINISH = 57
+
+GO_SIZE = 9  # تخته‌ی ۹×۹ (سایز استاندارد برای بازی سریع/مبتدی)، مناسب کیبورد اینلاین
+GO_KOMI = 5.5  # امتیاز جبرانی سفید برای اینکه سیاه اول بازی می‌کنه
+GO_STAR_POINTS = {20, 24, 40, 56, 60}  # نقطه‌های ستاره‌ای (هوشی) رو تخته‌ی ۹×۹: (2,2)(2,6)(4,4)(6,2)(6,6)
 
 SNAKES = {99: 54, 95: 75, 92: 88, 89: 68, 74: 53, 64: 60, 62: 19, 49: 11, 47: 26, 16: 6}
 LADDERS = {2: 38, 7: 14, 8: 31, 15: 26, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 78: 98}
@@ -91,6 +99,21 @@ def _join_markup(prefix: str, gid: str, count: int = 4):
 
 # ============================== CHESS ==============================
 
+# مهره‌ها قبلاً فقط با گلیف خام یونیکد شطرنج (♔ سفید / ♚ سیاه) نشون داده می‌شدن
+# که رو تم تیره‌ی تلگرام تقریباً هم‌رنگ به‌نظر می‌رسیدن و تشخیص سفید از سیاه سخت
+# بود. الان یه دایره‌ی رنگی (⚪/⚫) جلوی هر مهره اضافه می‌شه که رنگ تیم رو با
+# چشم غیرمسلح هم مشخص می‌کنه، و خونه‌های خالی به‌جای نقطه‌ی ساده، شطرنجی
+# روشن/تیره (▪️/▫️) می‌شن تا کل صفحه حس یه تخته‌ی واقعی رو بده.
+
+def _chess_piece_label(piece):
+    dot = "⚪" if piece.color else "⚫"
+    return f"{dot}{piece.unicode_symbol()}"
+
+
+def _chess_empty_label(file, rank):
+    return "▪️" if (file + rank) % 2 == 0 else "▫️"
+
+
 def _chess_board_text(board, selected=None):
     rows = ["♟️ شطرنج گاتهام", ""]
     for rank in range(7, -1, -1):
@@ -98,7 +121,7 @@ def _chess_board_text(board, selected=None):
         for file in range(8):
             sq = chess.square(file, rank)
             piece = board.piece_at(sq)
-            symbol = piece.unicode_symbol() if piece else "·"
+            symbol = _chess_piece_label(piece) if piece else _chess_empty_label(file, rank)
             if selected == sq:
                 symbol = f"【{symbol}】"
             cells.append(symbol)
@@ -117,9 +140,9 @@ def _chess_markup(gid, board, selected=None):
         for file in range(8):
             sq = chess.square(file, rank)
             piece = board.piece_at(sq)
-            label = piece.unicode_symbol() if piece else "·"
+            label = _chess_piece_label(piece) if piece else _chess_empty_label(file, rank)
             if selected == sq:
-                label = "🟣" + label
+                label = "🎯" + label
             row.append(InlineKeyboardButton(label, callback_data=f"chess:sq:{gid}:{sq}"))
         rows.append(row)
     rows.append([InlineKeyboardButton("🔄 تازه‌سازی", callback_data=f"chess:refresh:{gid}"),
@@ -547,6 +570,279 @@ async def _ludo_callback(update, context):
             pass
 
 
+# ============================== GO (باستان‌شناسی: دو نفره، تخته‌ی ۹×۹) ==============================
+# قوانین پیاده‌شده: گذاشتن سنگ، گرفتن گروه‌های بدون نفَس (liberties)، ممنوعیت
+# خودکشی (suicide) مگر این‌که خودش باعث گرفتن سنگ حریف بشه، قانون کوی ساده
+# (simple ko) برای جلوگیری از تکرار فوری یک وضعیت، پاس، و امتیازدهی نهایی به
+# روش مساحت (area scoring): سنگ‌های روی تخته + قلمرو خالی محاصره‌شده + کومی.
+
+def _go_idx(r, c):
+    return r * GO_SIZE + c
+
+
+def _go_neighbors(idx):
+    r, c = divmod(idx, GO_SIZE)
+    out = []
+    if r > 0:
+        out.append(idx - GO_SIZE)
+    if r < GO_SIZE - 1:
+        out.append(idx + GO_SIZE)
+    if c > 0:
+        out.append(idx - 1)
+    if c < GO_SIZE - 1:
+        out.append(idx + 1)
+    return out
+
+
+def _go_group(board, idx):
+    """گروه هم‌رنگِ متصل به idx و مجموعه‌ی خانه‌های خالی مجاورش (نفَس‌ها) رو برمی‌گردونه."""
+    color = board[idx]
+    seen = {idx}
+    stack = [idx]
+    libs = set()
+    while stack:
+        cur = stack.pop()
+        for n in _go_neighbors(cur):
+            if board[n] == 0:
+                libs.add(n)
+            elif board[n] == color and n not in seen:
+                seen.add(n)
+                stack.append(n)
+    return seen, libs
+
+
+def _go_try_move(board, idx, color):
+    """اگه حرکت مجاز باشه (خونه, (new_board, captured_count) رو برمی‌گردونه؛
+    اگه خونه پر باشه یا حرکت خودکشی (suicide) باشه None برمی‌گردونه."""
+    if board[idx] != 0:
+        return None
+    new_board = list(board)
+    new_board[idx] = color
+    opponent = 3 - color
+    captured = 0
+    for n in _go_neighbors(idx):
+        if new_board[n] == opponent:
+            seen, libs = _go_group(new_board, n)
+            if not libs:
+                for s in seen:
+                    new_board[s] = 0
+                captured += len(seen)
+    seen, libs = _go_group(new_board, idx)
+    if not libs:
+        return None  # خودکشی و بدون گرفتن سنگ حریف => غیرمجاز
+    return new_board, captured
+
+
+def _go_territory(board):
+    visited = set()
+    territory = {1: 0, 2: 0}
+    for start in range(GO_SIZE * GO_SIZE):
+        if board[start] != 0 or start in visited:
+            continue
+        region = set()
+        stack = [start]
+        borders = set()
+        while stack:
+            cur = stack.pop()
+            if cur in region:
+                continue
+            region.add(cur)
+            for n in _go_neighbors(cur):
+                if board[n] == 0:
+                    if n not in region:
+                        stack.append(n)
+                else:
+                    borders.add(board[n])
+        visited |= region
+        if len(borders) == 1:
+            territory[next(iter(borders))] += len(region)
+    return territory
+
+
+def _go_score(board):
+    terr = _go_territory(board)
+    black = board.count(1) + terr[1]
+    white = board.count(2) + terr[2] + GO_KOMI
+    return black, white
+
+
+def _go_cell_symbol(board, idx):
+    v = board[idx]
+    if v == 1:
+        return "⚫"
+    if v == 2:
+        return "⚪"
+    return "✦" if idx in GO_STAR_POINTS else "·"
+
+
+def _go_board_text(game, note=None):
+    board = game["board"]
+    rows = ["⚫⚪ گو گاتهام (Go) — تخته ۹×۹", ""]
+    for r in range(GO_SIZE - 1, -1, -1):
+        cells = [_go_cell_symbol(board, _go_idx(r, c)) for c in range(GO_SIZE)]
+        rows.append(f"{r+1:>2} " + " ".join(cells))
+    rows.append("    " + " ".join("abcdefghi"))
+    rows.append("")
+    if game.get("started"):
+        to_move = "⚫ سیاه" if game["turn"] == 1 else "⚪ سفید"
+        rows.append(f"نوبت: {to_move}")
+        rows.append(f"🎯 اسیر: ⚫ سیاه {game['captures'][1]}   ⚪ سفید {game['captures'][2]}")
+    if note:
+        rows.append("")
+        rows.append(note)
+    return "\n".join(rows)
+
+
+def _go_markup(gid, game):
+    board = game["board"]
+    rows = []
+    for r in range(GO_SIZE - 1, -1, -1):
+        row = []
+        for c in range(GO_SIZE):
+            idx = _go_idx(r, c)
+            label = _go_cell_symbol(board, idx)
+            row.append(InlineKeyboardButton(label, callback_data=f"go:pt:{gid}:{idx}"))
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("⏭️ پاس", callback_data=f"go:pass:{gid}"),
+        InlineKeyboardButton("🔄 تازه‌سازی", callback_data=f"go:refresh:{gid}"),
+        InlineKeyboardButton("🏳️ تسلیم", callback_data=f"go:resign:{gid}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def go_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    gid = _gid("go")
+    user = update.effective_user
+    GO_GAMES[gid] = {
+        "chat_id": chat_id, "players": [user.id], "names": {user.id: _name(user)},
+        "board": [0] * (GO_SIZE * GO_SIZE), "turn": 1, "started": False,
+        "captures": {1: 0, 2: 0}, "pass_count": 0, "ko_block": None,
+    }
+    text = (
+        "⚫⚪ گو گاتهام (Go) — تخته ۹×۹\n\n"
+        f"👤 سیاه: {_name(user)}\n"
+        "👤 سفید: منتظر حریف...\n\n"
+        "نفر دوم روی «پیوستن» بزند."
+    )
+    await update.effective_message.reply_text(text, reply_markup=_join_markup("go", gid, 2))
+
+
+async def _go_render(q, gid, note=None):
+    game = GO_GAMES[gid]
+    await q.edit_message_text(_go_board_text(game, note=note), reply_markup=_go_markup(gid, game))
+
+
+async def _go_finish_game(q, gid):
+    game = GO_GAMES[gid]
+    black, white = _go_score(game["board"])
+    b_uid, w_uid = game["players"][0], game["players"][1]
+    if black >= white:
+        winner, loser, margin = b_uid, w_uid, black - white
+    else:
+        winner, loser, margin = w_uid, b_uid, white - black
+    _save_game_record(game["chat_id"], winner, loser)
+    text = (
+        _go_board_text(game) +
+        "\n\n🏁 هر دو پاس دادند — بازی تمام شد!\n"
+        f"⚫ سیاه: {black:g}    ⚪ سفید: {white:g} (با کومی {GO_KOMI:g})\n"
+        f"🏆 برنده: {game['names'][winner]} (اختلاف {margin:g} امتیاز)"
+    )
+    await q.edit_message_text(text)
+    del GO_GAMES[gid]
+
+
+async def _go_callback(update, context):
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    parts = q.data.split(":")
+    action, gid = parts[1], parts[2]
+    game = GO_GAMES.get(gid)
+    if not game:
+        await q.answer("این بازی دیگر وجود ندارد.", show_alert=True); return
+    uid = update.effective_user.id
+
+    try:
+        if action == "join":
+            if uid in game["players"]:
+                await q.answer("تو همین الان داخل بازی هستی.", show_alert=True); return
+            if len(game["players"]) >= 2:
+                await q.answer("این بازی گو پر شده.", show_alert=True); return
+            game["players"].append(uid); game["names"][uid] = _name(update.effective_user)
+            await q.edit_message_text(
+                f"⚫⚪ گو گاتهام (Go) — تخته ۹×۹\n\n👤 سیاه: {game['names'][game['players'][0]]}\n"
+                f"👤 سفید: {game['names'][uid]}\n\nآماده‌اید؟",
+                reply_markup=_join_markup("go", gid, 2),
+            ); return
+
+        if action == "start":
+            if uid != game["players"][0] or len(game["players"]) != 2:
+                await q.answer("فقط سازنده و وقتی دو نفر حاضرند می‌تواند شروع کند.", show_alert=True); return
+            game["started"] = True
+            await _go_render(q, gid); return
+
+        if action == "cancel":
+            if uid != game["players"][0]:
+                await q.answer("فقط سازنده می‌تواند لغو کند.", show_alert=True); return
+            del GO_GAMES[gid]
+            await q.edit_message_text("⚫ بازی گو لغو شد."); return
+
+        if action == "refresh":
+            await _go_render(q, gid); return
+
+        if action == "resign":
+            if uid not in game["players"] or not game["started"]:
+                return
+            winner = game["players"][1] if uid == game["players"][0] else game["players"][0]
+            _save_game_record(game["chat_id"], winner, uid)
+            await q.edit_message_text(f"🏳️ {_name(update.effective_user)} تسلیم شد!\n🏆 برنده: {game['names'][winner]}")
+            del GO_GAMES[gid]; return
+
+        if not game["started"] or uid not in game["players"]:
+            await q.answer("این بازی برای تو نیست.", show_alert=True); return
+        color_uid = game["players"][game["turn"] - 1]
+        if uid != color_uid:
+            await q.answer("الان نوبت حریفه.", show_alert=True); return
+
+        if action == "pass":
+            passer_name = game["names"][uid]
+            game["pass_count"] += 1
+            game["ko_block"] = None
+            if game["pass_count"] >= 2:
+                await _go_finish_game(q, gid); return
+            game["turn"] = 3 - game["turn"]
+            await _go_render(q, gid, note=f"⏭️ {passer_name} پاس داد."); return
+
+        if action == "pt":
+            idx = int(parts[3])
+            old_board = game["board"]
+            result = _go_try_move(old_board, idx, game["turn"])
+            if result is None:
+                await q.answer("این خونه پره یا این حرکت خودکشیه — مجاز نیست.", show_alert=True); return
+            new_board, captured = result
+            if game.get("ko_block") is not None and new_board == game["ko_block"]:
+                await q.answer("طبق قانون کو (Ko) این حرکت الان مجاز نیست — یه جای دیگه بازی کن.", show_alert=True); return
+            game["board"] = new_board
+            game["ko_block"] = old_board if captured == 1 else None
+            game["captures"][game["turn"]] += captured
+            game["pass_count"] = 0
+            note = f"💥 {captured} سنگ گرفته شد!" if captured else None
+            game["turn"] = 3 - game["turn"]
+            await _go_render(q, gid, note=note); return
+
+        await q.answer()
+    except Exception as e:
+        log.warning(f"go_callback error: {e}")
+        try:
+            await q.answer("⚠️ یک مشکل موقت پیش آمد، دوباره امتحان کن.", show_alert=True)
+        except Exception:
+            pass
+
+
 # ========================== SNAKES & LADDERS ==========================
 # 🐍 مار و پله — نسخه‌ی دونفره‌ی حرفه‌ای، Dark Gotham Board:
 #   - تاس واقعی + حرکت مرحله‌به‌مرحله‌ی مهره (انیمیشن خانه به خانه)
@@ -840,12 +1136,15 @@ async def board_game_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ludo_start(update, context)
     elif text in {"مار و پله", "ماروپله", "بازی مار و پله", "🐍 مار و پله"}:
         await snakes_start(update, context)
+    elif text in {"گو", "بازی گو", "go", "بازی go", "⚫ گو"}:
+        await go_start(update, context)
 
 
 def register_board_games(app):
     app.add_handler(CallbackQueryHandler(_chess_callback, pattern=r"^chess:"), group=1)
     app.add_handler(CallbackQueryHandler(_ludo_callback, pattern=r"^ludo:"), group=1)
     app.add_handler(CallbackQueryHandler(_snake_callback, pattern=r"^snake:"), group=1)
+    app.add_handler(CallbackQueryHandler(_go_callback, pattern=r"^go:"), group=1)
     # نکته‌ی مهم: این نباید group=1 باشه، چون keyword_router تو games.py هم یه
     # MessageHandler(filters.TEXT & ~filters.COMMAND) با group=1 داره؛ تو یه گروه،
     # فقط اولین هندلری که فیلترش match بشه اجرا می‌شه (فیلتر TEXT خام همیشه match
