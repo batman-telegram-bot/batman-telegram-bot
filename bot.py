@@ -4891,6 +4891,17 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN تنظیم نشده! برو تو Railway Variables اضافه‌اش کن.")
 
+    # 🦇 لاگ نسخه‌ی yt-dlp موقع استارت (رفع مشکل «خطای [youtube] The page needs
+    # to be reloaded.» — این خطا معمولاً یعنی نسخه‌ی yt-dlp نصب‌شده رو Railway
+    # قدیمیه و الگوریتم استخراج امضای جدید یوتیوب رو نمی‌شناسه). این فقط شماره
+    # نسخه رو لاگ می‌کنه — هیچ اطلاعات حساسی (کوکی/توکن) چاپ نمی‌شه — تا بشه
+    # سریع از لاگ Railway چک کرد که آیا نسخه‌ی درست واقعاً نصب و استفاده شده.
+    try:
+        import yt_dlp as _yt_dlp_version_check
+        log.info(f"🦇 Gotham Downloader — yt-dlp version: {_yt_dlp_version_check.version.__version__}")
+    except Exception as e:
+        log.warning(f"🦇 Gotham Downloader — yt-dlp version check failed: {e}")
+
     # 🩹 رفع مرکزیِ باگ‌های تکراریِ لاگ (Message text is empty / Message is not
     # modified / Can't parse entities / RetryAfter / TimedOut) — باید قبل از
     # هر send/edit دیگه‌ای نصب بشه.
