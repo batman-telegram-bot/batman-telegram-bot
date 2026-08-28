@@ -27,6 +27,7 @@ import glob
 import time
 import uuid
 import shutil
+import sqlite3
 import asyncio
 import logging
 import mimetypes
@@ -1452,6 +1453,177 @@ async def _progress_ticker(status_msg, progress_state: dict, header: str, stop_e
 
 
 # =========================================================
+#  🦇 FAST MEDIA PATH — YouTube file_id CACHE (no re-download/re-upload)
+# =========================================================
+# هدف: اگه یه ویدیوی یوتیوب قبلاً یه‌بار با موفقیت دانلود و برای تلگرام
+# آپلود شده، همون file_id تلگرامش رو نگه داریم؛ دفعه‌ی بعد که همون ویدیو
+# (حتی از طرف یه کاربر دیگه) درخواست شد، به‌جای دانلود دوباره از یوتیوب و
+# آپلود دوباره به تلگرام، مستقیم همون file_id رو با send_video/send_document
+# می‌فرستیم — تلگرام خودش فایل رو از سرورهای خودش Copy می‌کنه (Server-to-
+# Server)، هیچ دانلود/آپلود/پردازشی سمت ربات ما انجام نمی‌شه.
+#
+# نکته‌ی مهم (چک‌لیست): این یه Cache واقعیه، نه Preview. فقط file_idِ خروجیِ
+# خودِ send_video/send_document (بعد از آپلود موفق توسط خودمون) ذخیره می‌شه؛
+# هیچ‌جا از پیش‌نمایش لینک (Web Preview) به‌عنوان منبع Media استفاده نمی‌شه،
+# چون Bot API چنین چیزی رو اصلاً نمی‌ده.
+#
+# ذخیره‌سازی: همون sqlite دیتابیسی که reminders.py هم ازش استفاده می‌کنه
+# (env var مشترک DB_PATH، دقیقاً همون منطق تشخیص مسیر تو bot.py) — یه جدول
+# جدا، بدون تداخل با جدول‌های دیگه. اگه دیتابیس هر دلیلی در دسترس نبود، کش
+# فقط غیرفعال می‌شه (خطا Swallow می‌شه) و مسیر دانلود عادی/مجاز فعلی بدون
+# تغییر ادامه پیدا می‌کنه — یعنی هیچ Crash/قطعی‌ای از کارنکردن کش سرچشمه
+# نمی‌گیره.
+_YT_CACHE_DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
+_yt_cache_ready = False
+
+# آی‌دی ۱۱کاراکتریِ ویدیوی یوتیوب رو مستقیم از روی متن URL دربیار — بدون
+# هیچ Network call/yt-dlp probe (خودِ این استخراج باید سبک/فوری باشه چون
+# قبل از هر تصمیمی صدا زده می‌شه). پارامترهای اضافه‌ی URL (مثل si=, t=,
+# list= کنار v=) روی نتیجه اثر نمی‌ذارن چون Group دقیقاً همون ۱۱ کاراکتر رو
+# می‌گیره؛ اگه فرمت لینک غیرمعمول بود و آی‌دی پیدا نشد، None برمی‌گرده —
+# یعنی کل مسیر کش بی‌صدا رد می‌شه و رفتار قبلی (دانلود عادی) دست‌نخورده
+# می‌مونه.
+_YT_ID_RE = re.compile(
+    r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:.*&)?v=|shorts/|embed/|v/)|[?&]v=)([A-Za-z0-9_-]{11})"
+)
+
+
+def _yt_extract_video_id(url: str):
+    if not url:
+        return None
+    m = _YT_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _yt_cache_init():
+    """جدول کش رو فقط یه‌بار در طول عمر Process می‌سازه (IF NOT EXISTS، پس
+    اجرای چندباره هم بی‌خطره) — هر Exception (مثلاً دیتابیس Read-only یا
+    دیسک پر) فقط باعث غیرفعال‌شدن کش می‌شه، نه Crash."""
+    global _yt_cache_ready
+    if _yt_cache_ready:
+        return
+    try:
+        conn = sqlite3.connect(_YT_CACHE_DB_PATH)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS yt_media_cache (
+                video_id   TEXT PRIMARY KEY,
+                file_id    TEXT NOT NULL,
+                media_kind TEXT NOT NULL,
+                width      INTEGER,
+                height     INTEGER,
+                duration   INTEGER,
+                title      TEXT,
+                source_url TEXT,
+                created_at REAL NOT NULL,
+                hit_count  INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+        _yt_cache_ready = True
+    except Exception as e:
+        log.warning(f"[yt-cache] init failed, fast media cache disabled: {e}")
+
+
+def _yt_cache_get(video_id: str):
+    if not video_id:
+        return None
+    _yt_cache_init()
+    if not _yt_cache_ready:
+        return None
+    try:
+        conn = sqlite3.connect(_YT_CACHE_DB_PATH)
+        row = conn.execute(
+            "SELECT file_id, media_kind, width, height, duration, title "
+            "FROM yt_media_cache WHERE video_id = ?",
+            (video_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE yt_media_cache SET hit_count = hit_count + 1 WHERE video_id = ?",
+                (video_id,),
+            )
+            conn.commit()
+        conn.close()
+        if not row:
+            return None
+        file_id, media_kind, width, height, duration, title = row
+        return {
+            "file_id": file_id, "media_kind": media_kind,
+            "width": width, "height": height, "duration": duration, "title": title,
+        }
+    except Exception as e:
+        log.warning(f"[yt-cache] read failed for video_id={video_id!r}: {e}")
+        return None
+
+
+def _yt_cache_set(video_id: str, file_id: str, media_kind: str,
+                   width=None, height=None, duration=None, title=None, source_url=None):
+    if not video_id or not file_id:
+        return
+    _yt_cache_init()
+    if not _yt_cache_ready:
+        return
+    try:
+        conn = sqlite3.connect(_YT_CACHE_DB_PATH)
+        conn.execute(
+            "INSERT INTO yt_media_cache "
+            "(video_id, file_id, media_kind, width, height, duration, title, source_url, created_at, hit_count) "
+            "VALUES (?,?,?,?,?,?,?,?,?,0) "
+            "ON CONFLICT(video_id) DO UPDATE SET "
+            "file_id=excluded.file_id, media_kind=excluded.media_kind, width=excluded.width, "
+            "height=excluded.height, duration=excluded.duration, title=excluded.title, "
+            "source_url=excluded.source_url, created_at=excluded.created_at",
+            (video_id, file_id, media_kind, width, height, duration, title, source_url, time.time()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[yt-cache] write failed for video_id={video_id!r}: {e}")
+
+
+def _yt_cache_invalidate(video_id: str):
+    """وقتی file_idِ کش‌شده دیگه سمت تلگرام معتبر نیست (نادر — مثلاً خیلی
+    قدیمی/پاک‌شده)، از کش حذفش کن تا دفعه‌ی بعد دوباره امتحان نشه و مسیر
+    دانلود عادی جایگزینش بشه."""
+    if not video_id:
+        return
+    try:
+        conn = sqlite3.connect(_YT_CACHE_DB_PATH)
+        conn.execute("DELETE FROM yt_media_cache WHERE video_id = ?", (video_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[yt-cache] invalidate failed for video_id={video_id!r}: {e}")
+
+
+async def _try_send_cached_media(msg, cached: dict, job_id: str):
+    """با file_idِ آماده (بدون دانلود/آپلود) مستقیم برای همین Message/Chat
+    می‌فرسته — همون Message که کاربر لینک رو توش فرستاده، پس همیشه به
+    User/Chat خودش وصل می‌مونه. اگه به هر دلیلی (مثلاً file_id دیگه سمت
+    تلگرام معتبر نیست) ارسال شکست بخوره، False برمی‌گردونه تا فراخوان بی‌صدا
+    به مسیر دانلود عادی/مجاز fallback کنه — نه Exception بالا می‌ره، نه
+    Crash می‌شه."""
+    caption = f"🎬 {cached['title']}\n\n🦇 Gotham Downloader" if cached.get("title") else "🦇 Gotham Downloader"
+    try:
+        if cached["media_kind"] == "video":
+            await msg.reply_video(
+                cached["file_id"], caption=caption, supports_streaming=True,
+                duration=cached.get("duration") or None,
+                width=cached.get("width") or None,
+                height=cached.get("height") or None,
+            )
+        else:
+            await msg.reply_document(cached["file_id"], caption=caption)
+        return True
+    except Exception as e:
+        log.info(f"[dl:{job_id}] cached file_id send failed, falling back to normal download path: {e}")
+        return False
+
+
+# =========================================================
 #  🦇 GOTHAM FAST YOUTUBE DOWNLOADER — MAX SPEED MODE
 # =========================================================
 # مسیر کاملاً جدا و افزوده، فقط برای یوتیوب. منوی کیفیت قبلی
@@ -1508,6 +1680,27 @@ async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.
     _YT_FAST_INFLIGHT.add(dedup_key)
 
     try:
+        video_id = _yt_extract_video_id(url)
+
+        # ⚡ FAST MEDIA PATH: اگه همین ویدیو قبلاً یه‌بار دانلود/آپلود شده و
+        # file_id تلگرامش تو کش داریم، بدون هیچ دانلود/آپلود/FFmpeg/پردازشی
+        # مستقیم همون Media رو برای همین کاربر می‌فرستیم. این کل بلوک
+        # try بعدی (دانلود واقعی) رو کاملاً Skip می‌کنه — کمترین Latency
+        # ممکن، دقیقاً طبق هدف.
+        if video_id:
+            cached = _yt_cache_get(video_id)
+            if cached:
+                sent_ok = await _try_send_cached_media(msg, cached, job_id)
+                if sent_ok:
+                    _log_job(job_id, platform="youtube", url=url, user_id=uid, chat_id=chat_id,
+                              video_id=video_id, stage="fast-cache-hit-sent")
+                    return
+                # file_id دیگه معتبر نیست (نادر) -> از کش پاکش کن و بذار
+                # مسیر عادی/مجاز زیر (همون دانلود واقعی) جایگزینش بشه.
+                _yt_cache_invalidate(video_id)
+                _log_job(job_id, platform="youtube", url=url, user_id=uid, chat_id=chat_id,
+                          video_id=video_id, stage="fast-cache-stale-fallback")
+
         try:
             status = await msg.reply_text("🦇 Gotham Downloader\n\n🎬 دریافت ویدئو...")
         except Exception as e:
@@ -1611,7 +1804,7 @@ async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.
                     tf = open(v_thumb, "rb")
                 try:
                     with open(send_path, "rb") as f:
-                        await msg.reply_video(
+                        return await msg.reply_video(
                             f, caption=caption, supports_streaming=True,
                             duration=int(v_duration) if v_duration else None,
                             width=v_width or None, height=v_height or None,
@@ -1626,21 +1819,22 @@ async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.
 
             async def _do_send_document():
                 with open(send_path, "rb") as f:
-                    await msg.reply_document(f, caption=caption)
+                    return await msg.reply_document(f, caption=caption)
 
+            sent_msg = None
             try:
                 try:
-                    await _send_with_telegram_retry(lambda: _do_send_video(True), job_id)
+                    sent_msg = await _send_with_telegram_retry(lambda: _do_send_video(True), job_id)
                     _log_job(job_id, platform="youtube", url=url, stage="fast-sent")
                 except Exception as e_thumb:
                     log.warning(f"[dl:{job_id}] fast-yt send with thumbnail failed ({e_thumb}); "
                                 f"retrying same file without thumbnail")
-                    await _send_with_telegram_retry(lambda: _do_send_video(False), job_id)
+                    sent_msg = await _send_with_telegram_retry(lambda: _do_send_video(False), job_id)
                     _log_job(job_id, platform="youtube", url=url, stage="fast-sent-without-thumbnail")
             except Exception as e:
                 log.warning(f"[dl:{job_id}] fast-yt video send failed, fallback to document: {e}")
                 try:
-                    await _send_with_telegram_retry(lambda: _do_send_document(), job_id)
+                    sent_msg = await _send_with_telegram_retry(lambda: _do_send_document(), job_id)
                     _log_job(job_id, platform="youtube", url=url, stage="fast-sent-as-document")
                 except Exception:
                     log.exception(f"[dl:{job_id}] fast-yt document fallback also failed")
@@ -1652,6 +1846,24 @@ async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.
                     except Exception:
                         pass
                     return
+
+            # ⚡ FAST MEDIA PATH: بعد از ارسال موفق، file_id همین آپلود رو تو
+            # کش ذخیره کن تا دفعه‌ی بعد همین ویدیو (حتی از طرف کاربر دیگه)
+            # بدون هیچ دانلود/آپلود دوباره‌ای مستقیم فرستاده بشه. کاملاً
+            # Best-effort: هر خطا فقط Log می‌شه، هیچ‌وقت روی نتیجه‌ی ارسالی
+            # که کاربر همین الان گرفته اثر نمی‌ذاره.
+            if video_id and sent_msg is not None:
+                try:
+                    if getattr(sent_msg, "video", None):
+                        v = sent_msg.video
+                        _yt_cache_set(video_id, v.file_id, "video",
+                                      width=v.width, height=v.height, duration=v.duration,
+                                      title=title or None, source_url=url)
+                    elif getattr(sent_msg, "document", None):
+                        _yt_cache_set(video_id, sent_msg.document.file_id, "document",
+                                      title=title or None, source_url=url)
+                except Exception as e:
+                    log.info(f"[dl:{job_id}] fast-yt cache store skipped: {e}")
 
             # 🧹 خروج از بلوک with tempfile.TemporaryDirectory() (پایین‌تر از
             # اینجا) خودکار کل پوشه‌ی Job (فایل خام + فایل remux احتمالی) رو
