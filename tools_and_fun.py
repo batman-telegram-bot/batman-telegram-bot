@@ -22,7 +22,6 @@ httpx استفاده می‌کنه که از قبل تو requirements هست.
 
 import re
 import ast
-import html
 import math
 import random
 import secrets
@@ -225,14 +224,7 @@ async def _translate(text: str) -> str:
     translated = (data.get("responseData") or {}).get("translatedText")
     if not translated:
         raise ValueError("empty translation")
-    # 🐛 رفع باگ نمایش &#10; / &quot; / &#39; در PV: این مشکل به Telegram یا
-    # parse_mode ربطی نداره (اصلاً پایین‌تر parse_mode ست نمی‌شه) — سرویس
-    # رایگان MyMemory خودش داخل JSON، متنِ ترجمه‌شده رو HTML-entity-encode
-    # برمی‌گردونه (مثلاً apostrophe → &#39;، newline → &#10;). اگه همین‌جا
-    # unescape نشه، این Entityها به‌صورت متن خام وارد پیام تلگرام می‌شن.
-    # html.unescape روی متنی که Entity نداره (اکثر ترجمه‌های معمولی) کاملاً
-    # بی‌اثره، پس هیچ ترجمه‌ی سالمی خراب نمی‌شه.
-    return html.unescape(translated)
+    return translated
 
 
 def _gen_password(length=16) -> str:

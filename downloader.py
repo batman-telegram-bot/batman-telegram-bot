@@ -1878,23 +1878,8 @@ async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.
 
 async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    user = update.effective_user
-    chat = update.effective_chat
-    # 🛡️ رفع باگ effective_user=None: پست‌های کانال (channel_post/
-    # edited_channel_post) و برخی Update های سرویسی اصلاً «فرستنده‌ی کاربر»
-    # ندارن (تو Bot API، پست کانال به‌عنوان خودِ کانال ارسال می‌شه، نه یه
-    # User مشخص) — این Handler فقط مخصوص پیام‌های کاربره، پس اگه effective_user
-    # یا effective_chat خالی باشه، امن Update رو رد می‌کنیم و به بقیه‌ی
-    # هندلرها (یا هیچ‌کدوم) می‌سپاریم؛ همین باعث می‌شد قبلاً روی
-    # AttributeError: 'NoneType' object has no attribute 'id' کرش کنه.
-    if user is None or chat is None:
-        log.warning(
-            "downloader_link_handler received update without effective_user/effective_chat: %r",
-            update,
-        )
-        return
-    uid = user.id
-    chat_id = chat.id
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
     # 🐛 لینک داخل caption (عکس/ویدیوی فرستاده‌شده با کپشن حاوی لینک) قبلاً
     # اصلاً چک نمی‌شد چون فقط msg.text خونده می‌شد؛ caption روی msg.text نیست،
     # روی msg.caption‌ه. لینک فوروارد‌شده (از جمله از Saved Messages) هم متن/
@@ -3381,16 +3366,7 @@ def register_downloader(app):
     # این هندلر با هر پیام متنی یا هر پیام دارای caption (عکس/ویدیو با کپشن
     # لینک‌دار) چک می‌کنه که آیا لینک پشتیبانی‌شده‌ای توشه؛ وگرنه هیچ کاری نمی‌کنه
     # و بی‌صدا به بقیه‌ی هندلرها سپرده می‌شه (بدون هیچ اثری روی پیام‌های غیرمرتبط).
-    # 🛡️ رفع باگ effective_user=None: پست‌های کانال (channel_post/
-    # edited_channel_post) هم filters.TEXT | filters.CAPTION رو match می‌کردن
-    # چون این فیلترها به نوع Update کاری ندارن؛ ولی پست کانال کاربر مشخصی
-    # نداره، پس دیگه این Update ها اصلاً به این Handler نمی‌رسن (علاوه بر
-    # Guard داخل خودِ تابع، به‌عنوان خط دفاع اول).
     app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
-            & ~filters.UpdateType.CHANNEL_POST & ~filters.UpdateType.EDITED_CHANNEL_POST,
-            downloader_link_handler,
-        ),
+        MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, downloader_link_handler),
         group=6,
     )

@@ -28,9 +28,7 @@ postsaz_settings تو همون دیتابیس مشترک پروژه + context.us
 import os
 import re
 import json
-import uuid
 import shutil
-import asyncio
 import logging
 import sqlite3
 import tempfile
@@ -151,58 +149,6 @@ def _is_valid_media(path: str) -> bool:
     return True
 
 
-def _video_meta(path: str):
-    """duration (int ثانیه یا None), width, height رو از خروجی ffprobe فایل
-    نهایی استخراج می‌کنه — برای پاس‌دادن به send_video/reply_video، دقیقاً
-    همون الگویی که downloader.py برای رفع باگ «۰۰:۰۰ / پیش‌نمایش سیاه» استفاده
-    می‌کنه: هیچ مقداری حدس زده نمی‌شه، هرچی نبود None برمی‌گرده و همون
-    پارامتر اصلاً به Telegram پاس داده نمی‌شه (به‌جای یه عدد ساختگی)."""
-    info = _probe(path)
-    if not info:
-        return None, None, None
-    fmt = info.get("format", {}) or {}
-    try:
-        duration = float(fmt.get("duration", "0") or "0")
-    except (ValueError, TypeError):
-        duration = 0.0
-    duration_out = int(duration) if duration > 0 else None
-    width = height = None
-    for s in info.get("streams", []) or []:
-        if s.get("codec_type") == "video":
-            w, h = s.get("width"), s.get("height")
-            if w and h and w > 0 and h > 0:
-                width, height = int(w), int(h)
-            break
-    return duration_out, width, height
-
-
-def _make_thumbnail(path: str, duration, out_dir: str):
-    """یه Frame واقعی از فایل خروجیِ نهایی می‌گیره تا Telegram دیگه Preview
-    سیاه نشون نده. Timestamp هوشمند: برای ویدیوی کوتاه نزدیک شروع، برای بقیه
-    حدود ۱ ثانیه یا ۱۰٪ duration (هرکدوم که مناسب‌تره). شکست در این مرحله
-    خطای Fatal نیست — فقط thumbnail نداریم، خودِ ویدیو همچنان ارسال می‌شه."""
-    if not _ffmpeg_available():
-        return None
-    if duration and duration > 2:
-        ts = max(1.0, min(duration * 0.1, 3.0))
-    elif duration and duration > 0:
-        ts = duration / 2
-    else:
-        ts = 0.5
-    out_path = os.path.join(out_dir, f"thumb_{uuid.uuid4().hex[:8]}.jpg")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", f"{ts:.2f}", "-i", path, "-frames:v", "1", "-q:v", "3", out_path],
-            check=True, capture_output=True, timeout=30,
-        )
-    except Exception as e:
-        log.info(f"postsaz thumbnail generation failed: {e}")
-        return None
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-        return out_path
-    return None
-
-
 def _reduction_percent(before: int, after: int) -> float:
     if before <= 0:
         return 0.0
@@ -261,10 +207,7 @@ def make_square(in_path: str, out_path: str, is_video: bool):
     vf = "crop='min(iw,ih)':'min(iw,ih)'"
     args = ["-i", in_path, "-vf", vf]
     if is_video:
-        # +faststart: moov atom رو اول فایل می‌ذاره تا Telegram بلافاصله
-        # بتونه duration/preview رو بدون دانلود کامل فایل بخونه (همون رفع
-        # باگ ۰۰:۰۰ / پیش‌نمایش سیاه که تو downloader.py هم استفاده شده).
-        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-c:a", "copy", "-movflags", "+faststart"]
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-c:a", "copy"]
     args += [out_path]
     _run_ffmpeg(args)
 
@@ -303,7 +246,6 @@ def overlay_logo_video(in_path: str, logo_path: str, out_path: str, size_ratio: 
         "-i", in_path, "-i", logo_path,
         "-filter_complex", filter_complex,
         "-codec:a", "copy",
-        "-movflags", "+faststart",
         out_path,
     ])
 
@@ -485,14 +427,6 @@ def _logo_size_kb():
 
 
 def _get_session(context) -> dict:
-    # 🛡️ رفع باگ context.user_data=None: PTB برای Update هایی که کاربر
-    # مشخصی ندارن (مثلاً پست کانال) اصلاً user_data نمی‌سازه و None
-    # برمی‌گردونه. پست‌ساز کاملاً مخصوص سشن یک User‌ه، پس چنین Update ای به‌طور
-    # طبیعی سشن نداره — به‌جای کرش کردن، همون «سشن نیست» (None) برگردونده
-    # می‌شه، دقیقاً همون چیزی که فراخوان‌ها (is_postsaz_active/
-    # postsaz_intercept) از قبل برای «سشن فعال نیست» انتظار دارن.
-    if context.user_data is None:
-        return None
     return context.user_data.get("postsaz")
 
 
@@ -516,8 +450,7 @@ def _cleanup_session(context):
     session = _get_session(context)
     if session and session.get("tmpdir") and os.path.isdir(session["tmpdir"]):
         shutil.rmtree(session["tmpdir"], ignore_errors=True)
-    if context.user_data is not None:
-        context.user_data.pop("postsaz", None)
+    context.user_data.pop("postsaz", None)
 
 
 def _detect_kind(msg):
@@ -582,17 +515,6 @@ async def postsaz_intercept(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """اگه کاربر تو سشن پست‌ساز باشه، پیام رو خودمون مصرف می‌کنیم و True
     برمی‌گردونیم (هندلر صدازننده باید فوراً return کنه). اگه سشنی فعال نباشه
     False برمی‌گردونیم و هیچ کاری نمی‌کنیم — یعنی صفر تداخل با رفتار قبلی."""
-    # 🛡️ رفع باگ effective_user/user_data=None: پست‌ساز کاملاً مخصوص سشن یک
-    # User‌ه؛ Update هایی که کاربر ندارن (پست کانال و مشابه) نه سشنی دارن نه
-    # می‌تونن داشته باشن، پس همینجا امن رد می‌شن — قبل از اینکه به
-    # context.user_data (که تو این حالت خودش None‌ه) دست بزنیم.
-    if update.effective_user is None or context.user_data is None:
-        log.warning(
-            "postsaz_intercept received update without effective_user/user_data: %r",
-            update,
-        )
-        return False
-
     session = _get_session(context)
     if not session or not session.get("active"):
         return False
@@ -813,38 +735,13 @@ async def _apply_and_send(update, context, session):
             for i, st in enumerate(stage_report, start=1):
                 report_lines.append(f"🔄 مرحله {i} — کاهش حجم: {st['reduction_percent']:.0f}٪")
 
-        # 🎬 دقیقاً قبل از ارسال، duration/width/height واقعیِ فایل نهایی
-        # (بعد از همه‌ی مرحله‌های اعمال‌شده) رو با ffprobe می‌گیریم و یه
-        # Thumbnail واقعی می‌سازیم — به‌جای این‌که Telegram خودش حدس بزنه
-        # (که همون باعث «00:00 / پیش‌نمایش سیاه» می‌شد). هیچ مقداری حدسی
-        # ست نمی‌شه: اگه ffprobe چیزی نداد، همون پارامتر None می‌مونه.
-        v_duration = v_width = v_height = None
-        thumb_path = None
-        if kind in ("video", "gif"):
-            v_duration, v_width, v_height = await asyncio.to_thread(_video_meta, current)
-            thumb_path = await asyncio.to_thread(_make_thumbnail, current, v_duration, tmpdir)
-
-        thumb_f = open(thumb_path, "rb") if thumb_path else None
-        try:
-            with open(current, "rb") as f:
-                if kind == "photo":
-                    await update.effective_message.reply_photo(f, caption=caption or None, reply_markup=buttons_markup)
-                elif kind == "gif":
-                    await update.effective_message.reply_animation(
-                        f, caption=caption or None, reply_markup=buttons_markup,
-                        duration=v_duration, width=v_width, height=v_height, thumbnail=thumb_f,
-                    )
-                else:
-                    await update.effective_message.reply_video(
-                        f, caption=caption or None, reply_markup=buttons_markup, supports_streaming=True,
-                        duration=v_duration, width=v_width, height=v_height, thumbnail=thumb_f,
-                    )
-        finally:
-            if thumb_f:
-                try:
-                    thumb_f.close()
-                except Exception:
-                    pass
+        with open(current, "rb") as f:
+            if kind == "photo":
+                await update.effective_message.reply_photo(f, caption=caption or None, reply_markup=buttons_markup)
+            elif kind == "gif":
+                await update.effective_message.reply_animation(f, caption=caption or None, reply_markup=buttons_markup)
+            else:
+                await update.effective_message.reply_video(f, caption=caption or None, reply_markup=buttons_markup, supports_streaming=True)
 
         post_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📢 ارسال مستقیم به کانال", callback_data="postsaz:sendchannel")],
@@ -854,10 +751,6 @@ async def _apply_and_send(update, context, session):
         session["last_output_path"] = current
         session["last_kind"] = kind
         session["last_caption"] = caption
-        session["last_duration"] = v_duration
-        session["last_width"] = v_width
-        session["last_height"] = v_height
-        session["last_thumb_path"] = thumb_path
     except subprocess.CalledProcessError as e:
         log.warning(f"postsaz ffmpeg failed: {e}")
         await update.effective_message.reply_text(BATMAN_FAIL_MSG)
@@ -885,10 +778,6 @@ async def _send_to_channel(update, context, session):
     path = session.get("last_output_path")
     kind = session.get("last_kind")
     caption = session.get("last_caption") or ""
-    v_duration = session.get("last_duration")
-    v_width = session.get("last_width")
-    v_height = session.get("last_height")
-    thumb_path = session.get("last_thumb_path")
     if not path or not os.path.exists(path):
         await query.answer("🦇 چیزی برای ارسال پیدا نشد.", show_alert=True)
         return
@@ -907,33 +796,20 @@ async def _send_to_channel(update, context, session):
         return
 
     buttons_markup = build_buttons_markup(settings["buttons_json"])
-    thumb_f = open(thumb_path, "rb") if thumb_path and os.path.exists(thumb_path) else None
     try:
         with open(path, "rb") as f:
             if kind == "photo":
                 await context.bot.send_photo(channel_id, f, caption=caption or None, reply_markup=buttons_markup)
             elif kind == "gif":
-                await context.bot.send_animation(
-                    channel_id, f, caption=caption or None, reply_markup=buttons_markup,
-                    duration=v_duration, width=v_width, height=v_height, thumbnail=thumb_f,
-                )
+                await context.bot.send_animation(channel_id, f, caption=caption or None, reply_markup=buttons_markup)
             else:
-                await context.bot.send_video(
-                    channel_id, f, caption=caption or None, reply_markup=buttons_markup, supports_streaming=True,
-                    duration=v_duration, width=v_width, height=v_height, thumbnail=thumb_f,
-                )
+                await context.bot.send_video(channel_id, f, caption=caption or None, reply_markup=buttons_markup, supports_streaming=True)
         await query.answer("📢 به کانال ارسال شد.")
     except (BadRequest, Forbidden) as e:
         await query.answer(f"🦇 ارسال به کانال شکست خورد: {str(e)[:150]}", show_alert=True)
     except Exception as e:
         log.exception(f"send to channel failed: {e}")
         await query.answer("🦇 ارسال به کانال شکست خورد.", show_alert=True)
-    finally:
-        if thumb_f:
-            try:
-                thumb_f.close()
-            except Exception:
-                pass
     _cleanup_session(context)
 
 
@@ -1095,15 +971,9 @@ def register_post_saz(app, deps: dict):
     async def _bare_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await postsaz_intercept(update, context)
 
-    # 🛡️ رفع باگ context.user_data=None: پست/ویرایش‌پست کانال هم قبلاً این
-    # فیلتر رو match می‌کرد (VIDEO/AUDIO/... به نوع Update کاری نداره)، ولی
-    # پست کانال کاربر مشخصی نداره و برای PTB اصلاً user_data نمی‌سازه —
-    # همینجا (علاوه بر Guard داخل postsaz_intercept) از رسیدن این Update ها
-    # به این Handler جلوگیری می‌شه.
     app.add_handler(
         MessageHandler(
-            (filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL) & ~filters.COMMAND
-            & ~filters.UpdateType.CHANNEL_POST & ~filters.UpdateType.EDITED_CHANNEL_POST,
+            (filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL) & ~filters.COMMAND,
             _bare_media_handler,
         ),
         group=21,
