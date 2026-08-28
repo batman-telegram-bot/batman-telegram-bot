@@ -137,7 +137,12 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("batbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# 🔑 API Keys
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DOLLAR_API_KEY = os.getenv("DOLLAR_API_KEY")
+
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db" if os.path.isdir("/data") else "bot.db")
 # 🩺 Persistence diagnostic — این لاگ تنها راهیه که از رو Railway Logs (بدون نیاز
 # به SSH/دسترسی به فایل‌سیستم) می‌شه فهمید DB داره رو یه Volume دائمی ذخیره
