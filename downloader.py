@@ -40,6 +40,7 @@ from telegram import (
     InputMediaPhoto, InputMediaVideo,
 )
 from telegram.ext import ContextTypes, MessageHandler, CallbackQueryHandler, filters
+from telegram.error import RetryAfter, TimedOut
 
 log = logging.getLogger(__name__)
 
@@ -417,6 +418,19 @@ _YOUTUBE_FORMAT = (
 
 _DEFAULT_FORMAT = "best[ext=mp4]/best"
 
+# 🦇 GOTHAM FAST YOUTUBE DOWNLOADER — MAX SPEED MODE
+# فقط برای مسیر سریع یوتیوب (بدون منوی کیفیت): به‌جای bestvideo+bestaudio که
+# نیاز به merge با ffmpeg داره، فقط دنبال یه فرمت از قبل آماده (صدا+تصویر تو
+# یه فایل واحد، بدون نیاز به Merge/Post-processing) می‌گرده. این یعنی صفر
+# مرحله‌ی اضافه بین «دانلود» و «ارسال» — دقیقاً هدف Max Speed Mode. ممکنه سقف
+# رزولوشن پایین‌تر از حالت merge باشه (چون فرمت‌های Progressive یوتیوب معمولاً
+# حداکثر ۷۲۰p هستن)، ولی سرعت مهم‌تر از کیفیته.
+_YOUTUBE_FAST_FORMAT = (
+    f"best[ext=mp4][filesize<{MAX_TELEGRAM_UPLOAD_BYTES}]/"
+    f"best[filesize<{MAX_TELEGRAM_UPLOAD_BYTES}]/"
+    f"best[ext=mp4]/best"
+)
+
 
 def _format_selector_for_quality(quality) -> str:
     """🦇 PHASE 2/3: format selector یوتیوب بر اساس کیفیت انتخابیِ کاربر.
@@ -433,6 +447,9 @@ def _format_selector_for_quality(quality) -> str:
     پیش‌فرض استفاده می‌کنه، دقیقاً رفتار قبل از Phase 2."""
     if quality == "audio":
         return "bestaudio/best"
+    if quality == "fast":
+        # 🦇 GOTHAM FAST MODE — رجوع کن به توضیح بالای _YOUTUBE_FAST_FORMAT.
+        return _YOUTUBE_FAST_FORMAT
     if quality == "best":
         # ⚡ «بهترین کیفیت»: همون زنجیره‌ی پیش‌فرض فعلی (_YOUTUBE_FORMAT) —
         # بهترین ویدیو+صدای موجود، با همون سقف MAX_TELEGRAM_UPLOAD_BYTES و
@@ -491,7 +508,11 @@ def _base_ydl_opts(outdir: str, platform: str, quality=None) -> dict:
             # همون سقف height رو روی فرمت progressive هم حفظ می‌کنیم (نه
             # اینکه بی‌قید و شرط به «best» برگردیم و انتخاب کاربر نادیده
             # گرفته بشه). برای quality=None دقیقاً رفتار قبلی حفظ شده.
-            if quality is not None and quality not in ("audio", "best"):
+            if quality == "fast":
+                # بدون ffmpeg هم مسیر سریع نیازی به merge نداره — همون فرمت
+                # آماده‌ی progressive استفاده می‌شه.
+                opts["format"] = _YOUTUBE_FAST_FORMAT
+            elif quality is not None and quality not in ("audio", "best"):
                 opts["format"] = f"best[height<={int(quality)}][ext=mp4]/best[height<={int(quality)}]/best[ext=mp4]/best"
             else:
                 opts["format"] = "best[ext=mp4]/best"
@@ -1430,6 +1451,219 @@ async def _progress_ticker(status_msg, progress_state: dict, header: str, stop_e
                 pass  # (مثلاً "message not modified") — بی‌اهمیت، tick بعدی درستش می‌کنه
 
 
+# =========================================================
+#  🦇 GOTHAM FAST YOUTUBE DOWNLOADER — MAX SPEED MODE
+# =========================================================
+# مسیر کاملاً جدا و افزوده، فقط برای یوتیوب. منوی کیفیت قبلی
+# (_offer_youtube_quality_menu و توابع مرتبطش پایین‌تر تو همین فایل) و مسیر
+# عمومیِ اشتراکی‌ی بقیه‌ی پلتفرم‌ها (پایین‌تر تو downloader_link_handler)
+# دست‌نخورده باقی می‌مونن — این تابع فقط جایگزینِ فراخوانیِ منوی کیفیت برای
+# یوتیوب می‌شه، هیچ پلتفرم دیگه‌ای رو لمس نمی‌کنه.
+#
+# رفتار: لینک -> بدون منو/بدون سوال -> دانلود سریع‌ترین فرمت آماده (بدون
+# نیاز به merge) -> بدون MP3/فشرده‌سازی/تغییر رزولوشن/لوگو -> ارسال مستقیم.
+
+# جلوگیری از دانلود چندباره‌ی هم‌زمان برای همون کاربر/همون لینک (مثلاً پیام
+# تکراری سریع یا صدا زده‌شدن دوباره‌ی هندلر).
+_YT_FAST_INFLIGHT = set()  # {(user_id, url)}
+
+
+async def _send_with_telegram_retry(coro_factory, job_id: str, max_attempts: int = 3):
+    """coro_factory: تابع بدون-آرگومان که هر بار یه coroutine تازه می‌سازه
+    (چون فایل باید هر تلاش از اول باز بشه). RetryAfter (Flood control) و
+    TimedOut تلگرام رو با Backoff محدود (نه بی‌نهایت) مدیریت می‌کنه؛ بقیه‌ی
+    خطاها مستقیم بالا پرتاب می‌شن تا فراخوان به Fallback بعدی (مثلاً Document)
+    بره."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await coro_factory()
+        except RetryAfter as e:
+            wait = float(getattr(e, "retry_after", 5) or 5)
+            if attempt >= max_attempts:
+                log.warning(f"[dl:{job_id}] RetryAfter بعد از {attempt} تلاش رها شد (wait={wait}s)")
+                raise
+            log.info(f"[dl:{job_id}] Telegram RetryAfter — {wait}s صبر (تلاش {attempt}/{max_attempts})")
+            await asyncio.sleep(wait + 0.5)
+        except TimedOut:
+            if attempt >= max_attempts:
+                log.warning(f"[dl:{job_id}] TimedOut بعد از {attempt} تلاش رها شد")
+                raise
+            await asyncio.sleep(1.5 * attempt)
+
+
+async def _fast_youtube_download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, job_id: str):
+    """🦇 GOTHAM FAST MODE: بدون منوی کیفیت، بدون MP3، بدون فشرده‌سازی/تغییر
+    رزولوشن/لوگو/FFmpeg processing روتین. لینک -> بهترین فایل MP4 آماده
+    (ترجیحاً بدون نیاز به merge) -> ارسال مستقیم."""
+    msg = update.effective_message
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    dedup_key = (uid, url)
+    if dedup_key in _YT_FAST_INFLIGHT:
+        _log_job(job_id, platform="youtube", url=url, user_id=uid, stage="fast-duplicate-ignored")
+        return
+    _YT_FAST_INFLIGHT.add(dedup_key)
+
+    try:
+        try:
+            status = await msg.reply_text("🦇 Gotham Downloader\n\n🎬 دریافت ویدئو...")
+        except Exception as e:
+            log.warning(f"[dl:{job_id}] fast-yt initial status reply failed ({e}); falling back to plain send_message")
+            status = await context.bot.send_message(chat_id, "🦇 Gotham Downloader\n\n🎬 دریافت ویدئو...")
+
+        progress_state = {"status": "downloading", "total": 0, "downloaded": 0}
+        stop_event = asyncio.Event()
+        ticker = asyncio.create_task(
+            _progress_ticker(status, progress_state, "🦇 Gotham Downloader", stop_event)
+        )
+
+        start_ts = time.monotonic()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                filepath, info = await _download_with_retry(
+                    url, tmpdir, "youtube", job_id, progress_state, quality="fast"
+                )
+            except asyncio.TimeoutError:
+                log.warning(f"[dl:{job_id}] fast-yt timeout url={url} user_id={uid} "
+                            f"after={time.monotonic() - start_ts:.1f}s")
+                stop_event.set()
+                try:
+                    await ticker
+                except Exception:
+                    pass
+                await status.edit_text("❌ دانلود انجام نشد\nعلت: ⏱ زمان دانلود تمام شد.")
+                return
+            except Exception as e:
+                log.exception(f"[dl:{job_id}] fast-yt download failed url={url} user_id={uid}")
+                stop_event.set()
+                try:
+                    await ticker
+                except Exception:
+                    pass
+                reason, _ = _classify_download_error(str(e))
+                await status.edit_text(f"❌ دانلود انجام نشد\nعلت: {reason}")
+                return
+            finally:
+                stop_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
+
+            download_duration = time.monotonic() - start_ts
+
+            if not filepath or not os.path.exists(filepath):
+                log.error(f"[dl:{job_id}] fast-yt output missing url={url} user_id={uid}")
+                await status.edit_text(
+                    "❌ دانلود انجام نشد\nعلت: پلتفرم فایل خروجی معتبری برنگردوند — معمولاً یعنی فرمت "
+                    "این ویدیو توسط ربات پشتیبانی نمی‌شه."
+                )
+                return
+
+            real_size = os.path.getsize(filepath)
+            title = (info.get("title") or "").strip() if isinstance(info, dict) else ""
+            caption = f"🎬 {title}\n\n🦇 Gotham Downloader" if title else "🦇 Gotham Downloader"
+
+            _log_job(
+                job_id, platform="youtube", url=url, user_id=uid, chat_id=chat_id,
+                output_path=filepath, file_size=real_size,
+                download_duration=round(download_duration, 1),
+                extractor=info.get("extractor") if isinstance(info, dict) else None,
+                selected_format=info.get("format_id") if isinstance(info, dict) else None,
+                stage="fast-downloaded",
+            )
+
+            # ⚡ بدون پردازش روتین: این فقط یه Safety-Net پایداریه — اگه فایل
+            # خام از قبل سالم باشه (Gate رو Pass کنه، که برای فایل MP4 آماده‌ی
+            # یوتیوب معمولاً همینه)، هیچ remux/re-encode ای انجام نمی‌شه و همون
+            # فایل خام مستقیم فرستاده می‌شه؛ فقط وقتی فایل واقعاً خراب باشه
+            # (moov atom ناقص و...) یه remux سریع (بدون افت کیفیت) امتحان می‌شه.
+            ext = os.path.splitext(filepath)[1].lower()
+            send_path = filepath
+            v_duration = v_width = v_height = None
+            if ext in _VIDEO_EXTS:
+                try:
+                    send_path, v_duration, v_width, v_height = await asyncio.to_thread(
+                        _fix_video_for_telegram, filepath, job_id
+                    )
+                except Exception as e:
+                    log.warning(f"[dl:{job_id}] fast-yt video fixup failed, sending raw file: {e}")
+                    send_path = filepath
+
+            ok, reason = await asyncio.to_thread(_validate_media_file, send_path)
+            if not ok:
+                log.error(f"[dl:{job_id}] fast-yt output failed validation: {reason} path={send_path!r}")
+                await status.edit_text(f"❌ دانلود انجام نشد\nعلت: 🩹 فایل دریافتی سالم نبود ({reason})")
+                return
+
+            v_thumb = None
+            try:
+                v_thumb = await asyncio.to_thread(_make_thumbnail, send_path, v_duration, job_id)
+            except Exception as e:
+                log.info(f"[dl:{job_id}] fast-yt thumbnail step failed: {e}")
+
+            async def _do_send_video(with_thumb: bool):
+                tf = None
+                if with_thumb and v_thumb and os.path.exists(v_thumb):
+                    tf = open(v_thumb, "rb")
+                try:
+                    with open(send_path, "rb") as f:
+                        await msg.reply_video(
+                            f, caption=caption, supports_streaming=True,
+                            duration=int(v_duration) if v_duration else None,
+                            width=v_width or None, height=v_height or None,
+                            thumbnail=tf,
+                        )
+                finally:
+                    if tf:
+                        try:
+                            tf.close()
+                        except Exception:
+                            pass
+
+            async def _do_send_document():
+                with open(send_path, "rb") as f:
+                    await msg.reply_document(f, caption=caption)
+
+            try:
+                try:
+                    await _send_with_telegram_retry(lambda: _do_send_video(True), job_id)
+                    _log_job(job_id, platform="youtube", url=url, stage="fast-sent")
+                except Exception as e_thumb:
+                    log.warning(f"[dl:{job_id}] fast-yt send with thumbnail failed ({e_thumb}); "
+                                f"retrying same file without thumbnail")
+                    await _send_with_telegram_retry(lambda: _do_send_video(False), job_id)
+                    _log_job(job_id, platform="youtube", url=url, stage="fast-sent-without-thumbnail")
+            except Exception as e:
+                log.warning(f"[dl:{job_id}] fast-yt video send failed, fallback to document: {e}")
+                try:
+                    await _send_with_telegram_retry(lambda: _do_send_document(), job_id)
+                    _log_job(job_id, platform="youtube", url=url, stage="fast-sent-as-document")
+                except Exception:
+                    log.exception(f"[dl:{job_id}] fast-yt document fallback also failed")
+                    try:
+                        await status.edit_text(
+                            "❌ ارسال فایل انجام نشد\nعلت: 📦 حجم فایل بیشتر از حد مجاز است یا تلگرام "
+                            "موقتاً پاسخ نداد."
+                        )
+                    except Exception:
+                        pass
+                    return
+
+            # 🧹 خروج از بلوک with tempfile.TemporaryDirectory() (پایین‌تر از
+            # اینجا) خودکار کل پوشه‌ی Job (فایل خام + فایل remux احتمالی) رو
+            # پاک می‌کنه — فقط بعد از ارسال موفق به این نقطه می‌رسیم.
+            try:
+                await status.delete()
+            except Exception:
+                pass
+    finally:
+        _YT_FAST_INFLIGHT.discard(dedup_key)
+
+
 async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     uid = update.effective_user.id
@@ -1498,9 +1732,13 @@ async def downloader_link_handler(update: Update, context: ContextTypes.DEFAULT_
     # سقوط می‌کنه — یعنی هیچ رفتار قبلی از دست نمی‌ره، فقط یه لایه‌ی UI
     # اختیاری روی مسیر یوتیوب اضافه شده.
     if platform == "youtube":
-        handled = await _offer_youtube_quality_menu(update, context, url, job_id)
-        if handled:
-            return
+        # 🦇 GOTHAM FAST YOUTUBE DOWNLOADER — MAX SPEED MODE: دیگه منوی
+        # انتخاب کیفیت نشون داده نمی‌شه. مستقیم می‌ره سراغ سریع‌ترین مسیر
+        # ممکن: بدون Merge، بدون MP3، بدون فشرده‌سازی/تغییر رزولوشن.
+        # (_offer_youtube_quality_menu و توابع مرتبطش پایین‌تر تو همین فایل
+        # دست‌نخورده باقی موندن، فقط دیگه از این‌جا صدا زده نمی‌شن.)
+        await _fast_youtube_download_and_send(update, context, url, job_id)
+        return
 
     # 🎬🎵 اینستاگرام Video/Reel و تیک‌تاک: طبق درخواست («اگر کاربر Instagram
     # Video/Reel/Post Video فرستاد، گزینه‌ی 🎵 Audio وجود داشته باشد» — قابلیت
