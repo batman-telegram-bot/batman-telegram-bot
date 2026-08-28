@@ -10,6 +10,52 @@ from datetime import datetime, timezone
 
 from telegram import Bot
 
+# پوشه‌ی خودِ پروژه — برای اینکه بین فریم‌های تراسبک «کد خودمون» و «کتابخونه‌های
+# نصب‌شده (site-packages/telegram/...)» فرق بذاریم و محل واقعی وقوع خطا رو تو
+# کدِ خودمون (نه عمق کتابخونه) گزارش کنیم.
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_project_frame(filename: str) -> bool:
+    try:
+        return os.path.abspath(filename).startswith(_PROJECT_DIR) and (
+            "site-packages" not in filename and "dist-packages" not in filename
+        )
+    except Exception:
+        return False
+
+
+def locate_exception(exc: BaseException) -> dict:
+    """تراسبک یه exception رو دونه‌دونه می‌گرده و دو نقطه رو برمی‌گردونه:
+
+    - 'handler': اولین فریمِ کدِ خودِ پروژه از بالای استک (یعنی نزدیک‌ترین
+      تابعی که واقعاً توسط python-telegram-bot به‌عنوان Handler صدا زده شده).
+    - 'origin': آخرین فریمِ کدِ خودِ پروژه (یعنی دقیقاً همون خطی که Exception
+      واقعاً توش رخ داده — فایل/شماره‌خط/نام تابع).
+
+    اگه اصلاً فریمی از کد خودمون تو تراسبک نبود (خیلی بعیده)، مقادیر None
+    برمی‌گردن؛ چیزی جعل نمی‌شه.
+    """
+    result = {
+        "handler_function": None, "handler_file": None,
+        "origin_function": None, "origin_file": None, "origin_line": None,
+    }
+    try:
+        tb = exc.__traceback__
+        frames = traceback.extract_tb(tb)
+        project_frames = [f for f in frames if _is_project_frame(f.filename)]
+        if project_frames:
+            first = project_frames[0]
+            last = project_frames[-1]
+            result["handler_function"] = first.name
+            result["handler_file"] = os.path.basename(first.filename)
+            result["origin_function"] = last.name
+            result["origin_file"] = os.path.basename(last.filename)
+            result["origin_line"] = last.lineno
+    except Exception:
+        pass
+    return result
+
 RECENT_ERRORS = deque(maxlen=20)
 
 # دسته‌بندی خطاها طبق مشخصات (Exception/API/Handler/Database/AI/Downloader).
@@ -53,16 +99,35 @@ def _clean(value, limit=1200):
     return text[:limit]
 
 
-def remember_error(kind, exc, *, chat_id=None, user_id=None, extra=None):
+def remember_error(kind, exc, *, chat_id=None, user_id=None, extra=None,
+                    update_type=None, callback_data=None):
+    """ثبت کامل یه خطا — شامل traceback کامل، محل دقیق وقوع (فایل/خط/تابع)،
+    و context آپدیتی که باعثش شده. هیچ‌کدوم از این‌ها با try/except قورت داده
+    نمی‌شن؛ اگه دیتایی موجود نباشه فقط None/خالی می‌مونه، جعل نمی‌شه."""
+    loc = locate_exception(exc)
     item = {
         "time": datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
         "kind": _clean(kind, 80),
         "category": _categorize(kind),
+        "exc_type": type(exc).__name__,
         "error": _clean(f"{type(exc).__name__}: {exc}", 1000),
         "chat_id": chat_id,
         "user_id": user_id,
+        "update_type": _clean(update_type, 60) if update_type else "",
+        "callback_data": _clean(callback_data, 200) if callback_data else "",
+        "handler_function": loc["handler_function"],
+        "origin_file": loc["origin_file"],
+        "origin_line": loc["origin_line"],
+        "origin_function": loc["origin_function"],
         "extra": _clean(extra, 500) if extra else "",
-        "traceback": _clean(traceback.format_exc(), 3000),
+        # از exc.__traceback__ مستقیم استفاده می‌شه (نه traceback.format_exc())
+        # چون format_exc() فقط وقتی دقیقه که هنوز تو یه except فعال باشیم؛
+        # exc.__traceback__ مستقل از اینه و همیشه traceback واقعیِ همون
+        # exception رو می‌ده، حتی اگه remember_error دیرتر/از یه لایه‌ی
+        # دیگه صدا زده بشه.
+        "traceback": _clean(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)), 3500
+        ),
     }
     RECENT_ERRORS.appendleft(item)
     return item
@@ -76,10 +141,19 @@ def format_error(item):
         f"❌ خطا: `{item['error']}`",
         f"🕐 زمان: {item['time']}",
     ]
+    # محل دقیق وقوع خطا (فایل/خط/تابع) — اگه از روی traceback پیدا شده باشه.
+    if item.get("origin_file"):
+        lines.append(f"📍 محل: `{item['origin_file']}` خط `{item.get('origin_line')}` — تابع `{item.get('origin_function')}`")
+    if item.get("handler_function") and item.get("handler_function") != item.get("origin_function"):
+        lines.append(f"🎯 Handler: `{item['handler_function']}` (`{item.get('handler_file', '')}`)")
+    if item.get("update_type"):
+        lines.append(f"📨 نوع Update: `{item['update_type']}`")
     if item.get("chat_id") is not None:
         lines.append(f"💬 Chat ID: `{item['chat_id']}`")
     if item.get("user_id") is not None:
         lines.append(f"👤 User ID: `{item['user_id']}`")
+    if item.get("callback_data"):
+        lines.append(f"🔘 Callback Data: `{item['callback_data']}`")
     if item.get("extra"):
         lines += ["", f"📌 جزئیات: {item['extra']}"]
     lines += ["", "📄 Traceback:", f"```text\n{item['traceback']}\n```"]
