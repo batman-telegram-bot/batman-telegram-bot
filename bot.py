@@ -86,6 +86,11 @@ from new_features_extra import register_new_features
 from fortune_and_extras import register_fortune_and_extras
 from reminders import register_reminders
 from media_recognition import register_media_recognition
+from gotham_ai import (
+    register_gotham_ai,
+    gotham_ai_intercept_text,
+    gotham_ai_intercept_photo,
+)
 
 # کلمات شروع بازی‌های games_pack2.py و games_pack4.py که سیستم بازی‌های اصلی
 # (games.py/is_game_text) از اون‌ها خبر نداره - برای همینه که جدا نگه‌شون داشتیم.
@@ -1528,6 +1533,8 @@ def build_panel_main_keyboard(is_owner: bool = False):
          InlineKeyboardButton("🎉 سرگرمی", callback_data="panel:fun")],
         [InlineKeyboardButton("🔐 امنیت", callback_data="panel:security"),
          InlineKeyboardButton("ℹ️ درباره ربات", callback_data="panel:about")],
+        # ✨ بخش سیزدهم: اتصال کامل به FreeLLMAPI (چت/ویژن/فایل/تصویر/ویدیو/صدا)
+        [InlineKeyboardButton("✨ امکانات جدید گاتهام", callback_data="panel:gotham_ai")],
     ]
     last_row = [InlineKeyboardButton("🧩 امکانات دیگر", callback_data="panel:new")]
     if is_owner:
@@ -3457,6 +3464,10 @@ _FOREIGN_CALLBACK_PREFIXES = (
     # 🦇 پنل کنترل Owner (شماره‌ها/کاربران/گروه‌ها) — هندلر مخصوص خودش
     # (owner_control_callback) با pattern جدا ثبت می‌شه؛ دفاع دوم اینجا.
     "ownerinfo:",
+    # ✨ امکانات جدید گاتهام (gotham_ai/) — هندلر مخصوص خودش با pattern
+    # r"^(gai:|panel:gotham_ai$)" ثبت می‌شه؛ دفاع دوم اینجا طبق همون الگوی
+    # همیشگیِ پروژه.
+    "gai:", "panel:gotham_ai",
 )
 
 
@@ -4329,6 +4340,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await postsaz_intercept(update, context):
         return
 
+    # ✨ اگه کاربر تو session «امکانات جدید گاتهام» (AI Chat/تصویر/ویدیو/صدا)
+    # فعاله، این پیام مالِ همون بخشه — نباید شخصیت/بازی روش واکنش نشون بدن.
+    if await gotham_ai_intercept_text(update, context):
+        return
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or ""
@@ -4604,6 +4620,11 @@ async def handle_photo_sticker(update: Update, context: ContextTypes.DEFAULT_TYP
     # 🎬 اگه کاربر تو سشن «پست‌ساز گاتهام» فعاله، این عکس مالِ همون ابزاره
     # (استیکر رو دست نمی‌زنیم چون پست‌ساز فقط عکس/ویدیو/گیف/صدا/متن می‌فهمه).
     if update.message.photo and await postsaz_intercept(update, context):
+        return
+
+    # ✨ اگه کاربر تو session «امکانات جدید گاتهام» فعاله، این عکس مالِ 👁️
+    # تحلیل تصویر (Vision) هست، نه واکنش استیکری شخصیت.
+    if update.message.photo and await gotham_ai_intercept_photo(update, context):
         return
 
     chat_id = update.effective_chat.id
@@ -5127,6 +5148,10 @@ def main():
 
     # --- تشخیص فیلم/سریال از عکس یا ویدیو، تشخیص آهنگ، خلاصه‌ی گروه ---
     register_media_recognition(app)
+
+    # --- ✨ امکانات جدید گاتهام: اتصال کامل به FreeLLMAPI (چت/ویژن/فایل/
+    # تصویر/ویدیو/صدا/مدل‌ها/وضعیت) — کاملاً ماژولار، تو gotham_ai/ ---
+    register_gotham_ai(app, {"db_path": DB_PATH})
 
     # --- ۶ امکان دیگه: فال، اسلات، پرونده روز، کوییز شخصیت، کپسول زمان، شهروند نمونه ---
     register_fortune_and_extras(app, {
